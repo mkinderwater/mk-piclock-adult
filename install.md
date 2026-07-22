@@ -64,18 +64,7 @@ printf 'Using %s\n' "$BOOT_CONFIG"
 sudo cp -a "$BOOT_CONFIG" "$BOOT_CONFIG.backup-$(date +%Y%m%d-%H%M%S)"
 ```
 
-### 2. Enable SPI and I2C
-
-On Raspberry Pi OS, these commands safely enable the standard interfaces:
-
-```bash
-sudo raspi-config nonint do_spi 0
-sudo raspi-config nonint do_i2c 0
-```
-
-`0` means enabled. These commands do not complete the MAX98357A configuration, so the boot file must still be reviewed in the next step.
-
-### 3. Apply the complete `config.txt` block
+### 2. Apply the complete `config.txt` block
 
 Open the active file:
 
@@ -92,6 +81,8 @@ dtparam=i2c_arm=on
 dtparam=audio=off
 dtoverlay=max98357a,no-sdmode
 ```
+
+Do not also run `raspi-config nonint do_spi 0` or `raspi-config nonint do_i2c 0`. Those commands write the equivalent SPI and I2C settings and are redundant when this file is edited directly.
 
 Keep each required line exactly once. Remove or comment out conflicting entries elsewhere in the file, especially:
 
@@ -124,7 +115,7 @@ dtparam=audio=off
 dtoverlay=max98357a,no-sdmode
 ```
 
-### 4. Reboot once
+### 3. Reboot once
 
 A reboot is required after changing `config.txt`:
 
@@ -132,7 +123,7 @@ A reboot is required after changing `config.txt`:
 sudo reboot
 ```
 
-### 5. Verify every boot interface
+### 4. Verify every boot interface
 
 After reboot, confirm SPI and I2C are enabled:
 
