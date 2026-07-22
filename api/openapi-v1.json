@@ -1,0 +1,1902 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "mk-clock-adult API",
+    "version": "1.37",
+    "description": "Local HTTP API for mk-clock-adult. All routes are directly available on the trusted home network."
+  },
+  "servers": [
+    {
+      "url": "http://{clockHost}:{apiPort}",
+      "variables": {
+        "clockHost": {
+          "default": "mk-clock-adult"
+        },
+        "apiPort": {
+          "default": "8080"
+        }
+      }
+    }
+  ],
+  "tags": [
+    {
+      "name": "System"
+    },
+    {
+      "name": "Assets"
+    },
+    {
+      "name": "Display"
+    },
+    {
+      "name": "Configuration"
+    },
+    {
+      "name": "Logs"
+    },
+    {
+      "name": "Weather",
+      "description": "Weather dashboard data"
+    }
+  ],
+  "paths": {
+    "/api/v1": {
+      "get": {
+        "summary": "API discovery",
+        "tags": [
+          "System"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/capabilities": {
+      "get": {
+        "summary": "List capabilities",
+        "tags": [
+          "System"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/openapi.json": {
+      "get": {
+        "summary": "OpenAPI document",
+        "tags": [
+          "System"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/health": {
+      "get": {
+        "summary": "Health check",
+        "tags": [
+          "System"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/status": {
+      "get": {
+        "summary": "Current clock state",
+        "tags": [
+          "System"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "description": "Returns live display, audio, bedtime, touch, font, AHT10 room-sensor, weather, and alarm state. The room_sensor object reports sensor status, device, address, timing, temperature, humidity, timestamp, and the latest error."
+      }
+    },
+    "/api/v1/diagnostics": {
+      "get": {
+        "summary": "Read network diagnostics",
+        "description": "Returns the active IPv4 interface, address, hostname, Wi-Fi SSID and signal, plus network-time synchronization state.",
+        "tags": [
+          "System"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "hostname": {
+                      "type": "string"
+                    },
+                    "interface": {
+                      "type": "string"
+                    },
+                    "ip_address": {
+                      "type": "string"
+                    },
+                    "ssid": {
+                      "type": "string"
+                    },
+                    "wifi_signal_percent": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 100
+                    },
+                    "wifi_signal_dbm": {
+                      "type": "integer"
+                    },
+                    "wifi_signal_available": {
+                      "type": "boolean"
+                    },
+                    "ntp_synchronized": {
+                      "type": "boolean"
+                    },
+                    "system_time_valid": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "hostname",
+                    "interface",
+                    "ip_address",
+                    "ssid",
+                    "wifi_signal_percent",
+                    "wifi_signal_dbm",
+                    "wifi_signal_available",
+                    "ntp_synchronized",
+                    "system_time_valid"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/fonts": {
+      "get": {
+        "summary": "List fonts",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "selected": {
+                      "type": "string",
+                      "description": "Uploaded filename, stable system-font key, or empty for a built-in OLED font."
+                    },
+                    "builtin": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 3
+                    },
+                    "font_size": {
+                      "type": "integer",
+                      "minimum": 18,
+                      "maximum": 54
+                    },
+                    "default_system_key": {
+                      "type": "string"
+                    },
+                    "builtin_fonts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "integer"
+                          },
+                          "name": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "name"
+                        ]
+                      }
+                    },
+                    "system_fonts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "file": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "key",
+                          "name",
+                          "file"
+                        ]
+                      }
+                    },
+                    "uploaded_fonts": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "selected",
+                    "builtin",
+                    "font_size",
+                    "default_system_key",
+                    "builtin_fonts",
+                    "system_fonts",
+                    "uploaded_fonts"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "description": "Returns built-in OLED fonts, installed Linux fonts, uploaded fonts, and the active selection."
+      }
+    },
+    "/api/v1/assets/fonts/file": {
+      "get": {
+        "summary": "Read an uploaded or Linux system font",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "contentEncoding": "binary"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "file",
+            "in": "query",
+            "required": false,
+            "description": "Uploaded font filename.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "query",
+            "required": false,
+            "description": "Stable Linux system-font key.",
+            "schema": {
+              "type": "string",
+              "pattern": "^system:[0-9a-fA-F]{16}$"
+            }
+          }
+        ],
+        "description": "Supply either file for an uploaded font or key for a stable system-font key returned by the font list."
+      }
+    },
+    "/api/v1/assets/music": {
+      "get": {
+        "summary": "List music and ID3 metadata",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "global_volume": {
+                      "type": "integer"
+                    },
+                    "current": {
+                      "type": "string"
+                    },
+                    "tracks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "file": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string"
+                          },
+                          "artist": {
+                            "type": "string"
+                          },
+                          "display": {
+                            "type": "string"
+                          },
+                          "id3": {
+                            "type": "integer",
+                            "enum": [
+                              0,
+                              1
+                            ]
+                          },
+                          "album": {
+                            "type": "string"
+                          },
+                          "year": {
+                            "type": "string"
+                          },
+                          "track": {
+                            "type": "string"
+                          },
+                          "genre": {
+                            "type": "string"
+                          },
+                          "duration_seconds": {
+                            "type": "number",
+                            "format": "double"
+                          },
+                          "duration_estimated": {
+                            "type": "integer",
+                            "enum": [
+                              0,
+                              1
+                            ]
+                          },
+                          "bitrate_kbps": {
+                            "type": "integer"
+                          },
+                          "bitrate_mode": {
+                            "type": "string",
+                            "enum": [
+                              "CBR",
+                              "VBR",
+                              "ABR"
+                            ]
+                          },
+                          "sample_rate_hz": {
+                            "type": "integer",
+                            "format": "int64"
+                          },
+                          "channels": {
+                            "type": "integer"
+                          },
+                          "mpeg_layer": {
+                            "type": "integer"
+                          },
+                          "file_size_bytes": {
+                            "type": "integer",
+                            "format": "int64"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/music/jobs": {
+      "get": {
+        "summary": "List recent MP3 processing jobs",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "jobs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "integer",
+                            "format": "int64"
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "queued",
+                              "processing",
+                              "complete",
+                              "failed"
+                            ]
+                          },
+                          "progress": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 100
+                          },
+                          "file": {
+                            "type": "string"
+                          },
+                          "error": {
+                            "type": "string"
+                          },
+                          "created_at": {
+                            "type": "integer",
+                            "format": "int64"
+                          },
+                          "completed_at": {
+                            "type": "integer",
+                            "format": "int64"
+                          },
+                          "bitrate_kbps": {
+                            "type": "integer",
+                            "enum": [
+                              64,
+                              96,
+                              128,
+                              160
+                            ],
+                            "default": 96
+                          },
+                          "sample_rate_hz": {
+                            "type": "integer",
+                            "enum": [
+                              32000,
+                              44100
+                            ],
+                            "default": 44100
+                          },
+                          "lowpass_hz": {
+                            "type": "integer",
+                            "enum": [
+                              12000,
+                              16000,
+                              18000
+                            ],
+                            "default": 16000
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/music/jobs/clear": {
+      "post": {
+        "summary": "Remove waiting MP3 jobs",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Waiting jobs removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "queued_removed": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "processing_active": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "queued_removed",
+                    "processing_active"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/music/upload": {
+      "post": {
+        "summary": "Upload one or more MP3 files for sequential asynchronous optimization",
+        "tags": [
+          "Assets"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "items": {
+                      "type": "string",
+                      "format": "binary"
+                    }
+                  },
+                  "bitrate_kbps": {
+                    "type": "integer",
+                    "enum": [
+                      64,
+                      96,
+                      128,
+                      160
+                    ],
+                    "default": 96
+                  },
+                  "sample_rate_hz": {
+                    "type": "integer",
+                    "enum": [
+                      32000,
+                      44100
+                    ],
+                    "default": 44100
+                  },
+                  "lowpass_hz": {
+                    "type": "integer",
+                    "enum": [
+                      12000,
+                      16000,
+                      18000
+                    ],
+                    "default": 16000
+                  }
+                },
+                "required": [
+                  "file"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Files accepted as one processing batch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "queued": {
+                      "type": "integer"
+                    },
+                    "skipped": {
+                      "type": "integer"
+                    },
+                    "settings": {
+                      "type": "object",
+                      "properties": {
+                        "bitrate_kbps": {
+                          "type": "integer",
+                          "enum": [
+                            64,
+                            96,
+                            128,
+                            160
+                          ],
+                          "default": 96
+                        },
+                        "sample_rate_hz": {
+                          "type": "integer",
+                          "enum": [
+                            32000,
+                            44100
+                          ],
+                          "default": 44100
+                        },
+                        "lowpass_hz": {
+                          "type": "integer",
+                          "enum": [
+                            12000,
+                            16000,
+                            18000
+                          ],
+                          "default": 16000
+                        }
+                      }
+                    },
+                    "job_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "integer",
+                        "format": "int64"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No valid MP3 files or unsupported settings"
+          },
+          "507": {
+            "description": "Insufficient storage"
+          },
+          "409": {
+            "description": "A batch is already queued or processing, or the job queue lacks capacity"
+          }
+        }
+      }
+    },
+    "/api/v1/assets/music/delete": {
+      "post": {
+        "summary": "Delete one processed music file",
+        "tags": [
+          "Assets"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filename"
+          },
+          "409": {
+            "description": "The same filename is still processing"
+          },
+          "500": {
+            "description": "File could not be deleted"
+          },
+          "503": {
+            "description": "Deleted, but the clock core could not be notified"
+          }
+        }
+      }
+    },
+    "/api/v1/assets/fonts/upload": {
+      "post": {
+        "summary": "Upload a TTF or OTF font",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "contentEncoding": "binary"
+                  }
+                },
+                "required": [
+                  "file"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/fonts/delete": {
+      "post": {
+        "summary": "Delete font",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/music/delete-all": {
+      "post": {
+        "summary": "Delete all music",
+        "tags": [
+          "Assets"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          },
+          "409": {
+            "description": "Music processing is active"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/display/action": {
+      "post": {
+        "summary": "Run display or audio action",
+        "tags": [
+          "Display"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "do": {
+                    "type": "string",
+                    "enum": [
+                      "clock",
+                      "clear",
+                      "stop",
+                      "play-music"
+                    ]
+                  },
+                  "file": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "do"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/display/preview": {
+      "get": {
+        "summary": "Read packed OLED framebuffer",
+        "tags": [
+          "Display"
+        ],
+        "responses": {
+          "200": {
+            "description": "Packed 4-bit 256x64 OLED framebuffer",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/display/brightness-preview": {
+      "post": {
+        "summary": "Temporarily preview brightness",
+        "tags": [
+          "Display"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "brightness_percent": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "hold_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 30
+                  }
+                },
+                "required": [
+                  "brightness_percent"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config/alarms": {
+      "post": {
+        "summary": "Configure one alarm slot",
+        "tags": [
+          "Configuration"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 7
+                  },
+                  "enabled": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "time": {
+                    "type": "string",
+                    "pattern": "^[0-2][0-9]:[0-5][0-9]$"
+                  },
+                  "music_file": {
+                    "type": "string"
+                  },
+                  "start_volume": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "end_volume": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "day0": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "day1": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "day2": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "day3": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "day4": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "day5": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "day6": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "time"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config/audio": {
+      "post": {
+        "summary": "Configure audio",
+        "tags": [
+          "Configuration"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "global_volume": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config/personalization": {
+      "post": {
+        "summary": "Set clock name",
+        "tags": [
+          "Configuration"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "clock_name": {
+                    "type": "string",
+                    "maxLength": 63
+                  }
+                },
+                "required": [
+                  "clock_name"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/config/display": {
+      "post": {
+        "summary": "Configure clock display",
+        "tags": [
+          "Configuration"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "oled_font": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 3
+                  },
+                  "oled_font_file": {
+                    "type": "string",
+                    "description": "Uploaded font filename, stable system-font key, or an empty string to use the selected built-in OLED font."
+                  },
+                  "oled_font_size": {
+                    "type": "integer",
+                    "minimum": 18,
+                    "maximum": 54
+                  },
+                  "clock_24h_mode": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "oled_color": {
+                    "type": "string",
+                    "enum": [
+                      "yellow",
+                      "green",
+                      "white"
+                    ]
+                  },
+                  "bedtime_enabled": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ]
+                  },
+                  "bedtime_dim_percent": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "bedtime_start": {
+                    "type": "string",
+                    "pattern": "^[0-2][0-9]:[0-5][0-9]$"
+                  },
+                  "bedtime_end": {
+                    "type": "string",
+                    "pattern": "^[0-2][0-9]:[0-5][0-9]$"
+                  },
+                  "weather_warning_chime_enabled": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "description": "Use 1 to play the protected built-in message chime when a new non-empty Weather warning type appears."
+                  },
+                  "weather_warning_chime_during_bedtime": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "description": "Use 1 to allow Weather warning chimes during the configured bedtime window; use 0 to silence them during bedtime."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/logs": {
+      "get": {
+        "summary": "Read event log",
+        "tags": [
+          "Logs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/logs/clear": {
+      "post": {
+        "summary": "Clear event log",
+        "tags": [
+          "Logs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/weather": {
+      "post": {
+        "summary": "Update weather dashboard data",
+        "description": "Pushes the ECCC location, resolved current conditions, and three independently configured panel slots to the C core. Each slot explicitly states whether its temperature is available, so missing data is never represented as 0°C.",
+        "tags": [
+          "Weather"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "current_temperature_c",
+                  "humidity_percent",
+                  "precipitation_probability_percent",
+                  "uv_index",
+                  "current_temperature_available",
+                  "current_temperature_is_forecast",
+                  "humidity_available"
+                ],
+                "properties": {
+                  "location": {
+                    "type": "string",
+                    "maxLength": 63,
+                    "description": "Weather location name displayed above the clock in the OLED Weather dashboard.",
+                    "example": "Calgary"
+                  },
+                  "current_temperature_c": {
+                    "type": "integer",
+                    "minimum": -99,
+                    "maximum": 99,
+                    "description": "Resolved current outside temperature. Uses the ECCC observation when available, otherwise the nearest hourly forecast."
+                  },
+                  "current_temperature_available": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "description": "1 when a current outside temperature is available from either an observation or the nearest hourly forecast."
+                  },
+                  "current_temperature_is_forecast": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "description": "1 when current_temperature_c was obtained from the nearest hourly forecast because currentConditions did not contain a temperature."
+                  },
+                  "humidity_percent": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "humidity_available": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "description": "1 when relative humidity was present in ECCC currentConditions. Hourly forecast data is not used to invent humidity."
+                  },
+                  "observed_at": {
+                    "type": "integer",
+                    "format": "int64"
+                  },
+                  "slot0_kind": {
+                    "type": "string",
+                    "enum": [
+                      "room",
+                      "outside",
+                      "forecast"
+                    ],
+                    "description": "Panel source kind. ROOM is rendered from the local AHT10; OUTSIDE and forecast use weather slot data."
+                  },
+                  "slot0_label": {
+                    "type": "string",
+                    "maxLength": 7,
+                    "description": "Uppercase OLED panel label."
+                  },
+                  "slot0_date_label": {
+                    "type": "string",
+                    "maxLength": 15,
+                    "description": "Optional uppercase date displayed when the selected forecast falls on a later local date.",
+                    "example": "JULY 23"
+                  },
+                  "slot0_temperature_available": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "description": "1 when slotN_temperature_c is valid. A missing temperature is displayed as --° rather than 0°C."
+                  },
+                  "slot0_temperature_c": {
+                    "type": "integer",
+                    "minimum": -99,
+                    "maximum": 99,
+                    "description": "Panel temperature when slotN_temperature_available is 1. Ignored for ROOM rendering."
+                  },
+                  "slot0_precipitation_probability_percent": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Hourly probability of precipitation. Ignored for ROOM rendering; zero hides the percentage on the OLED."
+                  },
+                  "slot0_icon": {
+                    "type": "string",
+                    "enum": [
+                      "clear",
+                      "partly",
+                      "cloudy",
+                      "rain",
+                      "storm",
+                      "snow",
+                      "wind",
+                      "fog"
+                    ],
+                    "description": "Weather icon for OUTSIDE or forecast. ROOM uses the AHT10 sensor-state sprite."
+                  },
+                  "slot1_kind": {
+                    "type": "string",
+                    "enum": [
+                      "room",
+                      "outside",
+                      "forecast"
+                    ],
+                    "description": "Panel source kind. ROOM is rendered from the local AHT10; OUTSIDE and forecast use weather slot data."
+                  },
+                  "slot1_label": {
+                    "type": "string",
+                    "maxLength": 7,
+                    "description": "Uppercase OLED panel label."
+                  },
+                  "slot1_date_label": {
+                    "type": "string",
+                    "maxLength": 15,
+                    "description": "Optional uppercase date displayed when the selected forecast falls on a later local date.",
+                    "example": "JULY 23"
+                  },
+                  "slot1_temperature_available": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "description": "1 when slotN_temperature_c is valid. A missing temperature is displayed as --° rather than 0°C."
+                  },
+                  "slot1_temperature_c": {
+                    "type": "integer",
+                    "minimum": -99,
+                    "maximum": 99,
+                    "description": "Panel temperature when slotN_temperature_available is 1. Ignored for ROOM rendering."
+                  },
+                  "slot1_precipitation_probability_percent": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Hourly probability of precipitation. Ignored for ROOM rendering; zero hides the percentage on the OLED."
+                  },
+                  "slot1_icon": {
+                    "type": "string",
+                    "enum": [
+                      "clear",
+                      "partly",
+                      "cloudy",
+                      "rain",
+                      "storm",
+                      "snow",
+                      "wind",
+                      "fog"
+                    ],
+                    "description": "Weather icon for OUTSIDE or forecast. ROOM uses the AHT10 sensor-state sprite."
+                  },
+                  "slot2_kind": {
+                    "type": "string",
+                    "enum": [
+                      "room",
+                      "outside",
+                      "forecast"
+                    ],
+                    "description": "Panel source kind. ROOM is rendered from the local AHT10; OUTSIDE and forecast use weather slot data."
+                  },
+                  "slot2_label": {
+                    "type": "string",
+                    "maxLength": 7,
+                    "description": "Uppercase OLED panel label."
+                  },
+                  "slot2_date_label": {
+                    "type": "string",
+                    "maxLength": 15,
+                    "description": "Optional uppercase date displayed when the selected forecast falls on a later local date.",
+                    "example": "JULY 23"
+                  },
+                  "slot2_temperature_available": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "description": "1 when slotN_temperature_c is valid. A missing temperature is displayed as --° rather than 0°C."
+                  },
+                  "slot2_temperature_c": {
+                    "type": "integer",
+                    "minimum": -99,
+                    "maximum": 99,
+                    "description": "Panel temperature when slotN_temperature_available is 1. Ignored for ROOM rendering."
+                  },
+                  "slot2_precipitation_probability_percent": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Hourly probability of precipitation. Ignored for ROOM rendering; zero hides the percentage on the OLED."
+                  },
+                  "slot2_icon": {
+                    "type": "string",
+                    "enum": [
+                      "clear",
+                      "partly",
+                      "cloudy",
+                      "rain",
+                      "storm",
+                      "snow",
+                      "wind",
+                      "fog"
+                    ],
+                    "description": "Weather icon for OUTSIDE or forecast. ROOM uses the AHT10 sensor-state sprite."
+                  },
+                  "precipitation_probability_percent": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "uv_index": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 99
+                  },
+                  "warning_type": {
+                    "type": "string",
+                    "maxLength": 127,
+                    "description": "Highest-priority active ECCC warning type displayed in the OLED footer marquee. Empty when no warning is active.",
+                    "example": "Severe Thunderstorm Warning"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Weather state updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid weather data"
+          },
+          "503": {
+            "description": "Clock core unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/config/weather-source": {
+      "get": {
+        "summary": "Read the ECCC GeoMet city-item URL",
+        "responses": {
+          "200": {
+            "description": "Current weather source"
+          },
+          "500": {
+            "description": "Weather source could not be read"
+          }
+        }
+      },
+      "post": {
+        "summary": "Save the ECCC GeoMet city-item URL",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "url"
+                ],
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "maxLength": 2047,
+                    "pattern": "^https://api\\.weather\\.gc\\.ca/collections/citypageweather-realtime/items/[a-z]{2}-[a-z0-9-]+(?:/)?(?:\\?.*)?$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Weather source saved"
+          },
+          "400": {
+            "description": "Invalid weather source"
+          }
+        }
+      }
+    },
+    "/api/v1/weather/activity": {
+      "get": {
+        "summary": "Read the latest weather refresh result and activity history",
+        "responses": {
+          "200": {
+            "description": "Weather activity log"
+          },
+          "500": {
+            "description": "Weather activity could not be read"
+          }
+        }
+      }
+    },
+    "/api/v1/config/weather-frames": {
+      "get": {
+        "summary": "Read weather panel selections",
+        "description": "Returns independent source selections for all three OLED weather panels.",
+        "responses": {
+          "200": {
+            "description": "Current panel settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "editable": {
+                      "type": "boolean"
+                    },
+                    "slot1": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "room",
+                            "outside",
+                            "offset"
+                          ],
+                          "description": "room = local AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback when observations are unavailable; offset = hourly forecast a fixed number of hours ahead"
+                        },
+                        "offset_hours": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 48
+                        }
+                      },
+                      "required": [
+                        "mode",
+                        "offset_hours"
+                      ]
+                    },
+                    "slot2": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "room",
+                            "outside",
+                            "offset"
+                          ],
+                          "description": "room = local AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback when observations are unavailable; offset = hourly forecast a fixed number of hours ahead"
+                        },
+                        "offset_hours": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 48
+                        }
+                      },
+                      "required": [
+                        "mode",
+                        "offset_hours"
+                      ]
+                    },
+                    "slot3": {
+                      "type": "object",
+                      "properties": {
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "room",
+                            "outside",
+                            "offset"
+                          ],
+                          "description": "room = local AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback when observations are unavailable; offset = hourly forecast a fixed number of hours ahead"
+                        },
+                        "offset_hours": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 48
+                        }
+                      },
+                      "required": [
+                        "mode",
+                        "offset_hours"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Settings could not be read"
+          }
+        }
+      },
+      "post": {
+        "summary": "Configure all three weather panels",
+        "description": "Each panel may independently show ROOM, current OUTSIDE conditions, or an hourly forecast from 1 to 48 hours ahead. Selections may repeat.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "slot1_mode": {
+                    "type": "string",
+                    "enum": [
+                      "room",
+                      "outside",
+                      "offset"
+                    ],
+                    "description": "room = local AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback when observations are unavailable; offset = hourly forecast a fixed number of hours ahead"
+                  },
+                  "slot1_offset_hours": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 48
+                  },
+                  "slot2_mode": {
+                    "type": "string",
+                    "enum": [
+                      "room",
+                      "outside",
+                      "offset"
+                    ],
+                    "description": "room = local AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback when observations are unavailable; offset = hourly forecast a fixed number of hours ahead"
+                  },
+                  "slot2_offset_hours": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 48
+                  },
+                  "slot3_mode": {
+                    "type": "string",
+                    "enum": [
+                      "room",
+                      "outside",
+                      "offset"
+                    ],
+                    "description": "room = local AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback when observations are unavailable; offset = hourly forecast a fixed number of hours ahead"
+                  },
+                  "slot3_offset_hours": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 48
+                  }
+                },
+                "required": [
+                  "slot1_mode",
+                  "slot1_offset_hours",
+                  "slot2_mode",
+                  "slot2_offset_hours",
+                  "slot3_mode",
+                  "slot3_offset_hours"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Panel settings saved and weather refresh requested"
+          },
+          "400": {
+            "description": "Invalid panel settings"
+          }
+        }
+      }
+    }
+  }
+}

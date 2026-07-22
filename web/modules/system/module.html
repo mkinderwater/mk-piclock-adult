@@ -1,0 +1,70 @@
+<section class="panel system-module">
+    <div class="card">
+        <div class="card-title-row">
+            <div>
+                <h2>System</h2>
+                <p class="page-intro">Clock software, service health, and runtime information.</p>
+            </div>
+            <button class="btn alt small-btn" id="system-refresh" type="button">Refresh</button>
+        </div>
+        <table class="info-table"><tbody>
+            <tr><th>Product</th><td id="system-product">Loading...</td></tr>
+            <tr><th>Clock version</th><td id="system-version">Loading...</td></tr>
+            <tr><th>API version</th><td id="system-api-version">Loading...</td></tr>
+            <tr><th>Core protocol</th><td id="system-core-protocol">Loading...</td></tr>
+            <tr><th>Uptime</th><td id="system-uptime">Loading...</td></tr>
+            <tr><th>Clock time</th><td id="system-time">Loading...</td></tr>
+        </tbody></table>
+    </div>
+
+    <div class="card">
+        <div class="card-title-row">
+            <div>
+                <h2>Network</h2>
+                <p class="page-intro">Live connection details from the clock.</p>
+            </div>
+            <span id="network-state" class="badge">Loading</span>
+        </div>
+        <table class="info-table"><tbody>
+            <tr><th>IP address</th><td id="diag-ip">Loading...</td></tr>
+            <tr><th>Hostname</th><td id="diag-hostname">Loading...</td></tr>
+            <tr><th>SSID</th><td id="diag-ssid">Loading...</td></tr>
+            <tr><th>Interface</th><td id="diag-interface">Loading...</td></tr>
+            <tr><th>Wi-Fi signal</th><td id="diag-signal">Loading...</td></tr>
+            <tr><th>NTP synchronized</th><td id="diag-ntp">Loading...</td></tr>
+        </tbody></table>
+    </div>
+
+    <div class="card">
+        <h2>Clock health</h2>
+        <table class="info-table"><tbody>
+            <tr><th>API</th><td><span id="system-api-state" class="badge">Loading</span></td></tr>
+            <tr><th>OLED</th><td><span id="system-oled-state" class="badge">Loading</span></td></tr>
+            <tr><th>Touch sensor</th><td><span id="system-touch-state" class="badge">Loading</span></td></tr>
+            <tr><th>Display mode</th><td id="system-display-mode">Loading...</td></tr>
+            <tr><th>Audio</th><td id="system-audio-state">Loading...</td></tr>
+            <tr><th>Weather data</th><td id="system-weather-state">Loading...</td></tr>
+        </tbody></table>
+    </div>
+
+    <div class="card">
+        <h2>Weather service</h2>
+        <table class="info-table"><tbody>
+            <tr><th>Source URL</th><td id="system-weather-source" class="technical-value">Loading...</td></tr>
+            <tr><th>Last result</th><td id="system-weather-result">Loading...</td></tr>
+            <tr><th>Last message</th><td id="system-weather-message">Loading...</td></tr>
+        </tbody></table>
+    </div>
+
+    <div class="card">
+        <h2>API</h2>
+        <p class="page-intro">The OpenAPI document lists every route included in this adult build.</p>
+        <div class="button-row">
+            <a class="btn alt" href="/api/v1/openapi.json" target="_blank" rel="noopener">Open API specification</a>
+        </div>
+        <details class="advanced-settings">
+            <summary>Capabilities</summary>
+            <div id="system-capabilities" class="system-capabilities small">Loading...</div>
+        </details>
+    </div>
+</section>

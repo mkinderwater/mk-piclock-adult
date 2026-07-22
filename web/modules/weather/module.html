@@ -1,0 +1,157 @@
+<section class="panel weather-source-module">
+    <div class="card">
+        <div class="card-heading-row">
+            <div>
+                <h2>Room Sensor</h2>
+                <p class="page-intro">Any panel configured as ROOM uses the local AHT10 temperature and humidity sensor. ROOM is independent from the ECCC weather source.</p>
+            </div>
+            <img id="room-sensor-icon" class="room-sensor-icon" src="/assets/icons/room-sensor-waiting.png?v=mk-clock-adult-1.2.40" alt="AHT10 room sensor">
+        </div>
+        <table class="info-table">
+            <tbody>
+                <tr><th>Status</th><td id="room-sensor-status">Loading...</td></tr>
+                <tr><th>Temperature</th><td id="room-sensor-temperature">Loading...</td></tr>
+                <tr><th>Humidity</th><td id="room-sensor-humidity">Loading...</td></tr>
+                <tr><th>I2C device</th><td id="room-sensor-device">Loading...</td></tr>
+                <tr><th>Last reading</th><td id="room-sensor-measured">Loading...</td></tr>
+            </tbody>
+        </table>
+        <p id="room-sensor-error" class="small no-margin" role="status" aria-live="polite"></p>
+    </div>
+
+    <div class="card">
+        <div class="card-heading-row">
+            <div>
+                <h2>Weather Source</h2>
+                <p class="page-intro">Change the official ECCC GeoMet city used by the weather dashboard.</p>
+            </div>
+        </div>
+
+        <form id="weather-source-form" method="POST" action="/api/v1/config/weather-source" data-module-handles-submit="true">
+            <label for="weather-source-url">GeoMet source URL</label>
+            <input
+                id="weather-source-url"
+                name="url"
+                type="url"
+                inputmode="url"
+                maxlength="2047"
+                autocomplete="off"
+                autocapitalize="none"
+                spellcheck="false"
+                required
+                aria-describedby="weather-source-help"
+                placeholder="https://api.weather.gc.ca/collections/citypageweather-realtime/items/ab-52?f=json">
+            <p id="weather-source-help" class="small">Edit or replace the complete URL. Saving it changes the source used by the next weather refresh.</p>
+
+            <div class="button-row">
+                <button class="btn" id="weather-source-save" type="submit">Save URL &amp; Refresh</button>
+                <button class="btn alt" id="weather-source-calgary" type="button">Use Calgary</button>
+                <button class="btn alt" id="weather-source-revert" type="button">Revert</button>
+            </div>
+        </form>
+
+        <p id="weather-source-status" class="small no-margin" role="status" aria-live="polite">Loading.</p>
+    </div>
+
+    <div class="card">
+        <div class="card-heading-row">
+            <div>
+                <h2>Weather Panels</h2>
+                <p class="page-intro">Choose the source for each of the three OLED weather panels. ROOM uses the local AHT10 sensor, OUTSIDE uses current ECCC conditions, and Hours ahead selects an hourly forecast.</p>
+            </div>
+        </div>
+
+        <form id="weather-frames-form" method="POST" action="/api/v1/config/weather-frames" data-module-handles-submit="true">
+            <div class="field-row">
+                <fieldset>
+                    <legend>First panel</legend>
+                    <label for="weather-frame-1-mode">Source</label>
+                    <select id="weather-frame-1-mode" name="slot1_mode">
+                        <option value="room">Room sensor</option>
+                        <option value="outside">Outside now</option>
+                        <option value="offset">Hours ahead</option>
+                    </select>
+                    <label for="weather-frame-1-offset">Hours ahead</label>
+                    <input id="weather-frame-1-offset" name="slot1_offset_hours" type="number" min="1" max="48" step="1" value="1">
+                </fieldset>
+
+                <fieldset>
+                    <legend>Second panel</legend>
+                    <label for="weather-frame-2-mode">Source</label>
+                    <select id="weather-frame-2-mode" name="slot2_mode">
+                        <option value="room">Room sensor</option>
+                        <option value="outside">Outside now</option>
+                        <option value="offset">Hours ahead</option>
+                    </select>
+                    <label for="weather-frame-2-offset">Hours ahead</label>
+                    <input id="weather-frame-2-offset" name="slot2_offset_hours" type="number" min="1" max="48" step="1" value="3">
+                </fieldset>
+
+                <fieldset>
+                    <legend>Third panel</legend>
+                    <label for="weather-frame-3-mode">Source</label>
+                    <select id="weather-frame-3-mode" name="slot3_mode">
+                        <option value="room">Room sensor</option>
+                        <option value="outside">Outside now</option>
+                        <option value="offset">Hours ahead</option>
+                    </select>
+                    <label for="weather-frame-3-offset">Hours ahead</label>
+                    <input id="weather-frame-3-offset" name="slot3_offset_hours" type="number" min="1" max="48" step="1" value="6">
+                </fieldset>
+            </div>
+
+            <p class="small">Panels may repeat a source. Hours ahead is measured from the current time and accepts 1 through 48 hours.</p>
+            <div class="button-row">
+                <button class="btn" id="weather-frames-save" type="submit">Save Panels &amp; Refresh</button>
+                <button class="btn alt" id="weather-frames-defaults" type="button">Use ROOM, +3h, +6h</button>
+            </div>
+        </form>
+        <p id="weather-frames-status" class="small no-margin" role="status" aria-live="polite">Loading.</p>
+    </div>
+
+    <div class="card">
+        <div class="card-heading-row">
+            <div>
+                <h2>Weather Warning Chime</h2>
+                <p class="page-intro">Play the built-in message chime when a new active ECCC warning type appears. Repeated refreshes of the same warning do not chime again.</p>
+            </div>
+        </div>
+
+        <form id="weather-warning-chime-form" method="POST" action="/api/v1/config/display" data-module-handles-submit="true">
+            <div class="field-row">
+                <div>
+                    <label for="weather-warning-chime-enabled">Warning chime</label>
+                    <select id="weather-warning-chime-enabled" name="weather_warning_chime_enabled">
+                        <option value="1">Enabled</option>
+                        <option value="0">Disabled</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="weather-warning-chime-bedtime">During bedtime</label>
+                    <select id="weather-warning-chime-bedtime" name="weather_warning_chime_during_bedtime">
+                        <option value="0">Silence the chime</option>
+                        <option value="1">Allow the chime</option>
+                    </select>
+                </div>
+            </div>
+            <p class="small">The chime uses the clock's global volume, capped at 55%, and is skipped while music or an alarm is already playing.</p>
+            <div class="button-row">
+                <button class="btn" id="weather-warning-chime-save" type="submit">Save Warning Chime</button>
+            </div>
+        </form>
+        <p id="weather-warning-chime-status" class="small no-margin" role="status" aria-live="polite">Loading.</p>
+    </div>
+
+    <div class="card">
+        <div class="card-heading-row">
+            <div>
+                <h2>Weather Activity</h2>
+                <p class="page-intro">Every GeoMet refresh appears here, including ECCC icon codes, pixel-art sprites, and unknown-code substitutions.</p>
+            </div>
+            <button class="btn alt" id="weather-activity-refresh" type="button">Refresh</button>
+        </div>
+
+        <p id="weather-activity-summary" class="small" role="status" aria-live="polite">Loading weather activity.</p>
+        <div id="weather-activity-list" aria-live="polite"></div>
+    </div>
+</section>
