@@ -1,0 +1,4 @@
+# Shared runtime directory. Existing mk-piclock files are not removed.
+# The weather service runs as mk-piclock-api:mk-piclock.
+d /run/mk-piclock 0775 root mk-piclock -
+d /run/mk-piclock/weather-icons 0770 mk-piclock-api mk-piclock -

@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh mk-clock-adult weather every 15 minutes
+
+[Timer]
+OnBootSec=45s
+OnUnitInactiveSec=15min
+AccuracySec=15s
+RandomizedDelaySec=20s
+Persistent=true
+Unit=mk-piclock-weather.service
+
+[Install]
+WantedBy=timers.target

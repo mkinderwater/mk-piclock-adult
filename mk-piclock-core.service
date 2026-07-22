@@ -1,0 +1,43 @@
+[Unit]
+Description=mk-clock-adult hardware and alarm core
+After=network.target sound.target
+
+[Service]
+Type=simple
+User=mk-piclock-core
+Group=mk-piclock
+SupplementaryGroups=audio gpio spi i2c
+Environment=MK_PICLOCK_API_USER=mk-piclock-api
+Environment=MK_AHT10_ENABLED=1
+Environment=MK_AHT10_DEVICE=/dev/i2c-1
+Environment=MK_AHT10_ADDRESS=0x38
+Environment=MK_AHT10_POLL_SECONDS=10
+Environment=MK_AHT10_STALE_SECONDS=120
+ExecStart=/opt/mk-piclock/mk-piclock-core
+WorkingDirectory=/opt/mk-piclock
+Restart=always
+RestartSec=3
+UMask=0027
+LimitRTPRIO=10
+RuntimeDirectory=mk-piclock
+RuntimeDirectoryMode=0770
+
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectKernelLogs=true
+ProtectClock=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET
+ReadWritePaths=/opt/mk-piclock/config /run/mk-piclock
+
+# The core owns the OLED, GPIO touch input, audio and persistent clock state.
+# Its private SOCK_SEQPACKET socket is /run/mk-piclock/core.sock.
+
+[Install]
+WantedBy=multi-user.target

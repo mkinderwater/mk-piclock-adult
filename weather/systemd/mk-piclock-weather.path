@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh mk-clock-adult weather when source or panel settings change
+
+[Path]
+PathChanged=/var/lib/mk-piclock-weather/weather-source.url
+PathChanged=/var/lib/mk-piclock-weather/weather-frames.conf
+Unit=mk-piclock-weather.service
+
+[Install]
+WantedBy=multi-user.target

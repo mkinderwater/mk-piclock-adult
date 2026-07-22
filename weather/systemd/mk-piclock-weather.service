@@ -1,0 +1,41 @@
+[Unit]
+Description=Fetch ECCC GeoMet weather for mk-clock-adult
+Documentation=https://api.weather.gc.ca/collections/citypageweather-realtime
+Wants=network-online.target
+After=network-online.target mk-piclock-api.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/mk-piclock-weather
+ExecStart=/usr/local/lib/mk-piclock-weather/mk-piclock-weather
+TimeoutStartSec=60
+UMask=0022
+
+# The process exits after each fetch. It runs as the same account used by the
+# HTTP API so the GUI-managed source, status, activity, and runtime files share
+# one ownership model. Group mk-piclock grants access to shared clock runtime.
+User=mk-piclock-api
+Group=mk-piclock
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+ReadWritePaths=/run/mk-piclock /var/lib/mk-piclock-weather
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target
