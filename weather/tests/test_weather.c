@@ -80,7 +80,7 @@ static void test_normalization_and_slots(void)
     mp_weather_frames_defaults(&config);
     struct weather_slot slots[3];
     assert(select_clock_slots(normalized, fetched, &config, "UTC", slots, &error));
-    assert(strcmp(slots[0].label, "ROOM") == 0);
+    assert(strcmp(slots[0].label, "INSIDE") == 0);
     assert(strcmp(slots[1].label, "5AM") == 0);
     assert(strcmp(slots[2].label, "8AM") == 0);
     assert(slots[0].kind == MP_WEATHER_SLOT_ROOM);
@@ -134,13 +134,85 @@ static void test_all_panel_modes(void)
     assert(slots[0].kind == MP_WEATHER_SLOT_ROOM);
     assert(slots[1].kind == MP_WEATHER_SLOT_OUTSIDE);
     assert(slots[2].kind == MP_WEATHER_SLOT_FORECAST);
-    assert(strcmp(slots[0].label, "ROOM") == 0);
+    assert(strcmp(slots[0].label, "INSIDE") == 0);
     assert(strcmp(slots[1].label, "OUTSIDE") == 0);
     assert(strcmp(slots[2].label, "8AM") == 0);
     json_object_put(normalized);
     json_object_put(sample);
 }
 
+static void test_today_high_low_panel(void)
+{
+    struct error_info error = {{0}};
+    json_object *sample = load_sample();
+    time_t fetched;
+    assert(parse_iso8601("2026-07-04T02:00:00Z", &fetched));
+    json_object *normalized = normalize_weather(
+        sample, "ab-52",
+        "https://api.weather.gc.ca/collections/citypageweather-realtime/items/ab-52?f=json",
+        6, 12, 5400, 21600, fetched, &error);
+    assert(normalized != NULL);
+
+    struct mp_weather_frames_config config = {
+        .slots = {
+            {MP_WEATHER_FRAME_TODAY, 1, 7},
+            {MP_WEATHER_FRAME_ROOM, 1, 7},
+            {MP_WEATHER_FRAME_OUTSIDE, 1, 7}
+        }
+    };
+    struct weather_slot slots[3];
+    assert(select_clock_slots(normalized, fetched, &config, "UTC", slots, &error));
+    assert(slots[0].kind == MP_WEATHER_SLOT_TODAY);
+    assert(strcmp(slots[0].label, "TODAY") == 0);
+    assert(slots[0].low_temperature_available);
+    assert(slots[0].low_temperature_c == 13);
+    assert(slots[0].low_hour == 8);
+    assert(slots[0].high_temperature_available);
+    assert(slots[0].high_temperature_c == 20);
+    assert(slots[0].high_hour == 2);
+    assert(slots[0].precipitation_probability_percent == 30);
+
+    json_object_put(normalized);
+    json_object_put(sample);
+}
+
+
+
+static void test_specific_time_slots(void)
+{
+    struct error_info error = {{0}};
+    json_object *sample = load_sample();
+    time_t fetched;
+    assert(parse_iso8601("2026-07-04T02:00:00Z", &fetched));
+    json_object *normalized = normalize_weather(
+        sample, "ab-52",
+        "https://api.weather.gc.ca/collections/citypageweather-realtime/items/ab-52?f=json",
+        6, 12, 5400, 21600, fetched, &error);
+    assert(normalized != NULL);
+
+    struct mp_weather_frames_config config = {
+        .slots = {
+            {MP_WEATHER_FRAME_TIME, 1, 5},
+            {MP_WEATHER_FRAME_TIME, 1, 8},
+            {MP_WEATHER_FRAME_ROOM, 1, 7}
+        }
+    };
+    struct weather_slot slots[3];
+    assert(select_clock_slots(normalized, fetched, &config, "UTC", slots, &error));
+    assert(slots[0].kind == MP_WEATHER_SLOT_FORECAST);
+    assert(slots[1].kind == MP_WEATHER_SLOT_FORECAST);
+    assert(strcmp(slots[0].label, "5AM") == 0);
+    assert(strcmp(slots[1].label, "8AM") == 0);
+
+    time_t later;
+    time_t expected;
+    assert(parse_iso8601("2026-07-04T06:30:00Z", &later));
+    assert(parse_iso8601("2026-07-05T05:00:00Z", &expected));
+    assert(local_frame_target(later, &config.slots[0], "UTC") == expected);
+
+    json_object_put(normalized);
+    json_object_put(sample);
+}
 
 
 static void test_duplicate_outside_slots(void)
@@ -235,7 +307,7 @@ static void test_empty_current_conditions_use_hourly_display_fallback(void)
     };
     struct weather_slot slots[3];
     assert(select_clock_slots(normalized, fetched, &config, "UTC", slots, &error));
-    assert(strcmp(slots[0].label, "ROOM") == 0);
+    assert(strcmp(slots[0].label, "INSIDE") == 0);
     assert(strcmp(slots[1].label, "OUTSIDE") == 0);
     assert(strcmp(slots[2].label, "OUTSIDE") == 0);
     assert(slots[0].kind == MP_WEATHER_SLOT_ROOM);
@@ -380,9 +452,9 @@ static void test_active_warning_selection(void)
         6, 12, 5400, 21600, now, &error);
     assert(normalized != NULL);
 
-    char type[128];
-    assert(!active_warning_type(normalized, now, type, sizeof(type)));
-    assert(type[0] == '\0');
+    char descriptions[MP_WEATHER_WARNING_SLOTS][MP_WEATHER_WARNING_TEXT_MAX];
+    assert(active_warning_descriptions(normalized, now, descriptions) == 0);
+    assert(descriptions[0][0] == '\0');
 
     json_object *warnings = json_object_new_array();
     json_object *expired = json_object_new_object();
@@ -404,8 +476,10 @@ static void test_active_warning_selection(void)
     json_object_array_add(warnings, warning);
     json_object_object_add(normalized, "warnings", warnings);
 
-    assert(active_warning_type(normalized, now, type, sizeof(type)));
-    assert(strcmp(type, "SEVERE THUNDERSTORM WARNING") == 0);
+    int active_count = active_warning_descriptions(normalized, now, descriptions);
+    assert(active_count == 2);
+    assert(strcmp(descriptions[0], "FOG ADVISORY") == 0);
+    assert(strcmp(descriptions[1], "SEVERE THUNDERSTORM WARNING") == 0);
 
     json_object_put(normalized);
     json_object_put(sample);
@@ -439,9 +513,9 @@ static void test_eccc_warning_title_format(void)
 
     time_t now;
     assert(parse_iso8601("2026-07-04T02:00:00Z", &now));
-    char title[128];
-    assert(active_warning_type(normalized, now, title, sizeof(title)));
-    assert(strcmp(title, "SEVERE THUNDERSTORM WATCH") == 0);
+    char descriptions[MP_WEATHER_WARNING_SLOTS][MP_WEATHER_WARNING_TEXT_MAX];
+    assert(active_warning_descriptions(normalized, now, descriptions) == 1);
+    assert(strcmp(descriptions[0], "YELLOW WATCH - SEVERE THUNDERSTORM") == 0);
 
     json_object_put(normalized);
     json_object_put(source_warning);
@@ -453,16 +527,46 @@ static void test_eccc_warning_title_variants(void)
     json_object_object_add(warning, "type", json_object_new_string("warning"));
     json_object_object_add(warning, "description", json_object_new_string("YELLOW WARNING - AIR QUALITY"));
     char title[128];
-    assert(warning_display_title(warning, title, sizeof(title)));
-    assert(strcmp(title, "AIR QUALITY WARNING") == 0);
+    assert(warning_display_description(warning, title, sizeof(title)));
+    assert(strcmp(title, "YELLOW WARNING - AIR QUALITY") == 0);
     json_object_put(warning);
 
     warning = json_object_new_object();
     json_object_object_add(warning, "type", json_object_new_string("advisory"));
     json_object_object_add(warning, "description", json_object_new_string("Fog Advisory"));
-    assert(warning_display_title(warning, title, sizeof(title)));
+    assert(warning_display_description(warning, title, sizeof(title)));
     assert(strcmp(title, "FOG ADVISORY") == 0);
     json_object_put(warning);
+}
+
+static void test_multiple_warning_descriptions_are_retained(void)
+{
+    json_object *normalized = json_object_new_object();
+    json_object *warnings = json_object_new_array();
+
+    json_object *air = json_object_new_object();
+    json_object_object_add(air, "type", json_object_new_string("warning"));
+    json_object_object_add(air, "description", json_object_new_string("YELLOW WARNING - AIR QUALITY"));
+    json_object_object_add(air, "colour", json_object_new_string("yellow"));
+    json_object_object_add(air, "expires_at", json_object_new_string("2026-07-23T05:00:56Z"));
+    json_object_array_add(warnings, air);
+
+    json_object *storm = json_object_new_object();
+    json_object_object_add(storm, "type", json_object_new_string("watch"));
+    json_object_object_add(storm, "description", json_object_new_string("ORANGE WATCH - SEVERE THUNDERSTORM"));
+    json_object_object_add(storm, "colour", json_object_new_string("orange"));
+    json_object_object_add(storm, "expires_at", json_object_new_string("2026-07-23T06:00:56Z"));
+    json_object_array_add(warnings, storm);
+
+    json_object_object_add(normalized, "warnings", warnings);
+    time_t now;
+    assert(parse_iso8601("2026-07-22T20:00:00Z", &now));
+    char descriptions[MP_WEATHER_WARNING_SLOTS][MP_WEATHER_WARNING_TEXT_MAX];
+    assert(active_warning_descriptions(normalized, now, descriptions) == 2);
+    assert(strcmp(descriptions[0], "YELLOW WARNING - AIR QUALITY") == 0);
+    assert(strcmp(descriptions[1], "ORANGE WATCH - SEVERE THUNDERSTORM") == 0);
+
+    json_object_put(normalized);
 }
 
 static void test_eccc_ended_warning_is_inactive(void)
@@ -483,9 +587,9 @@ static void test_eccc_ended_warning_is_inactive(void)
 
     time_t now;
     assert(parse_iso8601("2026-07-22T04:17:33Z", &now));
-    char title[128];
-    assert(!active_warning_type(normalized, now, title, sizeof(title)));
-    assert(title[0] == '\0');
+    char descriptions[MP_WEATHER_WARNING_SLOTS][MP_WEATHER_WARNING_TEXT_MAX];
+    assert(active_warning_descriptions(normalized, now, descriptions) == 0);
+    assert(descriptions[0][0] == '\0');
 
     json_object_put(normalized);
 }
@@ -540,10 +644,13 @@ static void test_frame_config(void)
     const char *content =
         "slot1_mode=room\n"
         "slot1_offset_hours=1\n"
+        "slot1_time_hour=7\n"
         "slot2_mode=outside\n"
         "slot2_offset_hours=2\n"
+        "slot2_time_hour=12\n"
         "slot3_mode=offset\n"
-        "slot3_offset_hours=9\n";
+        "slot3_offset_hours=9\n"
+        "slot3_time_hour=18\n";
     assert(write(fd, content, strlen(content)) == (ssize_t)strlen(content));
     close(fd);
     struct mp_weather_frames_config config;
@@ -553,6 +660,9 @@ static void test_frame_config(void)
     assert(config.slots[1].mode == MP_WEATHER_FRAME_OUTSIDE);
     assert(config.slots[2].mode == MP_WEATHER_FRAME_OFFSET);
     assert(config.slots[2].offset_hours == 9);
+    assert(config.slots[0].time_hour == 7);
+    assert(config.slots[1].time_hour == 12);
+    assert(config.slots[2].time_hour == 18);
     char serialized[384];
     assert(mp_weather_frames_serialize(&config, serialized, sizeof(serialized),
                                        frame_error, sizeof(frame_error)) > 0);
@@ -609,6 +719,57 @@ static void test_frame_config(void)
 }
 
 
+
+static void test_transport_retry_policy(void)
+{
+    assert(weather_transport_retryable(CURLE_GOT_NOTHING));
+    assert(weather_transport_retryable(CURLE_RECV_ERROR));
+    assert(weather_transport_retryable(CURLE_COULDNT_CONNECT));
+    assert(weather_transport_retryable(CURLE_OPERATION_TIMEDOUT));
+    assert(!weather_transport_retryable(CURLE_UNSUPPORTED_PROTOCOL));
+}
+
+static void test_source_aware_cache(void)
+{
+    char cache[] = "/tmp/mk-weather-source-cache.XXXXXX";
+    int fd = mkstemp(cache);
+    assert(fd >= 0);
+    close(fd);
+
+    const char *source =
+        "https://api.weather.gc.ca/collections/citypageweather-realtime/items/bc-72?f=json";
+    json_object *object = json_object_new_object();
+    json_object_object_add(object, "schema_version", json_object_new_int(1));
+    json_object_object_add(object, "source_url", json_object_new_string(source));
+    struct error_info error = {{0}};
+    assert(atomic_write_json(cache, object, &error));
+    json_object_put(object);
+    assert(weather_file_matches_source(cache, source));
+    assert(!weather_file_matches_source(
+        cache,
+        "https://api.weather.gc.ca/collections/citypageweather-realtime/items/ab-52?f=json"));
+
+    char output[] = "/tmp/mk-weather-source-output.XXXXXX";
+    fd = mkstemp(output);
+    assert(fd >= 0);
+    close(fd);
+    unlink(output);
+    assert(!restore_cache_if_needed(
+        cache,
+        output,
+        "https://api.weather.gc.ca/collections/citypageweather-realtime/items/ab-52?f=json"));
+    assert(access(output, F_OK) != 0);
+    assert(restore_cache_if_needed(cache, output, source));
+    assert(weather_file_matches_source(output, source));
+
+    char label[16];
+    uppercase_location_id("bc-72", label, sizeof(label));
+    assert(strcmp(label, "BC-72") == 0);
+
+    unlink(output);
+    unlink(cache);
+}
+
 static void test_icon_pack(void)
 {
     for (int code = 0; code <= 48; code++) {
@@ -662,8 +823,12 @@ int main(void)
 {
     test_source_validation();
     test_source_file_errors();
+    test_transport_retry_policy();
+    test_source_aware_cache();
     test_normalization_and_slots();
     test_all_panel_modes();
+    test_today_high_low_panel();
+    test_specific_time_slots();
     test_duplicate_outside_slots();
     test_duplicate_forecast_offsets();
     test_empty_current_conditions_use_hourly_display_fallback();
@@ -676,6 +841,7 @@ int main(void)
     test_icon_pack();
     test_eccc_warning_title_format();
     test_eccc_warning_title_variants();
+    test_multiple_warning_descriptions_are_retained();
     test_eccc_ended_warning_is_inactive();
     test_icon_fallback();
     test_strict_json();

@@ -3,6 +3,7 @@
 #include <json-c/json.h>
 
 #include "weather_frames.h"
+#include "weather_version.h"
 #include "io_helpers.h"
 #include "compiler_attrs.h"
 #include "ipc_protocol.h"
@@ -24,7 +25,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define WEATHER_VERSION "2.0.10"
+#define WEATHER_VERSION MP_WEATHER_VERSION
 #define DEFAULT_USER_AGENT "mk-piclock-weather/" WEATHER_VERSION
 #define DEFAULT_LOCATION_ID "ab-52"
 #define DEFAULT_SOURCE_CONFIG "/var/lib/mk-piclock-weather/weather-source.url"
@@ -62,6 +63,12 @@ struct weather_slot {
     char date_label[16];
     int temperature_c;
     bool temperature_available;
+    int low_temperature_c;
+    bool low_temperature_available;
+    int high_temperature_c;
+    bool high_temperature_available;
+    int low_hour;
+    int high_hour;
     int precipitation_probability_percent;
     int icon_code;
     char icon[16];
@@ -573,12 +580,15 @@ static size_t weather_curl_write(char *ptr, size_t size, size_t nmemb, void *use
 
 static bool curl_request(const char *url, const char *post_fields, long timeout_seconds,
                          const char *user_agent, size_t response_limit,
-                         const char *protocols, struct memory_buffer *response,
-                         long *http_status, char **content_type, struct error_info *error)
+                         const char *protocols, long http_version, long ip_resolve,
+                         bool fresh_connection, struct memory_buffer *response,
+                         long *http_status, char **content_type, CURLcode *curl_code,
+                         struct error_info *error)
 {
     CURL *curl = curl_easy_init();
     if (!curl) {
         set_error(error, "cannot initialize libcurl");
+        if (curl_code) *curl_code = CURLE_FAILED_INIT;
         return false;
     }
     response->data = NULL;
@@ -599,12 +609,19 @@ static bool curl_request(const char *url, const char *post_fields, long timeout_
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, weather_curl_write);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, protocols);
+    if (http_version != 0) curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, http_version);
+    if (ip_resolve != 0) curl_easy_setopt(curl, CURLOPT_IPRESOLVE, ip_resolve);
+    if (fresh_connection) {
+        curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1L);
+        curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1L);
+    }
     if (post_fields) {
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_fields);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(post_fields));
     }
     CURLcode code = curl_easy_perform(curl);
+    if (curl_code) *curl_code = code;
     if (http_status) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, http_status);
     char *type = NULL;
     curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &type);
@@ -630,28 +647,67 @@ static bool content_type_is_json(const char *content_type)
            strncasecmp(content_type, "text/json", 9) == 0;
 }
 
+static bool weather_transport_retryable(CURLcode code)
+{
+    return code == CURLE_GOT_NOTHING ||
+           code == CURLE_RECV_ERROR ||
+           code == CURLE_COULDNT_CONNECT ||
+           code == CURLE_OPERATION_TIMEDOUT;
+}
+
+static void weather_response_reset(struct memory_buffer *response, char **content_type)
+{
+    if (response) {
+        free(response->data);
+        memset(response, 0, sizeof(*response));
+    }
+    if (content_type) {
+        free(*content_type);
+        *content_type = NULL;
+    }
+}
+
 static json_object *fetch_json(const char *url, int timeout_seconds, const char *user_agent,
                                struct error_info *error)
 {
     struct memory_buffer response = {0};
     long status = 0;
     char *content_type = NULL;
-    if (!curl_request(url, NULL, timeout_seconds, user_agent, MAX_RESPONSE_BYTES,
-                      "https", &response, &status, &content_type, error)) {
-        free(response.data);
-        free(content_type);
+    CURLcode code = CURLE_OK;
+
+    /* ECCC occasionally closes a negotiated connection without sending headers.
+       Prefer HTTP/1.1 for this small JSON request, then retry once over IPv4 with
+       a fresh connection when the first transport attempt fails. */
+    bool ok = curl_request(url, NULL, timeout_seconds, user_agent, MAX_RESPONSE_BYTES,
+                           "https", CURL_HTTP_VERSION_1_1, CURL_IPRESOLVE_WHATEVER,
+                           false, &response, &status, &content_type, &code, error);
+    if (!ok && weather_transport_retryable(code)) {
+        char initial_error[sizeof(error->text)];
+        snprintf(initial_error, sizeof(initial_error), "%s", error->text);
+        weather_response_reset(&response, &content_type);
+        status = 0;
+        code = CURLE_OK;
+        ok = curl_request(url, NULL, timeout_seconds, user_agent, MAX_RESPONSE_BYTES,
+                          "https", CURL_HTTP_VERSION_1_1, CURL_IPRESOLVE_V4,
+                          true, &response, &status, &content_type, &code, error);
+        if (!ok) {
+            char retry_error[sizeof(error->text)];
+            snprintf(retry_error, sizeof(retry_error), "%s", error->text);
+            set_error(error, "%s; IPv4 retry failed: %s", initial_error, retry_error);
+        }
+    }
+    if (!ok) {
+        weather_response_reset(&response, &content_type);
         return NULL;
     }
     if (status < 200 || status >= 300) {
         set_error(error, "GeoMet HTTP error %ld", status);
-        free(response.data);
-        free(content_type);
+        weather_response_reset(&response, &content_type);
         return NULL;
     }
     if (!content_type_is_json(content_type)) {
         set_error(error, "unexpected GeoMet content type: %s", content_type ? content_type : "missing");
-        free(response.data);
-        free(content_type);
+        weather_response_reset(&response, &content_type);
         return NULL;
     }
     free(content_type);
@@ -894,10 +950,47 @@ static bool timezone_is_valid(const char *name)
     return stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
 
-static time_t local_frame_target(time_t now, const struct mp_weather_frame_selection *selection)
+static time_t local_frame_target(time_t now,
+                                 const struct mp_weather_frame_selection *selection,
+                                 const char *timezone_name)
 {
-    if (!selection || selection->mode != MP_WEATHER_FRAME_OFFSET) return now;
-    return now + selection->offset_hours * 3600;
+    if (!selection) return now;
+    if (selection->mode == MP_WEATHER_FRAME_OFFSET)
+        return now + selection->offset_hours * 3600;
+    if (selection->mode != MP_WEATHER_FRAME_TIME || !timezone_name || !*timezone_name)
+        return now;
+
+    const char *old_tz_env = getenv("TZ");
+    char *old_tz = old_tz_env ? strdup(old_tz_env) : NULL;
+    if (setenv("TZ", timezone_name, 1) < 0) {
+        free(old_tz);
+        return now;
+    }
+    tzset();
+
+    struct tm local;
+    localtime_r(&now, &local);
+    local.tm_hour = selection->time_hour;
+    local.tm_min = 0;
+    local.tm_sec = 0;
+    local.tm_isdst = -1;
+
+    time_t target = mktime(&local);
+    if (target != (time_t)-1 && target <= now) {
+        local.tm_mday += 1;
+        local.tm_isdst = -1;
+        target = mktime(&local);
+    }
+
+    if (old_tz) {
+        setenv("TZ", old_tz, 1);
+        free(old_tz);
+    } else {
+        unsetenv("TZ");
+    }
+    tzset();
+
+    return target == (time_t)-1 ? now : target;
 }
 
 static void short_hour_label(time_t timestamp, const char *timezone_name, char output[8])
@@ -1076,6 +1169,86 @@ static bool build_outside_slot(json_object *normalized, time_t now,
     return outside->temperature_available;
 }
 
+static bool build_today_slot(json_object *normalized, time_t now,
+                             const struct hourly_candidate *candidates,
+                             int candidate_count, const char *timezone_name,
+                             struct weather_slot *today)
+{
+    memset(today, 0, sizeof(*today));
+    today->kind = MP_WEATHER_SLOT_TODAY;
+    today->icon_code = UNKNOWN_ICON_CODE;
+    today->low_hour = 0;
+    today->high_hour = 0;
+    today->timestamp = now;
+    snprintf(today->label, sizeof(today->label), "TODAY");
+    snprintf(today->icon, sizeof(today->icon), "unknown");
+
+    const char *old_tz_env = getenv("TZ");
+    char *old_tz = old_tz_env ? strdup(old_tz_env) : NULL;
+    if (setenv("TZ", timezone_name, 1) < 0) {
+        free(old_tz);
+        return false;
+    }
+    tzset();
+
+    struct tm now_local;
+    localtime_r(&now, &now_local);
+    for (int i = 0; i < candidate_count; i++) {
+        struct tm candidate_local;
+        localtime_r(&candidates[i].timestamp, &candidate_local);
+        if (candidate_local.tm_year != now_local.tm_year ||
+            candidate_local.tm_yday != now_local.tm_yday) continue;
+
+        double temperature = 0.0;
+        if (as_number(jget(candidates[i].entry, "temperature_c"), &temperature)) {
+            int rounded = clamp_int((int)lround(temperature), -99, 99);
+            if (!today->low_temperature_available || rounded < today->low_temperature_c) {
+                today->low_temperature_c = rounded;
+                today->low_temperature_available = true;
+                today->low_hour = candidate_local.tm_hour;
+            }
+            if (!today->high_temperature_available || rounded > today->high_temperature_c) {
+                today->high_temperature_c = rounded;
+                today->high_temperature_available = true;
+                today->high_hour = candidate_local.tm_hour;
+            }
+        }
+
+        int precipitation = clamp_int(
+            rounded_json_int(jget(candidates[i].entry,
+                                  "precip_probability_percent"), 0),
+            0, 100);
+        if (precipitation > today->precipitation_probability_percent)
+            today->precipitation_probability_percent = precipitation;
+    }
+
+    json_object *current = jget(normalized, "current");
+    double current_temperature = 0.0;
+    if (as_number(jget(current, "temperature_c"), &current_temperature)) {
+        int rounded = clamp_int((int)lround(current_temperature), -99, 99);
+        if (!today->low_temperature_available || rounded < today->low_temperature_c) {
+            today->low_temperature_c = rounded;
+            today->low_temperature_available = true;
+            today->low_hour = now_local.tm_hour;
+        }
+        if (!today->high_temperature_available || rounded > today->high_temperature_c) {
+            today->high_temperature_c = rounded;
+            today->high_temperature_available = true;
+            today->high_hour = now_local.tm_hour;
+        }
+    }
+
+    if (old_tz) {
+        setenv("TZ", old_tz, 1);
+        free(old_tz);
+    } else {
+        unsetenv("TZ");
+    }
+    tzset();
+
+    return today->low_temperature_available || today->high_temperature_available;
+}
+
 static bool select_clock_slots(json_object *normalized, time_t now,
                                const struct mp_weather_frames_config *frames,
                                const char *timezone_name,
@@ -1088,7 +1261,9 @@ static bool select_clock_slots(json_object *normalized, time_t now,
     }
     memset(slots, 0, sizeof(struct weather_slot) * 3);
 
+    struct hourly_candidate all_candidates[64];
     struct hourly_candidate candidates[64];
+    int all_candidate_count = 0;
     int candidate_count = 0;
     json_object *hourly = jget(normalized, "hourly");
     if (hourly && json_object_is_type(hourly, json_type_array)) {
@@ -1099,14 +1274,23 @@ static bool select_clock_slots(json_object *normalized, time_t now,
             char timestamp_text[128];
             time_t timestamp;
             if (!as_text(jget(entry, "time"), timestamp_text, sizeof(timestamp_text)) ||
-                !parse_iso8601(timestamp_text, &timestamp) || timestamp < now - 1800) continue;
-            candidates[candidate_count++] = (struct hourly_candidate){timestamp, entry};
+                !parse_iso8601(timestamp_text, &timestamp)) continue;
+            all_candidates[all_candidate_count++] =
+                (struct hourly_candidate){timestamp, entry};
+            if (timestamp >= now - 1800)
+                candidates[candidate_count++] =
+                    (struct hourly_candidate){timestamp, entry};
         }
     }
+    qsort(all_candidates, (size_t)all_candidate_count,
+          sizeof(all_candidates[0]), compare_candidates);
     qsort(candidates, (size_t)candidate_count, sizeof(candidates[0]), compare_candidates);
 
     struct weather_slot outside;
     build_outside_slot(normalized, now, candidates, candidate_count, &outside);
+    struct weather_slot today;
+    build_today_slot(normalized, now, all_candidates, all_candidate_count,
+                     timezone_name, &today);
 
     json_object *forecasts = jget(normalized, "forecast");
     int forecast_count = forecasts && json_object_is_type(forecasts, json_type_array)
@@ -1119,7 +1303,7 @@ static bool select_clock_slots(json_object *normalized, time_t now,
             slots[output_index].kind = MP_WEATHER_SLOT_ROOM;
             slots[output_index].icon_code = UNKNOWN_ICON_CODE;
             slots[output_index].timestamp = now;
-            snprintf(slots[output_index].label, sizeof(slots[output_index].label), "ROOM");
+            snprintf(slots[output_index].label, sizeof(slots[output_index].label), "INSIDE");
             snprintf(slots[output_index].icon, sizeof(slots[output_index].icon), "room");
             continue;
         }
@@ -1127,8 +1311,12 @@ static bool select_clock_slots(json_object *normalized, time_t now,
             slots[output_index] = outside;
             continue;
         }
+        if (selection->mode == MP_WEATHER_FRAME_TODAY) {
+            slots[output_index] = today;
+            continue;
+        }
 
-        time_t target = local_frame_target(now, selection);
+        time_t target = local_frame_target(now, selection, timezone_name);
         int chosen = -1;
         for (int i = 0; i < candidate_count; i++) {
             if (candidates[i].timestamp >= target) {
@@ -1296,9 +1484,15 @@ static bool prepare_icons(const struct weather_slot slots[3], const char *librar
     if (!mkdir_p(runtime_dir, 0770, error)) return false;
     for (int i = 0; i < 3; i++) {
         unsigned char raw[WEATHER_ICON_RAW_BYTES];
-        char substitution[128];
-        if (!load_sprite(library_dir, slots[i].icon_code, raw, &result->codes[i],
-                         substitution, sizeof(substitution), error)) return false;
+        char substitution[128] = {0};
+        if (slots[i].kind == MP_WEATHER_SLOT_ROOM ||
+            slots[i].kind == MP_WEATHER_SLOT_TODAY) {
+            memset(raw, 0, sizeof(raw));
+            result->codes[i] = UNKNOWN_ICON_CODE;
+        } else if (!load_sprite(library_dir, slots[i].icon_code, raw, &result->codes[i],
+                                substitution, sizeof(substitution), error)) {
+            return false;
+        }
         char path[PATH_MAX];
         snprintf(path, sizeof(path), "%s/slot%d.raw", runtime_dir, i);
         if (!atomic_write_bytes(path, raw, sizeof(raw), 0644, error)) return false;
@@ -1386,22 +1580,6 @@ static bool append_form_field(CURL *curl, char **form, size_t *used, size_t *cap
 }
 
 
-static int warning_rank(json_object *warning)
-{
-    char priority[64] = "";
-    char colour[64] = "";
-    as_text(jget(warning, "priority"), priority, sizeof(priority));
-    as_text(jget(warning, "colour"), colour, sizeof(colour));
-    for (char *p = priority; *p; p++) *p = (char)tolower((unsigned char)*p);
-    for (char *p = colour; *p; p++) *p = (char)tolower((unsigned char)*p);
-
-    if (strstr(priority, "urgent") || strstr(priority, "extreme") || strstr(colour, "red")) return 4;
-    if (strstr(priority, "high") || strstr(colour, "orange")) return 3;
-    if (strstr(priority, "medium") || strstr(colour, "yellow")) return 2;
-    if (strstr(priority, "low") || strstr(colour, "green")) return 1;
-    return 0;
-}
-
 static void trim_ascii(char *text)
 {
     if (!text || !*text) return;
@@ -1434,83 +1612,87 @@ static bool warning_has_ended(json_object *warning)
 
     /*
      * ECCC can retain a warning record until expiryTime after declaring it
-     * ended.  The type field is the current lifecycle state, so an ended
+     * ended. The type field is the current lifecycle state, so an ended
      * record must not remain visible merely because its cleanup expiry is
-     * still in the future.  The description check protects against payload
+     * still in the future. The description check protects against payload
      * variants that include the lifecycle marker only in the title.
      */
     return strcasecmp(type, "ended") == 0 ||
            ends_with_ci(description, " ended");
 }
 
-static bool warning_display_title(json_object *warning, char *out, size_t out_size)
+static bool warning_display_description(json_object *warning, char *out, size_t out_size)
 {
     if (!warning || !out || out_size == 0) return false;
     out[0] = '\0';
 
-    char type[64] = "";
-    char description[256] = "";
+    char type[MP_WEATHER_WARNING_TEXT_MAX] = "";
+    char description[MP_WEATHER_WARNING_TEXT_MAX] = "";
     (void)as_text(jget(warning, "type"), type, sizeof(type));
     (void)as_text(jget(warning, "description"), description, sizeof(description));
     trim_ascii(type);
     trim_ascii(description);
 
-    const char *event = NULL;
-    if (description[0]) {
-        char *separator = strstr(description, " - ");
-        event = separator ? separator + 3 : description;
-        while (*event && isspace((unsigned char)*event)) event++;
-    }
+    const char *source = description[0] ? description : type;
+    if (!source[0]) return false;
 
-    if (event && *event) {
-        snprintf(out, out_size, "%s", event);
-        trim_ascii(out);
-        if (type[0] && !ends_with_ci(out, type)) {
-            size_t used = strlen(out);
-            if (used + 1 < out_size) {
-                out[used++] = ' ';
-                out[used] = '\0';
-                snprintf(out + used, out_size - used, "%s", type);
-            }
-        }
-    } else if (type[0]) {
-        snprintf(out, out_size, "%s", type);
-    }
-
-    for (char *p = out; *p; p++) *p = (char)toupper((unsigned char)*p);
+    size_t length = strnlen(source, out_size - 1);
+    memcpy(out, source, length);
+    out[length] = '\0';
+    trim_ascii(out);
+    for (char *cursor = out; *cursor; cursor++)
+        *cursor = (char)toupper((unsigned char)*cursor);
     return out[0] != '\0';
 }
 
-static bool active_warning_type(json_object *normalized, time_t now,
-                                char *out, size_t out_size)
+static void copy_warning_text(char *out, size_t out_size, const char *source)
 {
-    if (!out || out_size == 0) return false;
-    out[0] = '\0';
-    json_object *warnings = jget(normalized, "warnings");
-    if (!warnings || !json_object_is_type(warnings, json_type_array)) return false;
+    if (!out || out_size == 0) return;
+    if (!source) source = "";
+    size_t length = strnlen(source, out_size - 1);
+    if (length > 0) memcpy(out, source, length);
+    out[length] = '\0';
+}
 
-    int best_rank = -1;
+static int active_warning_descriptions(
+    json_object *normalized,
+    time_t now,
+    char out[MP_WEATHER_WARNING_SLOTS][MP_WEATHER_WARNING_TEXT_MAX]
+) {
+    if (!out) return 0;
+    memset(out, 0, MP_WEATHER_WARNING_SLOTS * MP_WEATHER_WARNING_TEXT_MAX);
+
+    json_object *warnings = jget(normalized, "warnings");
+    if (!warnings || !json_object_is_type(warnings, json_type_array)) return 0;
+
+    int used = 0;
     int count = json_object_array_length(warnings);
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < count && used < MP_WEATHER_WARNING_SLOTS; i++) {
         json_object *warning = json_object_array_get_idx(warnings, i);
         if (!warning || !json_object_is_type(warning, json_type_object)) continue;
         if (warning_has_ended(warning)) continue;
 
-        char title[256] = "";
-        if (!warning_display_title(warning, title, sizeof(title))) continue;
+        char description[MP_WEATHER_WARNING_TEXT_MAX] = "";
+        if (!warning_display_description(warning, description, sizeof(description))) continue;
 
         char expires_text[128] = "";
         time_t expires = 0;
         if (as_text(jget(warning, "expires_at"), expires_text, sizeof(expires_text)) &&
             parse_iso8601(expires_text, &expires) && expires <= now) continue;
 
-        int rank = warning_rank(warning);
-        if (rank > best_rank) {
-            snprintf(out, out_size, "%s", title);
-            best_rank = rank;
+        bool duplicate = false;
+        for (int j = 0; j < used; j++) {
+            if (strcasecmp(out[j], description) == 0) {
+                duplicate = true;
+                break;
+            }
         }
+        if (duplicate) continue;
+
+        copy_warning_text(out[used], MP_WEATHER_WARNING_TEXT_MAX, description);
+        used++;
     }
-    return out[0] != '\0';
+    return used;
 }
 
 static bool push_clock_weather(const char *api_url, json_object *normalized,
@@ -1539,9 +1721,20 @@ static bool push_clock_weather(const char *api_url, json_object *normalized,
     char location[256] = "";
     as_text(jget(normalized, "location"), location, sizeof(location));
     bool ok = append_form_field(encoder, &form, &used, &capacity, "location", location, error);
-    char warning_type[256] = "";
-    (void)active_warning_type(normalized, now, warning_type, sizeof(warning_type));
-    ok = ok && append_form_field(encoder, &form, &used, &capacity, "warning_type", warning_type, error);
+    char warning_descriptions[MP_WEATHER_WARNING_SLOTS][MP_WEATHER_WARNING_TEXT_MAX];
+    int warning_count = active_warning_descriptions(normalized, now, warning_descriptions);
+    snprintf(value, sizeof(value), "%d", warning_count);
+    ok = ok && append_form_field(encoder, &form, &used, &capacity, "warning_count", value, error);
+    ok = ok && append_form_field(
+        encoder, &form, &used, &capacity, "warning_type",
+        warning_count > 0 ? warning_descriptions[0] : "", error);
+    for (int i = 0; i < MP_WEATHER_WARNING_SLOTS; i++) {
+        char key[48];
+        snprintf(key, sizeof(key), "warning%d_description", i);
+        ok = ok && append_form_field(
+            encoder, &form, &used, &capacity, key,
+            i < warning_count ? warning_descriptions[i] : "", error);
+    }
     json_object *current = jget(normalized, "current");
     struct resolved_current_conditions resolved;
     resolve_current_conditions(normalized, now, &resolved);
@@ -1582,6 +1775,24 @@ static bool push_clock_weather(const char *api_url, json_object *normalized,
         snprintf(key, sizeof(key), "slot%d_temperature_c", i);
         snprintf(value, sizeof(value), "%d", slots[i].temperature_c);
         ok = ok && append_form_field(encoder, &form, &used, &capacity, key, value, error);
+        snprintf(key, sizeof(key), "slot%d_low_temperature_available", i);
+        snprintf(value, sizeof(value), "%d", slots[i].low_temperature_available ? 1 : 0);
+        ok = ok && append_form_field(encoder, &form, &used, &capacity, key, value, error);
+        snprintf(key, sizeof(key), "slot%d_low_temperature_c", i);
+        snprintf(value, sizeof(value), "%d", slots[i].low_temperature_c);
+        ok = ok && append_form_field(encoder, &form, &used, &capacity, key, value, error);
+        snprintf(key, sizeof(key), "slot%d_low_hour", i);
+        snprintf(value, sizeof(value), "%d", slots[i].low_hour);
+        ok = ok && append_form_field(encoder, &form, &used, &capacity, key, value, error);
+        snprintf(key, sizeof(key), "slot%d_high_temperature_available", i);
+        snprintf(value, sizeof(value), "%d", slots[i].high_temperature_available ? 1 : 0);
+        ok = ok && append_form_field(encoder, &form, &used, &capacity, key, value, error);
+        snprintf(key, sizeof(key), "slot%d_high_temperature_c", i);
+        snprintf(value, sizeof(value), "%d", slots[i].high_temperature_c);
+        ok = ok && append_form_field(encoder, &form, &used, &capacity, key, value, error);
+        snprintf(key, sizeof(key), "slot%d_high_hour", i);
+        snprintf(value, sizeof(value), "%d", slots[i].high_hour);
+        ok = ok && append_form_field(encoder, &form, &used, &capacity, key, value, error);
         snprintf(key, sizeof(key), "slot%d_precipitation_probability_percent", i);
         snprintf(value, sizeof(value), "%d", slots[i].precipitation_probability_percent);
         ok = ok && append_form_field(encoder, &form, &used, &capacity, key, value, error);
@@ -1598,8 +1809,8 @@ static bool push_clock_weather(const char *api_url, json_object *normalized,
     long status = 0;
     char *content_type = NULL;
     ok = curl_request(api_url, form, timeout_seconds, user_agent,
-                      MAX_API_RESPONSE_BYTES, "http,https", &response,
-                      &status, &content_type, error);
+                      MAX_API_RESPONSE_BYTES, "http,https", 0, 0, false,
+                      &response, &status, &content_type, NULL, error);
     free(form);
     free(content_type);
     if (!ok) {
@@ -1633,13 +1844,85 @@ static bool push_clock_weather(const char *api_url, json_object *normalized,
     return true;
 }
 
-static bool restore_cache_if_needed(const char *cache_path, const char *output_path)
+static bool weather_file_matches_source(const char *path, const char *source_url)
+{
+    if (!path || !source_url || !*source_url) return false;
+    json_object *document = read_json_file(path);
+    if (!document) return false;
+    char saved_source[4096] = "";
+    bool matches = as_text(jget(document, "source_url"), saved_source, sizeof(saved_source)) &&
+                   strcmp(saved_source, source_url) == 0;
+    json_object_put(document);
+    return matches;
+}
+
+static void clear_previous_source_artifacts(const char *output_path, const char *cache_path,
+                                            const char *icon_runtime_dir)
+{
+    if (output_path) (void)unlink(output_path);
+    if (cache_path) (void)unlink(cache_path);
+    if (!icon_runtime_dir || !*icon_runtime_dir) return;
+    for (int index = 0; index < 3; index++) {
+        char path[PATH_MAX];
+        int written = snprintf(path, sizeof(path), "%s/slot%d.raw", icon_runtime_dir, index);
+        if (written > 0 && (size_t)written < sizeof(path)) (void)unlink(path);
+    }
+}
+
+static void uppercase_location_id(const char *location_id, char *label, size_t label_size)
+{
+    if (!label || label_size == 0) return;
+    label[0] = '\0';
+    if (!location_id) return;
+    size_t used = 0;
+    while (*location_id && used + 1 < label_size) {
+        label[used++] = (char)toupper((unsigned char)*location_id++);
+    }
+    label[used] = '\0';
+}
+
+static bool push_source_pending(const char *api_url, const char *location_id,
+                                const char *frame_path, const char *timezone_name,
+                                int timeout_seconds, const char *user_agent,
+                                struct error_info *error)
+{
+    struct mp_weather_frames_config frames;
+    char frame_error[192];
+    if (mp_weather_frames_read_path(frame_path, &frames, frame_error, sizeof(frame_error)) != 0) {
+        mp_weather_frames_defaults(&frames);
+    }
+
+    char location[128];
+    uppercase_location_id(location_id, location, sizeof(location));
+    if (!location[0]) snprintf(location, sizeof(location), "WEATHER");
+
+    json_object *pending = json_object_new_object();
+    if (!pending) {
+        set_error(error, "out of memory while clearing previous weather source");
+        return false;
+    }
+    json_object_object_add(pending, "location", json_object_new_string(location));
+    json_object_object_add(pending, "current", json_object_new_object());
+
+    time_t now = time(NULL);
+    struct weather_slot slots[3];
+    bool ok = select_clock_slots(pending, now, &frames, timezone_name, slots, error) &&
+              push_clock_weather(api_url, pending, slots, now, timeout_seconds, user_agent, error);
+    json_object_put(pending);
+    return ok;
+}
+
+static bool restore_cache_if_needed(const char *cache_path, const char *output_path,
+                                    const char *source_url)
 {
     if (access(output_path, F_OK) == 0 || access(cache_path, R_OK) != 0) return false;
     json_object *cached = read_json_file(cache_path);
     if (!cached) return false;
     int schema = 0;
-    bool valid = as_int(jget(cached, "schema_version"), &schema) && schema == 1;
+    char cached_source[4096] = "";
+    bool valid = as_int(jget(cached, "schema_version"), &schema) && schema == 1 &&
+                 as_text(jget(cached, "source_url"), cached_source, sizeof(cached_source)) &&
+                 source_url && strcmp(cached_source, source_url) == 0;
     struct error_info ignored = {{0}};
     bool restored = valid && atomic_write_json(output_path, cached, &ignored);
     json_object_put(cached);
@@ -1755,6 +2038,17 @@ int main(void)
         goto failure;
     }
     curl_ready = true;
+
+    if (!weather_file_matches_source(output_path, source_url)) {
+        clear_previous_source_artifacts(output_path, cache_path, icon_runtime_dir);
+        struct error_info pending_error = {{0}};
+        if (!push_source_pending(api_url, location_id, frame_path, timezone_name,
+                                 api_timeout_seconds, user_agent, &pending_error)) {
+            fprintf(stderr, "mk-piclock-weather: could not clear previous source display: %s\n",
+                    pending_error.text[0] ? pending_error.text : "unknown error");
+        }
+    }
+
     if (input_file && *input_file) {
         raw = read_json_file(input_file);
         if (!raw) {
@@ -1840,7 +2134,7 @@ int main(void)
     return 0;
 
 failure: {
-        bool restored = restore_cache_if_needed(cache_path, output_path);
+        bool restored = restore_cache_if_needed(cache_path, output_path, source_url);
         time_t finished = time(NULL);
         char message[640];
         snprintf(message, sizeof(message), "%s", *error.text ? error.text : "unknown weather service error");

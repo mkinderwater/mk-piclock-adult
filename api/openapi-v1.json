@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "mk-clock-adult API",
-    "version": "1.37",
-    "description": "Local HTTP API for mk-clock-adult. All routes are directly available on the trusted home network."
+    "version": "1.44",
+    "description": "Local HTTP API for mk-clock-adult 1.2.62. Includes independently selectable INSIDE temperature fonts, aligned INSIDE humidity, fixed-time and today low / high Weather panel selection, visible-pixel OLED clock centring, alarm-state OLED labelling, ordered multi-warning rotation, backup and restore, and expanded diagnostics."
   },
   "servers": [
     {
@@ -143,13 +143,13 @@
             }
           }
         },
-        "description": "Returns live display, audio, bedtime, touch, font, AHT10 room-sensor, weather, and alarm state. The room_sensor object reports sensor status, device, address, timing, temperature, humidity, timestamp, and the latest error."
+        "description": "Returns live display, audio, bedtime, touch, font, AHT10 inside sensor, ordered active Weather warnings, alarm state, next-alarm details, and the last successful alarm audio start."
       }
     },
     "/api/v1/diagnostics": {
       "get": {
-        "summary": "Read network diagnostics",
-        "description": "Returns the active IPv4 interface, address, hostname, Wi-Fi SSID and signal, plus network-time synchronization state.",
+        "summary": "Read full system diagnostics",
+        "description": "Returns release, platform, identity, network, time, storage, SD-card, service, OLED, touch, AHT10 inside sensor, Weather service, and alarm health.",
         "tags": [
           "System"
         ],
@@ -229,12 +229,12 @@
                   "properties": {
                     "selected": {
                       "type": "string",
-                      "description": "Uploaded filename, stable system-font key, or empty for a built-in OLED font."
+                      "description": "Uploaded filename, stable system-font key, or empty for a built-in OLED font or automatic detection."
                     },
                     "builtin": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 3
+                      "maximum": 4
                     },
                     "font_size": {
                       "type": "integer",
@@ -1011,7 +1011,7 @@
                   "hold_seconds": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 30
+                    "maximum": 40
                   }
                 },
                 "required": [
@@ -1269,11 +1269,15 @@
                   "oled_font": {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": 3
+                    "maximum": 4
                   },
                   "oled_font_file": {
                     "type": "string",
-                    "description": "Uploaded font filename, stable system-font key, or an empty string to use the selected built-in OLED font."
+                    "description": "Uploaded font filename, stable system-font key, or an empty string to use the selected built-in OLED font or automatic detection."
+                  },
+                  "inside_font_file": {
+                    "type": "string",
+                    "description": "Uploaded font filename, stable system-font key, or an empty string to use the clock font for the large INSIDE temperature."
                   },
                   "oled_font_size": {
                     "type": "integer",
@@ -1400,7 +1404,7 @@
     "/api/v1/weather": {
       "post": {
         "summary": "Update weather dashboard data",
-        "description": "Pushes the ECCC location, resolved current conditions, and three independently configured panel slots to the C core. Each slot explicitly states whether its temperature is available, so missing data is never represented as 0°C.",
+        "description": "Pushes the ECCC location, ordered active warning descriptions, resolved current conditions, and three independently configured panel slots to the C core. Warning descriptions remain in source-array order. Each slot explicitly states whether its temperature is available, so missing data is never represented as 0°C.",
         "tags": [
           "Weather"
         ],
@@ -1470,9 +1474,10 @@
                     "enum": [
                       "room",
                       "outside",
-                      "forecast"
+                      "forecast",
+                      "today"
                     ],
-                    "description": "Panel source kind. ROOM is rendered from the local AHT10; OUTSIDE and forecast use weather slot data."
+                    "description": "Panel source kind. TODAY carries daily low, high, occurrence hours, and maximum precipitation probability."
                   },
                   "slot0_label": {
                     "type": "string",
@@ -1497,13 +1502,13 @@
                     "type": "integer",
                     "minimum": -99,
                     "maximum": 99,
-                    "description": "Panel temperature when slotN_temperature_available is 1. Ignored for ROOM rendering."
+                    "description": "Panel temperature when slotN_temperature_available is 1. Ignored for INSIDE rendering."
                   },
                   "slot0_precipitation_probability_percent": {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 100,
-                    "description": "Hourly probability of precipitation. Ignored for ROOM rendering; zero hides the percentage on the OLED."
+                    "description": "Hourly probability of precipitation. Ignored for INSIDE rendering; zero hides the percentage on the OLED."
                   },
                   "slot0_icon": {
                     "type": "string",
@@ -1517,16 +1522,17 @@
                       "wind",
                       "fog"
                     ],
-                    "description": "Weather icon for OUTSIDE or forecast. ROOM uses the AHT10 sensor-state sprite."
+                    "description": "Weather icon for OUTSIDE or forecast. INSIDE renders the local AHT10 temperature and humidity."
                   },
                   "slot1_kind": {
                     "type": "string",
                     "enum": [
                       "room",
                       "outside",
-                      "forecast"
+                      "forecast",
+                      "today"
                     ],
-                    "description": "Panel source kind. ROOM is rendered from the local AHT10; OUTSIDE and forecast use weather slot data."
+                    "description": "Panel source kind. TODAY carries daily low, high, occurrence hours, and maximum precipitation probability."
                   },
                   "slot1_label": {
                     "type": "string",
@@ -1551,13 +1557,13 @@
                     "type": "integer",
                     "minimum": -99,
                     "maximum": 99,
-                    "description": "Panel temperature when slotN_temperature_available is 1. Ignored for ROOM rendering."
+                    "description": "Panel temperature when slotN_temperature_available is 1. Ignored for INSIDE rendering."
                   },
                   "slot1_precipitation_probability_percent": {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 100,
-                    "description": "Hourly probability of precipitation. Ignored for ROOM rendering; zero hides the percentage on the OLED."
+                    "description": "Hourly probability of precipitation. Ignored for INSIDE rendering; zero hides the percentage on the OLED."
                   },
                   "slot1_icon": {
                     "type": "string",
@@ -1571,16 +1577,17 @@
                       "wind",
                       "fog"
                     ],
-                    "description": "Weather icon for OUTSIDE or forecast. ROOM uses the AHT10 sensor-state sprite."
+                    "description": "Weather icon for OUTSIDE or forecast. INSIDE renders the local AHT10 temperature and humidity."
                   },
                   "slot2_kind": {
                     "type": "string",
                     "enum": [
                       "room",
                       "outside",
-                      "forecast"
+                      "forecast",
+                      "today"
                     ],
-                    "description": "Panel source kind. ROOM is rendered from the local AHT10; OUTSIDE and forecast use weather slot data."
+                    "description": "Panel source kind. TODAY carries daily low, high, occurrence hours, and maximum precipitation probability."
                   },
                   "slot2_label": {
                     "type": "string",
@@ -1605,13 +1612,13 @@
                     "type": "integer",
                     "minimum": -99,
                     "maximum": 99,
-                    "description": "Panel temperature when slotN_temperature_available is 1. Ignored for ROOM rendering."
+                    "description": "Panel temperature when slotN_temperature_available is 1. Ignored for INSIDE rendering."
                   },
                   "slot2_precipitation_probability_percent": {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 100,
-                    "description": "Hourly probability of precipitation. Ignored for ROOM rendering; zero hides the percentage on the OLED."
+                    "description": "Hourly probability of precipitation. Ignored for INSIDE rendering; zero hides the percentage on the OLED."
                   },
                   "slot2_icon": {
                     "type": "string",
@@ -1625,7 +1632,7 @@
                       "wind",
                       "fog"
                     ],
-                    "description": "Weather icon for OUTSIDE or forecast. ROOM uses the AHT10 sensor-state sprite."
+                    "description": "Weather icon for OUTSIDE or forecast. INSIDE renders the local AHT10 temperature and humidity."
                   },
                   "precipitation_probability_percent": {
                     "type": "integer",
@@ -1639,9 +1646,175 @@
                   },
                   "warning_type": {
                     "type": "string",
-                    "maxLength": 127,
-                    "description": "Highest-priority active ECCC warning type displayed in the OLED footer marquee. Empty when no warning is active.",
-                    "example": "Severe Thunderstorm Warning"
+                    "maxLength": 255,
+                    "description": "Compatibility field containing the first active Environment Canada warning description. Empty when no warning is active.",
+                    "example": "YELLOW WARNING - AIR QUALITY"
+                  },
+                  "warning_count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8,
+                    "description": "Number of ordered warningN_description fields supplied."
+                  },
+                  "warning0_description": {
+                    "type": "string",
+                    "maxLength": 255,
+                    "description": "Active Environment Canada warning description at source-array position 0. Empty when unused."
+                  },
+                  "warning1_description": {
+                    "type": "string",
+                    "maxLength": 255,
+                    "description": "Active Environment Canada warning description at source-array position 1. Empty when unused."
+                  },
+                  "warning2_description": {
+                    "type": "string",
+                    "maxLength": 255,
+                    "description": "Active Environment Canada warning description at source-array position 2. Empty when unused."
+                  },
+                  "warning3_description": {
+                    "type": "string",
+                    "maxLength": 255,
+                    "description": "Active Environment Canada warning description at source-array position 3. Empty when unused."
+                  },
+                  "warning4_description": {
+                    "type": "string",
+                    "maxLength": 255,
+                    "description": "Active Environment Canada warning description at source-array position 4. Empty when unused."
+                  },
+                  "warning5_description": {
+                    "type": "string",
+                    "maxLength": 255,
+                    "description": "Active Environment Canada warning description at source-array position 5. Empty when unused."
+                  },
+                  "warning6_description": {
+                    "type": "string",
+                    "maxLength": 255,
+                    "description": "Active Environment Canada warning description at source-array position 6. Empty when unused."
+                  },
+                  "warning7_description": {
+                    "type": "string",
+                    "maxLength": 255,
+                    "description": "Active Environment Canada warning description at source-array position 7. Empty when unused."
+                  },
+                  "slot0_low_temperature_available": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "description": "1 when the TODAY low temperature and hour are valid."
+                  },
+                  "slot0_low_temperature_c": {
+                    "type": "integer",
+                    "minimum": -99,
+                    "maximum": 99,
+                    "description": "TODAY low temperature in Celsius."
+                  },
+                  "slot0_low_hour": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23,
+                    "description": "Local hour when the TODAY low occurs."
+                  },
+                  "slot0_high_temperature_available": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "description": "1 when the TODAY high temperature and hour are valid."
+                  },
+                  "slot0_high_temperature_c": {
+                    "type": "integer",
+                    "minimum": -99,
+                    "maximum": 99,
+                    "description": "TODAY high temperature in Celsius."
+                  },
+                  "slot0_high_hour": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23,
+                    "description": "Local hour when the TODAY high occurs."
+                  },
+                  "slot1_low_temperature_available": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "description": "1 when the TODAY low temperature and hour are valid."
+                  },
+                  "slot1_low_temperature_c": {
+                    "type": "integer",
+                    "minimum": -99,
+                    "maximum": 99,
+                    "description": "TODAY low temperature in Celsius."
+                  },
+                  "slot1_low_hour": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23,
+                    "description": "Local hour when the TODAY low occurs."
+                  },
+                  "slot1_high_temperature_available": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "description": "1 when the TODAY high temperature and hour are valid."
+                  },
+                  "slot1_high_temperature_c": {
+                    "type": "integer",
+                    "minimum": -99,
+                    "maximum": 99,
+                    "description": "TODAY high temperature in Celsius."
+                  },
+                  "slot1_high_hour": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23,
+                    "description": "Local hour when the TODAY high occurs."
+                  },
+                  "slot2_low_temperature_available": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "description": "1 when the TODAY low temperature and hour are valid."
+                  },
+                  "slot2_low_temperature_c": {
+                    "type": "integer",
+                    "minimum": -99,
+                    "maximum": 99,
+                    "description": "TODAY low temperature in Celsius."
+                  },
+                  "slot2_low_hour": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23,
+                    "description": "Local hour when the TODAY low occurs."
+                  },
+                  "slot2_high_temperature_available": {
+                    "type": "integer",
+                    "enum": [
+                      0,
+                      1
+                    ],
+                    "description": "1 when the TODAY high temperature and hour are valid."
+                  },
+                  "slot2_high_temperature_c": {
+                    "type": "integer",
+                    "minimum": -99,
+                    "maximum": 99,
+                    "description": "TODAY high temperature in Celsius."
+                  },
+                  "slot2_high_hour": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23,
+                    "description": "Local hour when the TODAY high occurs."
                   }
                 }
               }
@@ -1752,19 +1925,27 @@
                           "enum": [
                             "room",
                             "outside",
-                            "offset"
+                            "today",
+                            "offset",
+                            "time"
                           ],
-                          "description": "room = local AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback when observations are unavailable; offset = hourly forecast a fixed number of hours ahead"
+                          "description": "room = local INSIDE AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback; today = current local day low and high with their forecast hours and the day’s maximum precipitation probability; offset = hourly forecast a fixed number of hours ahead; time = next occurrence of a selected local forecast hour"
                         },
                         "offset_hours": {
                           "type": "integer",
                           "minimum": 1,
                           "maximum": 48
+                        },
+                        "time": {
+                          "type": "string",
+                          "pattern": "^([01]\\d|2[0-3]):00$",
+                          "description": "Specific local forecast hour used when mode is time"
                         }
                       },
                       "required": [
                         "mode",
-                        "offset_hours"
+                        "offset_hours",
+                        "time"
                       ]
                     },
                     "slot2": {
@@ -1775,19 +1956,27 @@
                           "enum": [
                             "room",
                             "outside",
-                            "offset"
+                            "today",
+                            "offset",
+                            "time"
                           ],
-                          "description": "room = local AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback when observations are unavailable; offset = hourly forecast a fixed number of hours ahead"
+                          "description": "room = local INSIDE AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback; today = current local day low and high with their forecast hours and the day’s maximum precipitation probability; offset = hourly forecast a fixed number of hours ahead; time = next occurrence of a selected local forecast hour"
                         },
                         "offset_hours": {
                           "type": "integer",
                           "minimum": 1,
                           "maximum": 48
+                        },
+                        "time": {
+                          "type": "string",
+                          "pattern": "^([01]\\d|2[0-3]):00$",
+                          "description": "Specific local forecast hour used when mode is time"
                         }
                       },
                       "required": [
                         "mode",
-                        "offset_hours"
+                        "offset_hours",
+                        "time"
                       ]
                     },
                     "slot3": {
@@ -1798,19 +1987,27 @@
                           "enum": [
                             "room",
                             "outside",
-                            "offset"
+                            "today",
+                            "offset",
+                            "time"
                           ],
-                          "description": "room = local AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback when observations are unavailable; offset = hourly forecast a fixed number of hours ahead"
+                          "description": "room = local INSIDE AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback; today = current local day low and high with their forecast hours and the day’s maximum precipitation probability; offset = hourly forecast a fixed number of hours ahead; time = next occurrence of a selected local forecast hour"
                         },
                         "offset_hours": {
                           "type": "integer",
                           "minimum": 1,
                           "maximum": 48
+                        },
+                        "time": {
+                          "type": "string",
+                          "pattern": "^([01]\\d|2[0-3]):00$",
+                          "description": "Specific local forecast hour used when mode is time"
                         }
                       },
                       "required": [
                         "mode",
-                        "offset_hours"
+                        "offset_hours",
+                        "time"
                       ]
                     }
                   }
@@ -1825,7 +2022,7 @@
       },
       "post": {
         "summary": "Configure all three weather panels",
-        "description": "Each panel may independently show ROOM, current OUTSIDE conditions, or an hourly forecast from 1 to 48 hours ahead. Selections may repeat.",
+        "description": "Each panel may independently show INSIDE, current OUTSIDE conditions, an hourly forecast from 1 to 48 hours ahead, or the next occurrence of a specific forecast hour. Selections may repeat.",
         "requestBody": {
           "required": true,
           "content": {
@@ -1838,9 +2035,11 @@
                     "enum": [
                       "room",
                       "outside",
-                      "offset"
+                      "today",
+                      "offset",
+                      "time"
                     ],
-                    "description": "room = local AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback when observations are unavailable; offset = hourly forecast a fixed number of hours ahead"
+                    "description": "Panel source: room, outside, today low / high, relative hourly offset, or specific local hour."
                   },
                   "slot1_offset_hours": {
                     "type": "integer",
@@ -1852,9 +2051,11 @@
                     "enum": [
                       "room",
                       "outside",
-                      "offset"
+                      "today",
+                      "offset",
+                      "time"
                     ],
-                    "description": "room = local AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback when observations are unavailable; offset = hourly forecast a fixed number of hours ahead"
+                    "description": "Panel source: room, outside, today low / high, relative hourly offset, or specific local hour."
                   },
                   "slot2_offset_hours": {
                     "type": "integer",
@@ -1866,23 +2067,43 @@
                     "enum": [
                       "room",
                       "outside",
-                      "offset"
+                      "today",
+                      "offset",
+                      "time"
                     ],
-                    "description": "room = local AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback when observations are unavailable; offset = hourly forecast a fixed number of hours ahead"
+                    "description": "Panel source: room, outside, today low / high, relative hourly offset, or specific local hour."
                   },
                   "slot3_offset_hours": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 48
+                  },
+                  "slot1_time": {
+                    "type": "string",
+                    "pattern": "^([01]\\d|2[0-3]):00$",
+                    "description": "Specific local forecast hour used when mode is time"
+                  },
+                  "slot2_time": {
+                    "type": "string",
+                    "pattern": "^([01]\\d|2[0-3]):00$",
+                    "description": "Specific local forecast hour used when mode is time"
+                  },
+                  "slot3_time": {
+                    "type": "string",
+                    "pattern": "^([01]\\d|2[0-3]):00$",
+                    "description": "Specific local forecast hour used when mode is time"
                   }
                 },
                 "required": [
                   "slot1_mode",
                   "slot1_offset_hours",
+                  "slot1_time",
                   "slot2_mode",
                   "slot2_offset_hours",
+                  "slot2_time",
                   "slot3_mode",
-                  "slot3_offset_hours"
+                  "slot3_offset_hours",
+                  "slot3_time"
                 ]
               }
             }
@@ -1894,6 +2115,83 @@
           },
           "400": {
             "description": "Invalid panel settings"
+          }
+        }
+      }
+    },
+    "/api/v1/diagnostics/report": {
+      "get": {
+        "summary": "Download diagnostic report",
+        "tags": [
+          "System"
+        ],
+        "responses": {
+          "200": {
+            "description": "Plain-text diagnostic report",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/backup/download": {
+      "get": {
+        "summary": "Download an adult clock backup",
+        "responses": {
+          "200": {
+            "description": "ZIP containing settings, alarms, uploaded fonts, and Weather configuration",
+            "content": {
+              "application/zip": {}
+            }
+          },
+          "409": {
+            "description": "Another maintenance operation is running"
+          },
+          "500": {
+            "description": "Backup could not be created"
+          }
+        }
+      }
+    },
+    "/api/v1/backup/restore": {
+      "post": {
+        "summary": "Restore an adult clock backup",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "backup"
+                ],
+                "properties": {
+                  "backup": {
+                    "type": "string",
+                    "format": "binary"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Backup restored; music was preserved"
+          },
+          "400": {
+            "description": "Invalid or unsupported backup ZIP"
+          },
+          "409": {
+            "description": "Alarm active or another maintenance operation is running"
+          },
+          "500": {
+            "description": "Restore failed and previous state was restored"
           }
         }
       }
