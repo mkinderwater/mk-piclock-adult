@@ -16,9 +16,11 @@
 struct parsed_frame_selection {
     enum mp_weather_frame_mode mode;
     int offset_hours;
+    int time_hour;
     int legacy_hour;
     int mode_seen;
     int offset_seen;
+    int time_hour_seen;
     int legacy_hour_seen;
 };
 
@@ -56,6 +58,8 @@ const char *mp_weather_frame_mode_name(enum mp_weather_frame_mode mode)
         case MP_WEATHER_FRAME_ROOM: return "room";
         case MP_WEATHER_FRAME_OUTSIDE: return "outside";
         case MP_WEATHER_FRAME_OFFSET: return "offset";
+        case MP_WEATHER_FRAME_TIME: return "time";
+        case MP_WEATHER_FRAME_TODAY: return "today";
         default: return "invalid";
     }
 }
@@ -71,8 +75,16 @@ int mp_weather_frame_mode_parse(const char *value, enum mp_weather_frame_mode *m
         *mode = MP_WEATHER_FRAME_OUTSIDE;
         return 0;
     }
-    if (strcmp(value, "offset") == 0 || strcmp(value, "time") == 0) {
+    if (strcmp(value, "offset") == 0) {
         *mode = MP_WEATHER_FRAME_OFFSET;
+        return 0;
+    }
+    if (strcmp(value, "time") == 0) {
+        *mode = MP_WEATHER_FRAME_TIME;
+        return 0;
+    }
+    if (strcmp(value, "today") == 0 || strcmp(value, "daily") == 0) {
+        *mode = MP_WEATHER_FRAME_TODAY;
         return 0;
     }
     return -1;
@@ -83,9 +95,9 @@ void mp_weather_frames_defaults(struct mp_weather_frames_config *config)
     if (!config) return;
     *config = (struct mp_weather_frames_config){
         .slots = {
-            {MP_WEATHER_FRAME_ROOM, 1},
-            {MP_WEATHER_FRAME_OFFSET, 3},
-            {MP_WEATHER_FRAME_OFFSET, 6}
+            {MP_WEATHER_FRAME_ROOM, 1, 7},
+            {MP_WEATHER_FRAME_OFFSET, 3, 12},
+            {MP_WEATHER_FRAME_OFFSET, 6, 18}
         }
     };
 }
@@ -101,15 +113,22 @@ int mp_weather_frames_validate(const struct mp_weather_frames_config *config,
         const struct mp_weather_frame_selection *selection = &config->slots[index];
         if (selection->mode != MP_WEATHER_FRAME_ROOM &&
             selection->mode != MP_WEATHER_FRAME_OUTSIDE &&
-            selection->mode != MP_WEATHER_FRAME_OFFSET) {
+            selection->mode != MP_WEATHER_FRAME_OFFSET &&
+            selection->mode != MP_WEATHER_FRAME_TIME &&
+            selection->mode != MP_WEATHER_FRAME_TODAY) {
             set_error(error, error_size,
-                      "weather panel mode must be room, outside, or offset");
+                      "weather panel mode must be room, outside, offset, time, or today");
             return -1;
         }
         if (selection->offset_hours < MP_WEATHER_FRAME_OFFSET_MIN ||
             selection->offset_hours > MP_WEATHER_FRAME_OFFSET_MAX) {
             set_error(error, error_size,
                       "weather panel offset must be between 1 and 48 hours");
+            return -1;
+        }
+        if (selection->time_hour < 0 || selection->time_hour > 23) {
+            set_error(error, error_size,
+                      "weather panel time must be between 00:00 and 23:00");
             return -1;
         }
     }
@@ -195,6 +214,15 @@ int mp_weather_frames_read_path(const char *path,
                 return -1;
             }
             parsed[slot].offset_seen = 1;
+        } else if (strcmp(field, "time_hour") == 0) {
+            if (parsed[slot].time_hour_seen ||
+                parse_int_range(value, 0, 23, &parsed[slot].time_hour) != 0) {
+                fclose(file);
+                set_error(error, error_size,
+                          "weather panel time must be between 00:00 and 23:00");
+                return -1;
+            }
+            parsed[slot].time_hour_seen = 1;
         } else if (strcmp(field, "hour") == 0) {
             if (parsed[slot].legacy_hour_seen ||
                 parse_int_range(value, 0, 23, &parsed[slot].legacy_hour) != 0) {
@@ -222,7 +250,7 @@ int mp_weather_frames_read_path(const char *path,
     fclose(file);
 
     const int new_format = parsed[2].mode_seen || parsed[2].offset_seen ||
-                           parsed[2].legacy_hour_seen;
+                           parsed[2].time_hour_seen || parsed[2].legacy_hour_seen;
     if (new_format) {
         for (int index = 0; index < MP_WEATHER_PANEL_COUNT; index++) {
             if (!parsed[index].mode_seen || parsed[index].legacy_hour_seen) {
@@ -238,6 +266,13 @@ int mp_weather_frames_read_path(const char *path,
                           "offset weather panels require offset_hours");
                 return -1;
             }
+            if (parsed[index].time_hour_seen)
+                config->slots[index].time_hour = parsed[index].time_hour;
+            else if (parsed[index].mode == MP_WEATHER_FRAME_TIME) {
+                set_error(error, error_size,
+                          "specific-time weather panels require time_hour");
+                return -1;
+            }
         }
     } else {
         /* 1.2.37 stored only panels 2 and 3. Panel 1 was fixed ROOM. */
@@ -250,6 +285,8 @@ int mp_weather_frames_read_path(const char *path,
             }
             config->slots[index + 1].mode = parsed[index].mode;
             config->slots[index + 1].offset_hours = parsed[index].offset_hours;
+            if (parsed[index].mode == MP_WEATHER_FRAME_TIME)
+                config->slots[index + 1].time_hour = parsed[index].legacy_hour;
         }
     }
 
@@ -275,12 +312,15 @@ int mp_weather_frames_serialize(const struct mp_weather_frames_config *config,
     }
     int length = snprintf(
         output, output_size,
-        "slot1_mode=%s\nslot1_offset_hours=%d\n"
-        "slot2_mode=%s\nslot2_offset_hours=%d\n"
-        "slot3_mode=%s\nslot3_offset_hours=%d\n",
+        "slot1_mode=%s\nslot1_offset_hours=%d\nslot1_time_hour=%d\n"
+        "slot2_mode=%s\nslot2_offset_hours=%d\nslot2_time_hour=%d\n"
+        "slot3_mode=%s\nslot3_offset_hours=%d\nslot3_time_hour=%d\n",
         mp_weather_frame_mode_name(config->slots[0].mode), config->slots[0].offset_hours,
+        config->slots[0].time_hour,
         mp_weather_frame_mode_name(config->slots[1].mode), config->slots[1].offset_hours,
-        mp_weather_frame_mode_name(config->slots[2].mode), config->slots[2].offset_hours);
+        config->slots[1].time_hour,
+        mp_weather_frame_mode_name(config->slots[2].mode), config->slots[2].offset_hours,
+        config->slots[2].time_hour);
     if (length < 0 || (size_t)length >= output_size) {
         set_error(error, error_size, "weather panel settings are too large");
         return -1;
@@ -291,7 +331,7 @@ int mp_weather_frames_serialize(const struct mp_weather_frames_config *config,
 int mp_weather_frames_write(const struct mp_weather_frames_config *config,
                             char *error, size_t error_size)
 {
-    char payload[384];
+    char payload[512];
     int length = mp_weather_frames_serialize(config, payload, sizeof(payload),
                                              error, error_size);
     if (length < 0) return -1;

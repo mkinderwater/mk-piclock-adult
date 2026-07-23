@@ -1,25 +1,36 @@
-# mk-clock-adult 1.2.40 Release Notes
+# mk-clock-adult 1.2.62 Release Notes
 
-Release 1.2.40 consolidates Raspberry Pi boot configuration documentation without changing runtime behavior.
+## Stable Weather warning scrolling
 
-## Installation documentation
+Weather warnings now behave as an atomic OLED animation. Once a warning starts, its text and scroll origin remain fixed until that warning reaches a natural boundary.
 
-- Made `install.md` the single authoritative source for every required `config.txt` modification.
-- Consolidated SPI0, I2C1, onboard-audio disablement, and the MAX98357A overlay into one exact `[all]` block.
-- Added active boot-file detection for `/boot/firmware/config.txt` and legacy `/boot/config.txt`.
-- Added a timestamped backup command before editing the boot file.
-- Added conflict cleanup for disabled SPI/I2C, enabled onboard audio, and duplicate MAX98357A overlays.
-- Clarified that `dtparam=i2c_vc=on` and a separate `dtparam=i2s=on` are not required by this project.
-- Added one reboot sequence and post-boot checks for `/dev/spidev0.0`, `/dev/i2c-1`, the AHT10 address, and the ALSA sound card.
-- Removed repeated boot-setting snippets from `pinouts.md` to prevent documentation drift.
-- Added a regression test that requires the complete authoritative block in `install.md` and rejects copied boot settings in `pinouts.md`.
+For a long warning such as:
 
-## Interfaces
+```text
+YELLOW WARNING - AIR QUALITY
+```
 
-- Product: mk-clock-adult-1.2.40
-- HTTP API: 1.37
-- Private IPC: 23
-- Native Weather: 2.0.10
-- Room sensor: Native AHT10
+the marquee completes one full pixel-accurate cycle before the clock considers a refreshed warning list, advances to another warning, repeats the same warning, or restores the date.
 
-No native behavior, API schema, panel logic, weather logic, AHT10 logic, or runtime assets changed from 1.2.39.
+## Visual behaviour
+
+- Long warnings begin at the footer's left edge.
+- A scrolling warning runs for exactly one complete marquee cycle.
+- The next warning is selected only after that cycle completes.
+- Weather refreshes cannot replace or restart the active text midway through the scroll.
+- The existing 24-pixel gap is retained for seamless repeated scrolling.
+- Short warnings remain centred for at least 12 seconds.
+- Music metadata still has priority over Weather warnings.
+
+## Compatibility
+
+No API, IPC, Weather configuration, or dashboard format changed.
+
+## Versions
+
+```text
+Product:     mk-clock-adult-1.2.62
+HTTP API:    1.44
+Private IPC: 27
+Weather:     Native C 2.0.14
+```

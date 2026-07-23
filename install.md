@@ -1,4 +1,4 @@
-# mk-clock-adult 1.2.40 installation
+# mk-clock-adult 1.2.62 installation
 
 This guide installs or upgrades mk-clock-adult on a Raspberry Pi or compatible Debian system using systemd. Run the commands from the extracted release directory.
 
@@ -37,35 +37,16 @@ pkg-config --modversion libgpiod
 
 ## Configure Raspberry Pi boot interfaces
 
-SPI and I2C are enabled through `raspi-config`. The remaining clock-specific settings are added directly to the active `config.txt`.
+This is the **only authoritative `config.txt` section for this release**. The clock needs all four settings below:
 
-### 1. Enable SPI and I2C
+| Setting | Purpose |
+| --- | --- |
+| `dtparam=spi=on` | Creates SPI0 for the SSD1322 OLED at `/dev/spidev0.0`. |
+| `dtparam=i2c_arm=on` | Creates I2C1 on GPIO2/GPIO3 for the AHT10 at `/dev/i2c-1`. |
+| `dtparam=audio=off` | Disables the onboard audio path before loading the external I2S amplifier. |
+| `dtoverlay=max98357a,no-sdmode` | Loads the MAX98357A I2S sound card without assigning an SD/EN GPIO. |
 
-Confirm `raspi-config` is installed:
-
-```bash
-command -v raspi-config
-```
-
-Enable SPI and I2C:
-
-```bash
-sudo raspi-config nonint do_spi 0
-sudo raspi-config nonint do_i2c 0
-```
-
-A return value of `0` means enabled.
-
-The I2C command performs the complete Raspberry Pi OS configuration:
-
-- Adds `dtparam=i2c_arm=on` to the boot configuration
-- Removes any I2C driver blacklist
-- Adds `i2c-dev` to `/etc/modules`
-- Loads the `i2c-dev` kernel module
-
-Do not manually add another `dtparam=spi=on` or `dtparam=i2c_arm=on` entry.
-
-### 2. Locate and back up the active boot file
+### 1. Locate and back up the active boot file
 
 Current Raspberry Pi OS uses `/boot/firmware/config.txt`. Older images may use `/boot/config.txt`.
 
@@ -83,7 +64,18 @@ printf 'Using %s\n' "$BOOT_CONFIG"
 sudo cp -a "$BOOT_CONFIG" "$BOOT_CONFIG.backup-$(date +%Y%m%d-%H%M%S)"
 ```
 
-### 3. Add the clock-specific boot settings
+### 2. Enable SPI and I2C
+
+On Raspberry Pi OS, these commands safely enable the standard interfaces:
+
+```bash
+sudo raspi-config nonint do_spi 0
+sudo raspi-config nonint do_i2c 0
+```
+
+`0` means enabled. These commands do not complete the MAX98357A configuration, so the boot file must still be reviewed in the next step.
+
+### 3. Apply the complete `config.txt` block
 
 Open the active file:
 
@@ -91,37 +83,17 @@ Open the active file:
 sudo nano "$BOOT_CONFIG"
 ```
 
-Find the existing `[all]` section and add these lines beneath it:
-
-```ini
-gpu_mem=16
-dtparam=audio=off
-dtoverlay=max98357a,no-sdmode
-```
-
-If no `[all]` section exists, add this block at the end:
+Find the existing `[all]` section. Add the following lines beneath it. If no `[all]` section exists, add this block at the end of the file:
 
 ```ini
 [all]
-gpu_mem=16
+dtparam=spi=on
+dtparam=i2c_arm=on
 dtparam=audio=off
 dtoverlay=max98357a,no-sdmode
 ```
 
-The complete boot configuration is produced by both the `raspi-config` commands and the manual block:
-
-| Setting | Configured by | Purpose |
-| --- | --- | --- |
-| `dtparam=spi=on` | `raspi-config` | Enables SPI0 for the SSD1322 OLED. |
-| `dtparam=i2c_arm=on` | `raspi-config` | Enables I2C1 on GPIO2 and GPIO3 for the AHT10. |
-| `i2c-dev` | `raspi-config` | Creates the `/dev/i2c-1` userspace device. |
-| `gpu_mem=16` | Manual | Reserves 16 MB for the GPU. |
-| `dtparam=audio=off` | Manual | Disables the onboard audio device. |
-| `dtoverlay=max98357a,no-sdmode` | Manual | Loads the MAX98357A I2S sound card. |
-
-Keep each setting exactly once.
-
-Remove or comment out conflicting entries, especially:
+Keep each required line exactly once. Remove or comment out conflicting entries elsewhere in the file, especially:
 
 ```ini
 dtparam=spi=off
@@ -129,68 +101,30 @@ dtparam=i2c_arm=off
 dtparam=audio=on
 ```
 
-Remove alternate GPU memory values such as:
-
-```ini
-gpu_mem=32
-gpu_mem=64
-gpu_mem=128
-gpu_mem=256
-```
-
-Remove duplicate or alternate MAX98357A overlays so only this line remains:
+Also remove duplicate or alternate `dtoverlay=max98357a...` lines so only this release's overlay remains:
 
 ```ini
 dtoverlay=max98357a,no-sdmode
 ```
 
-Do not add:
+Do not add `dtparam=i2c_vc=on` for the AHT10. That enables the reserved I2C0 bus, not I2C1 on GPIO2 and GPIO3. Do not add a separate `dtparam=i2s=on`; the MAX98357A overlay configures the required I2S device-tree nodes.
 
-```ini
-dtparam=i2c_vc=on
-```
-
-That setting enables the reserved I2C0 bus, not I2C1 on GPIO2 and GPIO3.
-
-Do not add:
-
-```ini
-dtparam=i2s=on
-```
-
-The MAX98357A overlay configures the required I2S device-tree nodes.
-
-### 4. Inspect the resulting configuration
+Save the file, then inspect all relevant active entries:
 
 ```bash
-sudo grep -nE \
-  '^[[:space:]]*(gpu_mem=|dtparam=(spi|i2c_arm|audio)=|dtoverlay=max98357a)' \
-  "$BOOT_CONFIG"
+sudo grep -nE '^[[:space:]]*(dtparam=(spi|i2c_arm|audio)=|dtoverlay=max98357a)' "$BOOT_CONFIG"
 ```
 
-The effective result must include:
+The effective result must contain:
 
 ```text
 dtparam=spi=on
 dtparam=i2c_arm=on
-gpu_mem=16
 dtparam=audio=off
 dtoverlay=max98357a,no-sdmode
 ```
 
-Confirm that `i2c-dev` was added persistently:
-
-```bash
-grep -E '^[[:space:]]*i2c[-_]dev[[:space:]]*$' /etc/modules
-```
-
-Expected output:
-
-```text
-i2c-dev
-```
-
-### 5. Reboot
+### 4. Reboot once
 
 A reboot is required after changing `config.txt`:
 
@@ -198,7 +132,7 @@ A reboot is required after changing `config.txt`:
 sudo reboot
 ```
 
-### 6. Verify every boot interface
+### 5. Verify every boot interface
 
 After reboot, confirm SPI and I2C are enabled:
 
@@ -213,22 +147,10 @@ Both commands must print:
 0
 ```
 
-Confirm the required kernel device nodes exist:
+Confirm the kernel device nodes exist:
 
 ```bash
 ls -l /dev/spidev0.0 /dev/i2c-1
-```
-
-List the available I2C buses:
-
-```bash
-i2cdetect -l
-```
-
-Confirm the I2C device module is loaded:
-
-```bash
-grep -w i2c_dev /proc/modules
 ```
 
 Confirm the I2S sound card is registered:
@@ -259,15 +181,15 @@ Restart the core after the scan:
 sudo systemctl start mk-piclock-core.service 2>/dev/null || true
 ```
 
-The AHT10 uses address `0x38`. The OLED uses SPI0 and does not conflict with the I2C bus. The MAX98357A uses I2S and does not use `/dev/i2c-1`.
+The AHT10 uses address `0x38`. The OLED uses SPI0 and does not conflict with the I2C bus.
 
 `make install` performs an I2C preflight before stopping or replacing services. On Raspberry Pi OS it checks the persistent I2C state, and on all systems it requires `/dev/i2c-1`. SPI and MAX98357A are verified with the commands above.
 
 ## Extract
 
 ```bash
-unzip mk-clock-adult-1.2.40.zip
-cd mk-clock-adult-1.2.40
+unzip mk-clock-adult-1.2.62.zip
+cd mk-clock-adult-1.2.62
 ```
 
 ## Build
@@ -347,13 +269,13 @@ curl -s http://127.0.0.1:8080/api/v1 | python3 -m json.tool
 Expected compatibility:
 
 ```text
-Product:     mk-clock-adult-1.2.40
-HTTP API:    1.37
-Private IPC: 23
-Weather:     Native C 2.0.10
+Product:     mk-clock-adult-1.2.62
+HTTP API:    1.44
+Private IPC: 27
+Weather:     Native C 2.0.14
 ```
 
-## AHT10 ROOM sensor
+## AHT10 INSIDE sensor
 
 The core polls the AHT10 every 10 seconds. Check its live state:
 
@@ -362,7 +284,7 @@ curl -s http://127.0.0.1:8080/api/v1/status \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["room_sensor"])'
 ```
 
-A working sensor reports `status: active`, a decimal `temperature_c`, `humidity_percent`, and the last `measured_at` timestamp. The OLED ROOM panel shows the fixed thermometer-and-droplet sprite, room temperature, and relative humidity.
+A working sensor reports `status: active`, a decimal `temperature_c`, `humidity_percent`, and the last `measured_at` timestamp. The OLED INSIDE panel shows the live temperature with one decimal place. In **Display > Clock display**, the INSIDE temperature may follow the clock font or use a separate installed Linux or uploaded font. Relative humidity is shown on the same horizontal row as the temperatures in the other Weather panels.
 
 Default systemd settings:
 
@@ -397,9 +319,9 @@ sudo systemctl restart mk-piclock-core.service
 
 Sensor states:
 
-- `active`: current reading and normal sensor sprite
-- `stale`: last reading retained temporarily with the clock-badged stale sprite
-- `error`: no usable reading; `--° --%` and sensor-with-X sprite
+- `active`: current decimal temperature and relative humidity at normal brightness
+- `stale`: last reading retained temporarily and shown dimmed
+- `error`: no usable reading; the OLED shows `--.-°` and `--%`
 - `disabled`: sensor disabled by configuration
 
 ## Weather
@@ -439,15 +361,6 @@ AHT10-specific log lines:
 journalctl -u mk-piclock-core.service -n 200 --no-pager | grep room-sensor
 ```
 
-If `/dev/i2c-1` is missing, confirm the active boot file contains `dtparam=i2c_arm=on`, `/etc/modules` contains `i2c-dev`, and the module is loaded:
-
-```bash
-sudo raspi-config nonint get_i2c
-grep -E '^[[:space:]]*i2c[-_]dev[[:space:]]*$' /etc/modules
-grep -w i2c_dev /proc/modules
-i2cdetect -l
-```
-
 If the service reports permission errors, verify `/dev/i2c-1` exists, the `mk-piclock-core` user belongs to the `i2c` group, and the installed udev rule has assigned the device to that group:
 
 ```bash
@@ -477,7 +390,7 @@ sudo systemctl restart mk-piclock-core.service mk-piclock-api.service
 sudo systemctl start mk-piclock-weather.service
 ```
 
-If the GUI still shows old assets after an upgrade, perform a hard browser refresh. Release 1.2.40 uses a new asset version, so normal browser reloads should fetch the updated files.
+If the GUI still shows old assets after an upgrade, perform a hard browser refresh. Release 1.2.46 uses a new asset version, so normal browser reloads should fetch the updated files.
 
 ## Touch network diagnostics
 
@@ -498,3 +411,9 @@ make uninstall
 ```
 
 Uninstall removes installed binaries, service files, the installed web GUI, API specification, and protected built-in audio files. User-created music and persistent clock configuration under `/opt/mk-piclock` are not broadly deleted by this target.
+
+## Backup and restore
+
+Open **System > Backup and restore**. **Download backup** creates a ZIP containing settings, alarms, uploaded fonts, the Weather source, and Weather panel selections.
+
+Restoring validates and stages the archive before changing the clock. Music, logs, Weather caches, generated files, and AHT10 runtime state are never replaced. Do not interrupt power during restore.

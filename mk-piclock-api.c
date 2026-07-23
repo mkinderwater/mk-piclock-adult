@@ -9,8 +9,11 @@
 
 #include <arpa/inet.h>
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <mntent.h>
 #include <linux/wireless.h>
 #include <microhttpd.h>
 #include <netinet/in.h>
@@ -25,10 +28,13 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <sys/sysmacros.h>
 #include <sys/timex.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -38,14 +44,18 @@
 #include "asset_store.h"
 #include "font_catalog.h"
 #include "ipc_protocol.h"
+#include "io_helpers.h"
 #include "music_jobs.h"
 #include "util.h"
 
 
 #include "weather_source_store.h"
+#include "weather_frames.h"
+#include "weather_version.h"
 #define API_NAME "mk-clock-adult-api"
-#define API_VERSION "1.37"
-#define PRODUCT_VERSION "mk-clock-adult-1.2.40"
+#define API_VERSION "1.44"
+#define PRODUCT_VERSION "mk-clock-adult-1.2.62"
+#define BUILD_TIMESTAMP __DATE__ " " __TIME__
 #define DEFAULT_PUBLIC_BIND "0.0.0.0"
 #define DEFAULT_PUBLIC_PORT 8080
 #define CORE_SOCKET_PATH "/run/mk-piclock/core.sock"
@@ -64,6 +74,8 @@
 #define FORM_KEY_MAX 64
 #define FORM_VALUE_MAX 512
 #define UPLOAD_FILES_MAX 256
+#define MAX_BACKUP_BYTES (64ULL * 1024ULL * 1024ULL)
+#define BACKUP_ENTRY_MAX 512
 
 static volatile sig_atomic_t g_running = 1;
 static char g_allowed_origin[ALLOWED_ORIGIN_MAX];
@@ -76,6 +88,9 @@ enum route_id {
     ROUTE_STATUS,
     ROUTE_HEALTH,
     ROUTE_DIAGNOSTICS,
+    ROUTE_DIAGNOSTIC_REPORT,
+    ROUTE_BACKUP_DOWNLOAD,
+    ROUTE_BACKUP_RESTORE,
     ROUTE_FONTS_LIST,
     ROUTE_MUSIC_LIST,
     ROUTE_MUSIC_JOBS,
@@ -113,6 +128,9 @@ static const struct api_route g_routes[] = {
     {"GET",  "/api/v1/status",                         ROUTE_STATUS},
     {"GET",  "/api/v1/health",                         ROUTE_HEALTH},
     {"GET",  "/api/v1/diagnostics",                    ROUTE_DIAGNOSTICS},
+    {"GET",  "/api/v1/diagnostics/report",             ROUTE_DIAGNOSTIC_REPORT},
+    {"GET",  "/api/v1/backup/download",                 ROUTE_BACKUP_DOWNLOAD},
+    {"POST", "/api/v1/backup/restore",                  ROUTE_BACKUP_RESTORE},
     {"GET",  "/api/v1/assets/fonts",                    ROUTE_FONTS_LIST},
     {"GET",  "/api/v1/assets/music",                    ROUTE_MUSIC_LIST},
     {"GET",  "/api/v1/assets/music/jobs",               ROUTE_MUSIC_JOBS},
@@ -177,6 +195,9 @@ struct ipc_result {
     unsigned char *body;
     size_t body_len;
 };
+
+static int ipc_call(uint16_t opcode, const void *payload, size_t payload_len, struct ipc_result *result);
+static void ipc_result_free(struct ipc_result *result);
 
 static void on_signal(int sig) {
     (void)sig;
@@ -382,6 +403,513 @@ static void collect_network_diagnostics(struct network_diagnostics *info) {
         info->system_time_valid = local_time.tm_year + 1900 >= 2024;
 }
 
+
+#define DIAG_MUSIC_DIR "/opt/mk-piclock/assets/music"
+#define DIAG_FONT_DIR "/opt/mk-piclock/assets/fonts"
+#define DIAG_CONFIG_DIR "/opt/mk-piclock/config"
+
+struct adult_diagnostic_info {
+    struct network_diagnostics network;
+    double cpu_temperature_c;
+    uint64_t storage_free_bytes;
+    uint64_t storage_used_bytes;
+    uint64_t storage_total_bytes;
+    uint64_t music_bytes, music_files;
+    uint64_t fonts_bytes, fonts_files;
+    uint64_t config_bytes, config_files;
+    int api_healthy;
+    int core_healthy;
+    int oled_ok;
+    int touch_ok;
+    long long last_successful_alarm;
+    char next_alarm_text[128];
+    char room_sensor_status[32];
+    double room_temperature_c;
+    double room_humidity_percent;
+    long long room_measured_at;
+    char room_sensor_error[192];
+    char weather_location[128];
+    char weather_warning[192];
+    long long weather_observed_at;
+    char weather_source_url[MP_WEATHER_SOURCE_URL_MAX];
+    char weather_result[64];
+    char weather_message[256];
+    char weather_run_at[64];
+    int weather_status_available;
+    char os_pretty_name[256];
+    char os_version_id[64];
+    char os_codename[64];
+    char kernel_release[128];
+    char architecture[64];
+    char hardware_model[256];
+    char pi_serial[64];
+    char board_revision[64];
+    char machine_id[64];
+    char inventory_id[32];
+    char cpu_signature[192];
+    uint64_t uptime_seconds;
+    char root_device[128];
+    char root_disk[128];
+    char root_filesystem[64];
+    char root_mount_options[256];
+    int root_read_only;
+    char boot_device[128];
+    char boot_filesystem[64];
+    char boot_mount_point[64];
+    int sd_present;
+    char sd_device[128];
+    char sd_type[32];
+    char sd_name[128];
+    char sd_manufacturer_id[64];
+    char sd_oem_id[64];
+    char sd_serial[64];
+    char sd_manufacture_date[64];
+    char sd_cid[128];
+    uint64_t sd_capacity_bytes;
+};
+
+static int diag_json_integer(const char *json, const char *key, int fallback) {
+    if (!json || !key) return fallback;
+    char pattern[96];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+    const char *found = strstr(json, pattern);
+    if (!found) return fallback;
+    found += strlen(pattern);
+    char *end = NULL;
+    errno = 0;
+    long value = strtol(found, &end, 10);
+    return errno || end == found || value < INT_MIN || value > INT_MAX ? fallback : (int)value;
+}
+
+static long long diag_json_long_long(const char *json, const char *key, long long fallback) {
+    if (!json || !key) return fallback;
+    char pattern[96];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+    const char *found = strstr(json, pattern);
+    if (!found) return fallback;
+    found += strlen(pattern);
+    char *end = NULL;
+    errno = 0;
+    long long value = strtoll(found, &end, 10);
+    return errno || end == found ? fallback : value;
+}
+
+static double diag_json_double(const char *json, const char *key, double fallback) {
+    if (!json || !key) return fallback;
+    char pattern[96];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+    const char *found = strstr(json, pattern);
+    if (!found) return fallback;
+    found += strlen(pattern);
+    char *end = NULL;
+    errno = 0;
+    double value = strtod(found, &end);
+    return errno || end == found ? fallback : value;
+}
+
+static void diag_json_string(const char *json, const char *key, char *out, size_t out_len) {
+    if (!out || out_len == 0) return;
+    out[0] = '\0';
+    if (!json || !key) return;
+    char pattern[96];
+    snprintf(pattern, sizeof(pattern), "\"%s\":\"", key);
+    const char *found = strstr(json, pattern);
+    if (!found) return;
+    found += strlen(pattern);
+    size_t used = 0;
+    while (*found && *found != '"' && used + 1 < out_len) {
+        if (*found == '\\' && found[1]) {
+            found++;
+            if (*found == 'n') out[used++] = '\n';
+            else if (*found == 'r') out[used++] = '\r';
+            else if (*found == 't') out[used++] = '\t';
+            else out[used++] = *found;
+            found++;
+        } else {
+            out[used++] = *found++;
+        }
+    }
+    out[used] = '\0';
+}
+
+static void diag_trim(char *text) {
+    if (!text) return;
+    size_t len = strlen(text);
+    while (len && isspace((unsigned char)text[len - 1])) text[--len] = '\0';
+    size_t start = 0;
+    while (text[start] && isspace((unsigned char)text[start])) start++;
+    if (start) memmove(text, text + start, strlen(text + start) + 1);
+}
+
+static int diag_read_file(const char *path, char *out, size_t out_len) {
+    if (!path || !out || out_len < 2) return -1;
+    out[0] = '\0';
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    ssize_t got = read(fd, out, out_len - 1);
+    int saved = errno;
+    close(fd);
+    if (got < 0) { errno = saved; return -1; }
+    out[got] = '\0';
+    for (ssize_t i = 0; i < got; i++) if (out[i] == '\0') out[i] = ' ';
+    diag_trim(out);
+    return out[0] ? 0 : -1;
+}
+
+static int diag_os_value(const char *key, char *out, size_t out_len) {
+    out[0] = '\0';
+    FILE *file = fopen("/etc/os-release", "r");
+    if (!file) return -1;
+    char line[512];
+    size_t key_len = strlen(key);
+    while (fgets(line, sizeof(line), file)) {
+        if (strncmp(line, key, key_len) || line[key_len] != '=') continue;
+        char *value = line + key_len + 1;
+        diag_trim(value);
+        size_t len = strlen(value);
+        if (len >= 2 && ((value[0] == '"' && value[len - 1] == '"') ||
+                         (value[0] == '\'' && value[len - 1] == '\''))) {
+            value[len - 1] = '\0'; value++;
+        }
+        mp_safe_str(out, out_len, value);
+        break;
+    }
+    fclose(file);
+    return out[0] ? 0 : -1;
+}
+
+static int diag_cpuinfo_value(const char *key, char *out, size_t out_len) {
+    out[0] = '\0';
+    FILE *file = fopen("/proc/cpuinfo", "r");
+    if (!file) return -1;
+    char line[512];
+    while (fgets(line, sizeof(line), file)) {
+        char *colon = strchr(line, ':');
+        if (!colon) continue;
+        *colon = '\0';
+        diag_trim(line);
+        if (strcmp(line, key)) continue;
+        diag_trim(colon + 1);
+        mp_safe_str(out, out_len, colon + 1);
+        break;
+    }
+    fclose(file);
+    return out[0] ? 0 : -1;
+}
+
+static void diag_inventory_id(const char *serial, char *out, size_t out_len) {
+    if (!out || out_len == 0) return;
+    out[0] = '\0';
+    if (!serial || !serial[0]) return;
+
+    char compact[64];
+    size_t used = 0;
+    for (const unsigned char *c = (const unsigned char *)serial;
+         *c && used + 1 < sizeof(compact); c++) {
+        if (isalnum(*c)) compact[used++] = (char)toupper(*c);
+    }
+    compact[used] = '\0';
+
+    if (used >= 8) {
+        static const size_t required = sizeof("MK-0000-0000");
+        if (out_len < required) return;
+        memcpy(out, "MK-", 3);
+        memcpy(out + 3, compact + used - 8, 4);
+        out[7] = '-';
+        memcpy(out + 8, compact + used - 4, 4);
+        out[12] = '\0';
+        return;
+    }
+
+    if (out_len <= 3) return;
+    memcpy(out, "MK-", 3);
+    size_t copy_len = used;
+    if (copy_len > out_len - 4) copy_len = out_len - 4;
+    memcpy(out + 3, compact, copy_len);
+    out[3 + copy_len] = '\0';
+}
+
+static int diag_mount_details(const char *mount_point, char *device, size_t device_len,
+                              char *filesystem, size_t filesystem_len,
+                              char *options, size_t options_len) {
+    FILE *mounts = setmntent("/proc/self/mounts", "r");
+    if (!mounts) return -1;
+    struct mntent entry; char buffer[4096]; int found = 0;
+    while (getmntent_r(mounts, &entry, buffer, sizeof(buffer))) {
+        if (strcmp(entry.mnt_dir, mount_point)) continue;
+        mp_safe_str(device, device_len, entry.mnt_fsname);
+        mp_safe_str(filesystem, filesystem_len, entry.mnt_type);
+        mp_safe_str(options, options_len, entry.mnt_opts);
+        found = 1; break;
+    }
+    endmntent(mounts);
+    return found ? 0 : -1;
+}
+
+static int diag_options_contains(const char *options, const char *wanted) {
+    if (!options || !wanted) return 0;
+    size_t wanted_len = strlen(wanted);
+    for (const char *c = options; *c;) {
+        while (*c == ',') c++;
+        const char *end = strchr(c, ',');
+        size_t len = end ? (size_t)(end - c) : strlen(c);
+        if (len == wanted_len && !strncmp(c, wanted, len)) return 1;
+        if (!end) break;
+        c = end + 1;
+    }
+    return 0;
+}
+
+static int diag_format_device_path(const char *name, char *out, size_t out_len) {
+    if (!out || out_len == 0) return -1;
+    out[0] = '\0';
+    if (!name || !name[0] || strchr(name, '/')) return -1;
+
+    size_t name_len = strlen(name);
+    if (out_len <= 5 || name_len > out_len - 6) return -1;
+    memcpy(out, "/dev/", 5);
+    memcpy(out + 5, name, name_len + 1);
+    return 0;
+}
+
+static int diag_resolve_mount_device(const char *mount_point, char *out, size_t out_len) {
+    struct stat st;
+    if (!out || out_len == 0 || stat(mount_point, &st)) return -1;
+    out[0] = '\0';
+
+    char sys_path[128], target[PATH_MAX];
+    int written = snprintf(sys_path, sizeof(sys_path), "/sys/dev/block/%u:%u",
+                           major(st.st_dev), minor(st.st_dev));
+    if (written < 0 || (size_t)written >= sizeof(sys_path)) return -1;
+
+    ssize_t len = readlink(sys_path, target, sizeof(target) - 1);
+    if (len <= 0) return -1;
+    target[len] = '\0';
+
+    const char *name = strrchr(target, '/');
+    name = name ? name + 1 : target;
+    return diag_format_device_path(name, out, out_len);
+}
+
+static void diag_parent_device(const char *device, char *out, size_t out_len) {
+    out[0] = '\0';
+    if (!device || strncmp(device, "/dev/", 5)) return;
+    char name[128]; mp_safe_str(name, sizeof(name), device + 5);
+    size_t len = strlen(name);
+    if (!strncmp(name, "mmcblk", 6) || !strncmp(name, "nvme", 4)) {
+        char *p = strrchr(name, 'p');
+        if (p && p[1] && strspn(p + 1, "0123456789") == strlen(p + 1)) *p = '\0';
+    } else while (len && isdigit((unsigned char)name[len - 1])) name[--len] = '\0';
+    if (name[0]) (void)diag_format_device_path(name, out, out_len);
+}
+
+static uint64_t diag_read_uint64(const char *path) {
+    char text[64];
+    if (diag_read_file(path, text, sizeof(text))) return 0;
+    char *end = NULL; errno = 0;
+    unsigned long long value = strtoull(text, &end, 10);
+    return errno || end == text ? 0 : (uint64_t)value;
+}
+
+static void diag_directory_usage_fd(int fd, unsigned depth, uint64_t *bytes, uint64_t *files) {
+    if (fd < 0 || depth > 32) { if (fd >= 0) close(fd); return; }
+    DIR *dir = fdopendir(fd);
+    if (!dir) { close(fd); return; }
+    struct dirent *entry;
+    while ((entry = readdir(dir))) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        struct stat st;
+        if (fstatat(dirfd(dir), entry->d_name, &st, AT_SYMLINK_NOFOLLOW)) continue;
+        if (S_ISREG(st.st_mode)) {
+            if (st.st_size > 0 && (uint64_t)st.st_size <= UINT64_MAX - *bytes) *bytes += (uint64_t)st.st_size;
+            if (*files < UINT64_MAX) (*files)++;
+        } else if (S_ISDIR(st.st_mode)) {
+            int child = openat(dirfd(dir), entry->d_name, O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
+            if (child >= 0) diag_directory_usage_fd(child, depth + 1, bytes, files);
+        }
+    }
+    closedir(dir);
+}
+
+static void diag_directory_usage(const char *path, uint64_t *bytes, uint64_t *files) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
+    if (fd >= 0) diag_directory_usage_fd(fd, 0, bytes, files);
+}
+
+static void diag_read_platform(struct adult_diagnostic_info *info) {
+    (void)diag_os_value("PRETTY_NAME", info->os_pretty_name, sizeof(info->os_pretty_name));
+    (void)diag_os_value("VERSION_ID", info->os_version_id, sizeof(info->os_version_id));
+    (void)diag_os_value("VERSION_CODENAME", info->os_codename, sizeof(info->os_codename));
+    struct utsname identity;
+    if (!uname(&identity)) {
+        mp_safe_str(info->kernel_release, sizeof(info->kernel_release), identity.release);
+        mp_safe_str(info->architecture, sizeof(info->architecture), identity.machine);
+    }
+    if (diag_read_file("/proc/device-tree/model", info->hardware_model, sizeof(info->hardware_model)))
+        (void)diag_read_file("/sys/firmware/devicetree/base/model", info->hardware_model, sizeof(info->hardware_model));
+    if (diag_read_file("/sys/firmware/devicetree/base/serial-number", info->pi_serial, sizeof(info->pi_serial)) &&
+        diag_read_file("/proc/device-tree/serial-number", info->pi_serial, sizeof(info->pi_serial)))
+        (void)diag_cpuinfo_value("Serial", info->pi_serial, sizeof(info->pi_serial));
+    if (!strncmp(info->pi_serial, "0x", 2) || !strncmp(info->pi_serial, "0X", 2))
+        memmove(info->pi_serial, info->pi_serial + 2, strlen(info->pi_serial + 2) + 1);
+    (void)diag_cpuinfo_value("Revision", info->board_revision, sizeof(info->board_revision));
+    (void)diag_read_file("/etc/machine-id", info->machine_id, sizeof(info->machine_id));
+    diag_inventory_id(info->pi_serial, info->inventory_id, sizeof(info->inventory_id));
+    char impl[32]="", arch[32]="", variant[32]="", part[32]="", revision[32]="";
+    (void)diag_cpuinfo_value("CPU implementer", impl, sizeof(impl));
+    (void)diag_cpuinfo_value("CPU architecture", arch, sizeof(arch));
+    (void)diag_cpuinfo_value("CPU variant", variant, sizeof(variant));
+    (void)diag_cpuinfo_value("CPU part", part, sizeof(part));
+    (void)diag_cpuinfo_value("CPU revision", revision, sizeof(revision));
+    if (impl[0] || arch[0] || variant[0] || part[0] || revision[0])
+        snprintf(info->cpu_signature, sizeof(info->cpu_signature),
+                 "implementer %s / architecture %s / variant %s / part %s / revision %s",
+                 impl[0]?impl:"unknown", arch[0]?arch:"unknown", variant[0]?variant:"unknown",
+                 part[0]?part:"unknown", revision[0]?revision:"unknown");
+    char uptime[128];
+    if (!diag_read_file("/proc/uptime", uptime, sizeof(uptime))) {
+        char *end = NULL; double seconds = strtod(uptime, &end);
+        if (end != uptime && seconds > 0) info->uptime_seconds = (uint64_t)seconds;
+    }
+}
+
+static int diag_primary_mmc_name(const char *name) {
+    if (!name || strncmp(name, "mmcblk", 6)) return 0;
+    const char *c = name + 6;
+    if (!isdigit((unsigned char)*c)) return 0;
+    while (isdigit((unsigned char)*c)) c++;
+    return *c == '\0';
+}
+
+static void diag_read_storage(struct adult_diagnostic_info *info) {
+    char options[256]="";
+    if (!diag_mount_details("/", info->root_device, sizeof(info->root_device), info->root_filesystem,
+                            sizeof(info->root_filesystem), options, sizeof(options))) {
+        mp_safe_str(info->root_mount_options, sizeof(info->root_mount_options), options);
+        info->root_read_only = diag_options_contains(options, "ro");
+        if (strncmp(info->root_device, "/dev/", 5) != 0 || !strcmp(info->root_device, "/dev/root")) {
+            char resolved[128]="";
+            if (!diag_resolve_mount_device("/", resolved, sizeof(resolved)))
+                mp_safe_str(info->root_device, sizeof(info->root_device), resolved);
+        }
+        diag_parent_device(info->root_device, info->root_disk, sizeof(info->root_disk));
+    }
+    char boot_options[256]="";
+    if (!diag_mount_details("/boot/firmware", info->boot_device, sizeof(info->boot_device),
+                            info->boot_filesystem, sizeof(info->boot_filesystem), boot_options, sizeof(boot_options)))
+        mp_safe_str(info->boot_mount_point, sizeof(info->boot_mount_point), "/boot/firmware");
+    else if (!diag_mount_details("/boot", info->boot_device, sizeof(info->boot_device),
+                                 info->boot_filesystem, sizeof(info->boot_filesystem), boot_options, sizeof(boot_options)))
+        mp_safe_str(info->boot_mount_point, sizeof(info->boot_mount_point), "/boot");
+    char block[64]="";
+    if (!strncmp(info->root_disk, "/dev/mmcblk", 11)) mp_safe_str(block, sizeof(block), info->root_disk + 5);
+    if (!block[0]) {
+        DIR *dir = opendir("/sys/class/block");
+        if (dir) {
+            struct dirent *entry;
+            while ((entry = readdir(dir))) if (diag_primary_mmc_name(entry->d_name)) { mp_safe_str(block, sizeof(block), entry->d_name); break; }
+            closedir(dir);
+        }
+    }
+    if (!block[0]) return;
+    if (diag_format_device_path(block, info->sd_device, sizeof(info->sd_device)) != 0) return;
+    info->sd_present = 1;
+    char path[PATH_MAX];
+#define DIAG_SD(field,target) do { snprintf(path,sizeof(path),"/sys/class/block/%s/device/%s",block,field); (void)diag_read_file(path,target,sizeof(target)); } while(0)
+    DIAG_SD("type", info->sd_type); DIAG_SD("name", info->sd_name);
+    DIAG_SD("manfid", info->sd_manufacturer_id); DIAG_SD("oemid", info->sd_oem_id);
+    DIAG_SD("serial", info->sd_serial); DIAG_SD("date", info->sd_manufacture_date); DIAG_SD("cid", info->sd_cid);
+#undef DIAG_SD
+    snprintf(path, sizeof(path), "/sys/class/block/%s/size", block);
+    uint64_t sectors = diag_read_uint64(path);
+    if (sectors <= UINT64_MAX / 512ULL) info->sd_capacity_bytes = sectors * 512ULL;
+}
+
+static void diag_read_core(struct adult_diagnostic_info *info) {
+    struct ipc_result ping;
+    if (!ipc_call(MP_IPC_OP_PING, NULL, 0, &ping)) {
+        info->core_healthy = ping.status >= 200 && ping.status < 300;
+        ipc_result_free(&ping);
+    }
+    struct ipc_result status;
+    if (ipc_call(MP_IPC_OP_STATUS, NULL, 0, &status)) return;
+    if (status.status == 200 && status.body && status.body_len < MP_IPC_MAX_PAYLOAD) {
+        char *json = malloc(status.body_len + 1);
+        if (json) {
+            memcpy(json, status.body, status.body_len); json[status.body_len] = '\0';
+            info->oled_ok = diag_json_integer(json, "oled_ok", 0);
+            info->touch_ok = diag_json_integer(json, "touch_ok", 0);
+            info->last_successful_alarm = diag_json_long_long(json, "last_successful_alarm", 0);
+            diag_json_string(json, "next_alarm_text", info->next_alarm_text, sizeof(info->next_alarm_text));
+            const char *room = strstr(json, "\"room_sensor\":{");
+            if (room) {
+                diag_json_string(room, "status", info->room_sensor_status, sizeof(info->room_sensor_status));
+                info->room_temperature_c = diag_json_double(room, "temperature_c", 0.0);
+                info->room_humidity_percent = diag_json_double(room, "humidity_percent", 0.0);
+                info->room_measured_at = diag_json_long_long(room, "measured_at", 0);
+                diag_json_string(room, "error", info->room_sensor_error, sizeof(info->room_sensor_error));
+            }
+            const char *weather = strstr(json, "\"weather\":{");
+            if (weather) {
+                diag_json_string(weather, "location", info->weather_location, sizeof(info->weather_location));
+                diag_json_string(weather, "warning_type", info->weather_warning, sizeof(info->weather_warning));
+                info->weather_observed_at = diag_json_long_long(weather, "observed_at", 0);
+            }
+            free(json);
+        }
+    }
+    ipc_result_free(&status);
+}
+
+static void diag_read_weather(struct adult_diagnostic_info *info) {
+    char error[192]="";
+    if (mp_weather_source_read(info->weather_source_url, sizeof(info->weather_source_url), error, sizeof(error)))
+        mp_safe_str(info->weather_source_url, sizeof(info->weather_source_url), "Unavailable");
+    char status[MP_WEATHER_STATUS_JSON_MAX];
+    if (!mp_weather_status_read_json(status, sizeof(status), error, sizeof(error))) {
+        info->weather_status_available = 1;
+        diag_json_string(status, "result", info->weather_result, sizeof(info->weather_result));
+        diag_json_string(status, "message", info->weather_message, sizeof(info->weather_message));
+        diag_json_string(status, "run_at", info->weather_run_at, sizeof(info->weather_run_at));
+    } else {
+        mp_safe_str(info->weather_message, sizeof(info->weather_message), error);
+    }
+}
+
+static void collect_adult_diagnostics(struct adult_diagnostic_info *info) {
+    memset(info, 0, sizeof(*info));
+    info->api_healthy = 1;
+    collect_network_diagnostics(&info->network);
+    FILE *temperature = fopen("/sys/class/thermal/thermal_zone0/temp", "r");
+    long millidegrees = 0;
+    if (temperature) {
+        if (fscanf(temperature, "%ld", &millidegrees) == 1) info->cpu_temperature_c = (double)millidegrees / 1000.0;
+        fclose(temperature);
+    }
+    struct statvfs storage;
+    if (!statvfs("/", &storage)) {
+        uint64_t block = (uint64_t)storage.f_frsize;
+        uint64_t total = (uint64_t)storage.f_blocks;
+        uint64_t free_all = (uint64_t)storage.f_bfree;
+        info->storage_free_bytes = (uint64_t)storage.f_bavail * block;
+        info->storage_used_bytes = total >= free_all ? (total - free_all) * block : 0;
+        info->storage_total_bytes = total * block;
+    }
+    diag_directory_usage(DIAG_MUSIC_DIR, &info->music_bytes, &info->music_files);
+    diag_directory_usage(DIAG_FONT_DIR, &info->fonts_bytes, &info->fonts_files);
+    diag_directory_usage(DIAG_CONFIG_DIR, &info->config_bytes, &info->config_files);
+    diag_read_platform(info);
+    diag_read_storage(info);
+    diag_read_core(info);
+    diag_read_weather(info);
+}
+
+static void diag_append_json_string(struct mp_buffer *body, const char *name, const char *value) {
+    mp_buffer_appendf(body, ",\"%s\":\"", name);
+    mp_buffer_append_json_string(body, value ? value : "");
+    mp_buffer_append(body, "\"");
+}
+
 static int request_origin_allowed(struct MHD_Connection *connection) {
     const char *origin = MHD_lookup_connection_value(connection, MHD_HEADER_KIND, "Origin");
     return origin && g_allowed_origin[0] && strcmp(origin, g_allowed_origin) == 0;
@@ -394,6 +922,8 @@ static size_t route_upload_limit(const struct api_route *route) {
             return MP_MUSIC_UPLOAD_MAX_BYTES;
         case ROUTE_UPLOAD_FONT:
             return MP_FONT_UPLOAD_MAX_BYTES;
+        case ROUTE_BACKUP_RESTORE:
+            return (size_t)MAX_BACKUP_BYTES;
         default:
             return 0;
     }
@@ -739,6 +1269,640 @@ static int notify_processed_music(const char *file, void *userdata) {
     return notify_asset(MP_IPC_ASSET_MUSIC, MP_IPC_ASSET_UPLOADED, 1, file);
 }
 
+static pthread_mutex_t g_maintenance_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int read_fd_full(int fd, void *buffer, size_t length) {
+    unsigned char *cursor = buffer;
+    while (length > 0) {
+        ssize_t got = read(fd, cursor, length);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) return -1;
+        cursor += (size_t)got;
+        length -= (size_t)got;
+    }
+    return 0;
+}
+
+
+struct zip_entry {
+    char name[512];
+    uint32_t crc32;
+    uint32_t size;
+    uint32_t local_offset;
+    uint16_t dos_time;
+    uint16_t dos_date;
+};
+
+static int write_u16(FILE *file, uint16_t value) {
+    unsigned char bytes[2] = {(unsigned char)(value & 0xffu), (unsigned char)((value >> 8) & 0xffu)};
+    return fwrite(bytes, 1, sizeof(bytes), file) == sizeof(bytes) ? 0 : -1;
+}
+
+static int write_u32(FILE *file, uint32_t value) {
+    unsigned char bytes[4] = {
+        (unsigned char)(value & 0xffu),
+        (unsigned char)((value >> 8) & 0xffu),
+        (unsigned char)((value >> 16) & 0xffu),
+        (unsigned char)((value >> 24) & 0xffu)
+    };
+    return fwrite(bytes, 1, sizeof(bytes), file) == sizeof(bytes) ? 0 : -1;
+}
+
+static uint32_t g_crc32_table[256];
+static pthread_once_t g_crc32_once = PTHREAD_ONCE_INIT;
+
+static void crc32_init_table(void) {
+    for (uint32_t value = 0; value < 256; value++) {
+        uint32_t crc = value;
+        for (unsigned int bit = 0; bit < 8; bit++)
+            crc = (crc >> 1) ^ (0xedb88320u & (uint32_t)-(int32_t)(crc & 1u));
+        g_crc32_table[value] = crc;
+    }
+}
+
+static uint32_t crc32_update(uint32_t crc, const unsigned char *data, size_t length) {
+    if (!data && length != 0) return crc;
+    (void)pthread_once(&g_crc32_once, crc32_init_table);
+    crc = ~crc;
+    for (size_t i = 0; i < length; i++)
+        crc = g_crc32_table[(crc ^ data[i]) & 0xffu] ^ (crc >> 8);
+    return ~crc;
+}
+
+static void zip_dos_datetime(time_t value, uint16_t *dos_time, uint16_t *dos_date) {
+    struct tm tmv;
+    if (!gmtime_r(&value, &tmv)) memset(&tmv, 0, sizeof(tmv));
+    int year = tmv.tm_year + 1900;
+    if (year < 1980) year = 1980;
+    if (year > 2107) year = 2107;
+    int month = tmv.tm_mon + 1;
+    if (month < 1) month = 1;
+    if (month > 12) month = 12;
+    int day = tmv.tm_mday;
+    if (day < 1) day = 1;
+    if (day > 31) day = 31;
+    *dos_time = (uint16_t)(((tmv.tm_hour & 31) << 11) | ((tmv.tm_min & 63) << 5) | ((tmv.tm_sec / 2) & 31));
+    *dos_date = (uint16_t)(((year - 1980) << 9) | ((month & 15) << 5) | (day & 31));
+}
+
+static int copy_memory_to_zip(FILE *zip, const void *data, size_t size, const char *name,
+                              struct zip_entry *entry) {
+    if (!zip || !data || !name || !entry || size > UINT32_MAX || strlen(name) > UINT16_MAX) return -1;
+    memset(entry, 0, sizeof(*entry));
+    mp_safe_str(entry->name, sizeof(entry->name), name);
+    entry->size = (uint32_t)size;
+    entry->crc32 = crc32_update(0, data, size);
+    zip_dos_datetime(time(NULL), &entry->dos_time, &entry->dos_date);
+    off_t offset = ftello(zip);
+    if (offset < 0 || (uint64_t)offset > UINT32_MAX) return -1;
+    entry->local_offset = (uint32_t)offset;
+    size_t name_len = strlen(entry->name);
+    if (write_u32(zip, 0x04034b50u) != 0 || write_u16(zip, 20) != 0 ||
+        write_u16(zip, 0) != 0 || write_u16(zip, 0) != 0 ||
+        write_u16(zip, entry->dos_time) != 0 || write_u16(zip, entry->dos_date) != 0 ||
+        write_u32(zip, entry->crc32) != 0 || write_u32(zip, entry->size) != 0 ||
+        write_u32(zip, entry->size) != 0 || write_u16(zip, (uint16_t)name_len) != 0 ||
+        write_u16(zip, 0) != 0 || fwrite(entry->name, 1, name_len, zip) != name_len ||
+        fwrite(data, 1, size, zip) != size) return -1;
+    return 0;
+}
+
+static int copy_file_to_zip(FILE *zip, const char *path, const char *name,
+                            struct zip_entry *entry) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+        (uint64_t)st.st_size > UINT32_MAX) {
+        close(fd);
+        return -1;
+    }
+    unsigned char *data = malloc((size_t)st.st_size ? (size_t)st.st_size : 1u);
+    if (!data) { close(fd); return -1; }
+    int ok = st.st_size == 0 || read_fd_full(fd, data, (size_t)st.st_size) == 0;
+    close(fd);
+    if (!ok) { free(data); return -1; }
+    int result = copy_memory_to_zip(zip, data, (size_t)st.st_size, name, entry);
+    free(data);
+    return result;
+}
+
+static int finish_zip(FILE *zip, struct zip_entry *entries, int count) {
+    if (!zip || !entries || count < 0 || count > UINT16_MAX) return -1;
+    off_t central_offset_value = ftello(zip);
+    if (central_offset_value < 0 || (uint64_t)central_offset_value > UINT32_MAX) return -1;
+    uint32_t central_offset = (uint32_t)central_offset_value;
+    for (int i = 0; i < count; i++) {
+        size_t name_len = strlen(entries[i].name);
+        if (write_u32(zip, 0x02014b50u) != 0 || write_u16(zip, 20) != 0 ||
+            write_u16(zip, 20) != 0 || write_u16(zip, 0) != 0 || write_u16(zip, 0) != 0 ||
+            write_u16(zip, entries[i].dos_time) != 0 || write_u16(zip, entries[i].dos_date) != 0 ||
+            write_u32(zip, entries[i].crc32) != 0 || write_u32(zip, entries[i].size) != 0 ||
+            write_u32(zip, entries[i].size) != 0 || write_u16(zip, (uint16_t)name_len) != 0 ||
+            write_u16(zip, 0) != 0 || write_u16(zip, 0) != 0 || write_u16(zip, 0) != 0 ||
+            write_u16(zip, 0) != 0 || write_u32(zip, 0100644u << 16) != 0 ||
+            write_u32(zip, entries[i].local_offset) != 0 ||
+            fwrite(entries[i].name, 1, name_len, zip) != name_len) return -1;
+    }
+    off_t end_value = ftello(zip);
+    if (end_value < 0 || (uint64_t)end_value > UINT32_MAX) return -1;
+    uint32_t central_size = (uint32_t)end_value - central_offset;
+    if (write_u32(zip, 0x06054b50u) != 0 || write_u16(zip, 0) != 0 ||
+        write_u16(zip, 0) != 0 || write_u16(zip, (uint16_t)count) != 0 ||
+        write_u16(zip, (uint16_t)count) != 0 || write_u32(zip, central_size) != 0 ||
+        write_u32(zip, central_offset) != 0 || write_u16(zip, 0) != 0 ||
+        fflush(zip) != 0 || fsync(fileno(zip)) != 0) return -1;
+    return 0;
+}
+
+static int backup_font_allowed(const char *name) {
+    return mp_asset_safe_filename(name) && name[0] != '.' && mp_asset_has_font_ext(name);
+}
+
+static int add_fonts_to_backup(FILE *zip, struct zip_entry *entries, int *count,
+                               uint64_t *total_bytes) {
+    DIR *dir = opendir(MP_FONT_DIR);
+    if (!dir) return errno == ENOENT ? 0 : -1;
+    struct dirent *item;
+    while ((item = readdir(dir)) != NULL) {
+        if (!backup_font_allowed(item->d_name)) continue;
+        if (*count >= BACKUP_ENTRY_MAX) { closedir(dir); errno = EFBIG; return -1; }
+        char path[PATH_MAX], archive_name[512];
+        if (snprintf(path, sizeof(path), "%s/%s", MP_FONT_DIR, item->d_name) >= (int)sizeof(path) ||
+            snprintf(archive_name, sizeof(archive_name), "assets/fonts/%s", item->d_name) >= (int)sizeof(archive_name))
+            continue;
+        struct stat st;
+        if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) continue;
+        if ((uint64_t)st.st_size > MAX_BACKUP_BYTES - *total_bytes) {
+            closedir(dir); errno = EFBIG; return -1;
+        }
+        *total_bytes += (uint64_t)st.st_size;
+        if (copy_file_to_zip(zip, path, archive_name, &entries[*count]) != 0) {
+            closedir(dir); return -1;
+        }
+        (*count)++;
+    }
+    return closedir(dir) == 0 ? 0 : -1;
+}
+
+static int build_adult_backup(const char *output_path) {
+    struct ipc_result config;
+    memset(&config, 0, sizeof(config));
+    if (ipc_call(MP_IPC_OP_CONFIG_EXPORT, NULL, 0, &config) != 0 || config.status != 200 ||
+        config.content_type != MP_IPC_CONTENT_TEXT || config.body_len == 0 ||
+        config.body_len > MP_IPC_CONFIG_MAX_BYTES) {
+        ipc_result_free(&config);
+        return -1;
+    }
+    char weather_source[MP_WEATHER_SOURCE_URL_MAX];
+    char error[192];
+    if (mp_weather_source_read(weather_source, sizeof(weather_source), error, sizeof(error)) != 0) {
+        ipc_result_free(&config);
+        return -1;
+    }
+    struct mp_weather_frames_config frames;
+    char frames_text[384];
+    if (mp_weather_frames_read(&frames, error, sizeof(error)) != 0 ||
+        mp_weather_frames_serialize(&frames, frames_text, sizeof(frames_text), error, sizeof(error)) < 0) {
+        ipc_result_free(&config);
+        return -1;
+    }
+    size_t source_len = strlen(weather_source);
+    if (source_len + 1 >= sizeof(weather_source)) { ipc_result_free(&config); return -1; }
+    weather_source[source_len++] = '\n';
+    weather_source[source_len] = '\0';
+
+    struct zip_entry *entries = calloc(BACKUP_ENTRY_MAX, sizeof(*entries));
+    if (!entries) { ipc_result_free(&config); return -1; }
+    FILE *zip = fopen(output_path, "wb");
+    if (!zip) { free(entries); ipc_result_free(&config); return -1; }
+    int count = 0;
+    uint64_t total_bytes = config.body_len + source_len + strlen(frames_text);
+    char metadata[512];
+    int metadata_len = snprintf(metadata, sizeof(metadata),
+        "{\n  \"product\": \"mk-clock-adult\",\n  \"version\": \"%s\",\n  \"api_version\": \"%s\",\n  \"created_at\": %lld,\n  \"format\": 1\n}\n",
+        PRODUCT_VERSION, API_VERSION, (long long)time(NULL));
+    int failed = total_bytes > MAX_BACKUP_BYTES || metadata_len <= 0 ||
+        copy_memory_to_zip(zip, metadata, (size_t)metadata_len, "backup.json", &entries[count++]) != 0 ||
+        copy_memory_to_zip(zip, config.body, config.body_len, "config/clock.conf", &entries[count++]) != 0 ||
+        copy_memory_to_zip(zip, weather_source, source_len, "weather/source.url", &entries[count++]) != 0 ||
+        copy_memory_to_zip(zip, frames_text, strlen(frames_text), "weather/frames.conf", &entries[count++]) != 0 ||
+        add_fonts_to_backup(zip, entries, &count, &total_bytes) != 0 ||
+        finish_zip(zip, entries, count) != 0;
+    if (fclose(zip) != 0) failed = 1;
+    free(entries);
+    ipc_result_free(&config);
+    if (failed) { unlink(output_path); return -1; }
+    return 0;
+}
+
+static enum MHD_Result queue_backup_file(struct MHD_Connection *connection, const char *path) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return MHD_NO;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+        (uint64_t)st.st_size > MAX_BACKUP_BYTES) { close(fd); return MHD_NO; }
+    struct MHD_Response *response = MHD_create_response_from_fd64((uint64_t)st.st_size, fd);
+    if (!response) { close(fd); return MHD_NO; }
+    (void)add_header(response, MHD_HTTP_HEADER_CONTENT_TYPE, "application/zip");
+    (void)add_header(response, "Content-Disposition", "attachment; filename=\"mk-clock-adult-backup.zip\"");
+    add_api_headers(connection, response);
+    enum MHD_Result result = MHD_queue_response(connection, 200, response);
+    MHD_destroy_response(response);
+    return result;
+}
+
+static enum MHD_Result download_backup(struct MHD_Connection *connection) {
+    if (pthread_mutex_trylock(&g_maintenance_lock) != 0)
+        return queue_json(connection, 409, "{\"ok\":false,\"error\":\"another backup or restore is running\"}");
+    char path[] = "/tmp/mk-clock-adult-backup-XXXXXX";
+    int fd = mkstemp(path);
+    enum MHD_Result result;
+    if (fd < 0) {
+        result = queue_json(connection, 500, "{\"ok\":false,\"error\":\"backup could not be prepared\"}");
+    } else {
+        close(fd);
+        if (build_adult_backup(path) != 0)
+            result = queue_json(connection, 500, "{\"ok\":false,\"error\":\"backup could not be created\"}");
+        else {
+            result = queue_backup_file(connection, path);
+            if (result == MHD_NO)
+                result = queue_json(connection, 500, "{\"ok\":false,\"error\":\"backup could not be sent\"}");
+        }
+        unlink(path);
+    }
+    pthread_mutex_unlock(&g_maintenance_lock);
+    return result;
+}
+
+static uint16_t read_le16(const unsigned char *value) {
+    return (uint16_t)value[0] | ((uint16_t)value[1] << 8);
+}
+
+static uint32_t read_le32(const unsigned char *value) {
+    return (uint32_t)value[0] | ((uint32_t)value[1] << 8) |
+           ((uint32_t)value[2] << 16) | ((uint32_t)value[3] << 24);
+}
+
+static int restore_archive_path(const char *name, const char *stage_root,
+                                char *output, size_t output_len) {
+    const char *relative = NULL;
+    if (strcmp(name, "config/clock.conf") == 0 || strcmp(name, "weather/source.url") == 0 ||
+        strcmp(name, "weather/frames.conf") == 0) relative = name;
+    else if (strncmp(name, "assets/fonts/", 13) == 0 && backup_font_allowed(name + 13)) relative = name;
+    else if (strcmp(name, "backup.json") == 0) return 1;
+    else return -1;
+    if (strstr(relative, "..") || strchr(relative, '\\')) return -1;
+    int written = snprintf(output, output_len, "%s/%s", stage_root, relative);
+    return written > 0 && (size_t)written < output_len ? 0 : -1;
+}
+
+static int prepare_restore_stage(const char *stage_root) {
+    static const char *const paths[] = {"config", "weather", "assets", "assets/fonts"};
+    char path[PATH_MAX];
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        int written = snprintf(path, sizeof(path), "%s/%s", stage_root, paths[i]);
+        if (written <= 0 || (size_t)written >= sizeof(path) || mp_asset_ensure_dir(path) != 0) return -1;
+    }
+    return 0;
+}
+
+static int extract_backup_archive(const char *archive_path, const char *stage_root, int *file_count) {
+    if (prepare_restore_stage(stage_root) != 0) return -1;
+    FILE *archive = fopen(archive_path, "rb");
+    if (!archive) return -1;
+    int count = 0, entry_count = 0;
+    int saw_metadata = 0, saw_config = 0, saw_source = 0, saw_frames = 0;
+    uint64_t total = 0;
+    for (;;) {
+        unsigned char signature_bytes[4];
+        size_t got = fread(signature_bytes, 1, sizeof(signature_bytes), archive);
+        if (got == 0 && feof(archive)) break;
+        if (got != sizeof(signature_bytes)) { fclose(archive); return -1; }
+        uint32_t signature = read_le32(signature_bytes);
+        if (signature == 0x02014b50u || signature == 0x06054b50u) break;
+        if (signature != 0x04034b50u || entry_count++ >= BACKUP_ENTRY_MAX) { fclose(archive); return -1; }
+        unsigned char header[26];
+        if (fread(header, 1, sizeof(header), archive) != sizeof(header)) { fclose(archive); return -1; }
+        uint16_t flags = read_le16(header + 2), method = read_le16(header + 4);
+        uint32_t expected_crc = read_le32(header + 10);
+        uint32_t compressed_size = read_le32(header + 14), uncompressed_size = read_le32(header + 18);
+        uint16_t name_length = read_le16(header + 22), extra_length = read_le16(header + 24);
+        if (flags != 0 || method != 0 || compressed_size != uncompressed_size ||
+            name_length == 0 || name_length >= 512 || total + uncompressed_size > MAX_BACKUP_BYTES) {
+            fclose(archive); return -1;
+        }
+        char name[512];
+        if (fread(name, 1, name_length, archive) != name_length) { fclose(archive); return -1; }
+        name[name_length] = '\0';
+        if (extra_length && fseeko(archive, extra_length, SEEK_CUR) != 0) { fclose(archive); return -1; }
+        char output[PATH_MAX];
+        int path_result = restore_archive_path(name, stage_root, output, sizeof(output));
+        if (path_result == 1) {
+            if (saw_metadata || uncompressed_size == 0 || uncompressed_size >= 4096) { fclose(archive); return -1; }
+            char metadata[4096];
+            if (fread(metadata, 1, uncompressed_size, archive) != uncompressed_size) { fclose(archive); return -1; }
+            metadata[uncompressed_size] = '\0';
+            if (crc32_update(0, (const unsigned char *)metadata, uncompressed_size) != expected_crc ||
+                !strstr(metadata, "\"product\": \"mk-clock-adult\"") || !strstr(metadata, "\"format\": 1")) {
+                fclose(archive); return -1;
+            }
+            saw_metadata = 1; total += uncompressed_size; continue;
+        }
+        if (path_result != 0) { fclose(archive); return -1; }
+        if (strcmp(name, "config/clock.conf") == 0) { if (saw_config) { fclose(archive); return -1; } saw_config = 1; }
+        if (strcmp(name, "weather/source.url") == 0) { if (saw_source) { fclose(archive); return -1; } saw_source = 1; }
+        if (strcmp(name, "weather/frames.conf") == 0) { if (saw_frames) { fclose(archive); return -1; } saw_frames = 1; }
+        int fd = open(output, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0640);
+        if (fd < 0) { fclose(archive); return -1; }
+        unsigned char buffer[32768];
+        uint32_t remaining = uncompressed_size, crc = 0;
+        int failed = 0;
+        while (remaining > 0) {
+            size_t chunk = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
+            if (fread(buffer, 1, chunk, archive) != chunk || mp_write_full(fd, buffer, chunk) != 0) { failed = 1; break; }
+            crc = crc32_update(crc, buffer, chunk);
+            remaining -= (uint32_t)chunk;
+        }
+        if (fsync(fd) != 0 || close(fd) != 0) failed = 1;
+        if (failed || crc != expected_crc) { fclose(archive); return -1; }
+        total += uncompressed_size; count++;
+    }
+    fclose(archive);
+    if (!saw_metadata || !saw_config || !saw_source || !saw_frames) return -1;
+    if (file_count) *file_count = count;
+    return 0;
+}
+
+static int remove_tree_contents_fd(int directory_fd, unsigned int depth) {
+    if (directory_fd < 0 || depth > 64) { if (directory_fd >= 0) close(directory_fd); return -1; }
+    DIR *directory = fdopendir(directory_fd);
+    if (!directory) { close(directory_fd); return -1; }
+    int failed = 0;
+    struct dirent *entry;
+    while ((entry = readdir(directory)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        struct stat state;
+        if (fstatat(dirfd(directory), entry->d_name, &state, AT_SYMLINK_NOFOLLOW) != 0) { failed = 1; continue; }
+        if (S_ISDIR(state.st_mode)) {
+            int child_fd = openat(dirfd(directory), entry->d_name, O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
+            if (child_fd < 0 || remove_tree_contents_fd(child_fd, depth + 1) != 0 ||
+                unlinkat(dirfd(directory), entry->d_name, AT_REMOVEDIR) != 0) failed = 1;
+        } else if (unlinkat(dirfd(directory), entry->d_name, 0) != 0) failed = 1;
+    }
+    if (closedir(directory) != 0) failed = 1;
+    return failed ? -1 : 0;
+}
+
+static void remove_tree(const char *path) {
+    if (!path || !*path) return;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
+    if (fd < 0) { (void)unlink(path); return; }
+    (void)remove_tree_contents_fd(fd, 0);
+    (void)rmdir(path);
+}
+
+static int clear_font_directory(void) {
+    int fd = open(MP_FONT_DIR, O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
+    if (fd < 0) return errno == ENOENT ? 0 : -1;
+    DIR *dir = fdopendir(fd);
+    if (!dir) { close(fd); return -1; }
+    int failed = 0;
+    struct dirent *item;
+    while ((item = readdir(dir)) != NULL) {
+        if (item->d_name[0] == '.') continue;
+        struct stat state;
+        if (fstatat(dirfd(dir), item->d_name, &state, AT_SYMLINK_NOFOLLOW) != 0) { failed = 1; continue; }
+        if (S_ISREG(state.st_mode) && unlinkat(dirfd(dir), item->d_name, 0) != 0) failed = 1;
+    }
+    if (closedir(dir) != 0) failed = 1;
+    return failed ? -1 : 0;
+}
+
+static int copy_file_secure(const char *source, const char *target) {
+    int in = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (in < 0) return -1;
+    int out = open(target, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0640);
+    if (out < 0) { close(in); return -1; }
+    unsigned char buffer[32768];
+    ssize_t got;
+    int failed = 0;
+    while ((got = read(in, buffer, sizeof(buffer))) > 0)
+        if (mp_write_full(out, buffer, (size_t)got) != 0) { failed = 1; break; }
+    if (got < 0 || fsync(out) != 0) failed = 1;
+    close(in);
+    if (close(out) != 0) failed = 1;
+    if (failed) unlink(target);
+    return failed ? -1 : 0;
+}
+
+static int copy_staged_fonts(const char *stage_root) {
+    char source_dir[PATH_MAX];
+    if (snprintf(source_dir, sizeof(source_dir), "%s/assets/fonts", stage_root) >= (int)sizeof(source_dir) ||
+        mp_asset_ensure_dir(MP_FONT_DIR) != 0) return -1;
+    DIR *dir = opendir(source_dir);
+    if (!dir) return errno == ENOENT ? 0 : -1;
+    int failed = 0;
+    struct dirent *item;
+    while ((item = readdir(dir)) != NULL) {
+        if (!backup_font_allowed(item->d_name)) continue;
+        char source[PATH_MAX], target[PATH_MAX];
+        if (snprintf(source, sizeof(source), "%s/%s", source_dir, item->d_name) >= (int)sizeof(source) ||
+            snprintf(target, sizeof(target), "%s/%s", MP_FONT_DIR, item->d_name) >= (int)sizeof(target) ||
+            copy_file_secure(source, target) != 0) { failed = 1; break; }
+    }
+    closedir(dir);
+    return failed ? -1 : 0;
+}
+
+static int move_fonts(const char *source_dir, const char *target_dir) {
+    if (mp_asset_ensure_dir(target_dir) != 0) return -1;
+    DIR *dir = opendir(source_dir);
+    if (!dir) return errno == ENOENT ? 0 : -1;
+    int failed = 0;
+    struct dirent *item;
+    while ((item = readdir(dir)) != NULL) {
+        if (!backup_font_allowed(item->d_name)) continue;
+        char source[PATH_MAX], target[PATH_MAX];
+        if (snprintf(source, sizeof(source), "%s/%s", source_dir, item->d_name) >= (int)sizeof(source) ||
+            snprintf(target, sizeof(target), "%s/%s", target_dir, item->d_name) >= (int)sizeof(target) ||
+            rename(source, target) != 0) { failed = 1; break; }
+    }
+    closedir(dir);
+    return failed ? -1 : 0;
+}
+
+static int stage_current_fonts(char *rollback_root, size_t rollback_root_len) {
+    int written = snprintf(rollback_root, rollback_root_len, "%s/.restore-old-XXXXXX", MP_APP_ROOT "/assets");
+    if (written <= 0 || (size_t)written >= rollback_root_len || !mkdtemp(rollback_root)) return -1;
+    char target[PATH_MAX];
+    if (snprintf(target, sizeof(target), "%s/fonts", rollback_root) >= (int)sizeof(target) ||
+        move_fonts(MP_FONT_DIR, target) != 0) {
+        remove_tree(rollback_root); rollback_root[0] = '\0'; return -1;
+    }
+    return 0;
+}
+
+static void restore_old_fonts(const char *rollback_root) {
+    if (!rollback_root || !*rollback_root) return;
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/fonts", rollback_root);
+    (void)clear_font_directory();
+    (void)move_fonts(source, MP_FONT_DIR);
+    remove_tree(rollback_root);
+}
+
+static int load_config_blob(const char *path, struct mp_ipc_config_blob *blob) {
+    memset(blob, 0, sizeof(*blob));
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 || st.st_size > MP_IPC_CONFIG_MAX_BYTES) {
+        close(fd); return -1;
+    }
+    int ok = read_fd_full(fd, blob->data, (size_t)st.st_size) == 0;
+    close(fd);
+    if (!ok) return -1;
+    blob->length = (uint32_t)st.st_size;
+    return 0;
+}
+
+static int read_small_text_file(const char *path, char *output, size_t output_size) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 || (size_t)st.st_size >= output_size) {
+        close(fd); return -1;
+    }
+    int ok = read_fd_full(fd, output, (size_t)st.st_size) == 0;
+    close(fd);
+    if (!ok) return -1;
+    output[st.st_size] = '\0';
+    output[strcspn(output, "\r\n")] = '\0';
+    return output[0] ? 0 : -1;
+}
+
+static int core_alarm_active(void) {
+    struct ipc_result status;
+    memset(&status, 0, sizeof(status));
+    if (ipc_call(MP_IPC_OP_STATUS, NULL, 0, &status) != 0) return 0;
+    int active = status.body && status.body_len < MP_IPC_MAX_PAYLOAD &&
+                 memmem(status.body, status.body_len, "\"alarm_active\":1", strlen("\"alarm_active\":1")) != NULL;
+    ipc_result_free(&status);
+    return active;
+}
+
+static enum MHD_Result restore_backup_locked(struct MHD_Connection *connection,
+                                             struct request_context *context) {
+    if (core_alarm_active())
+        return queue_json(connection, 409, "{\"ok\":false,\"error\":\"dismiss the active alarm before restoring a backup\"}");
+    if (context->upload_count != 1 || !context->uploads[0].temp_path[0])
+        return queue_json(connection, 400, "{\"ok\":false,\"error\":\"choose one mk-clock-adult backup ZIP\"}");
+
+    char stage_template[] = "/tmp/mk-clock-adult-restore-XXXXXX";
+    char *stage = mkdtemp(stage_template);
+    if (!stage) return queue_json(connection, 500, "{\"ok\":false,\"error\":\"restore staging could not be created\"}");
+    int extracted = 0;
+    if (extract_backup_archive(context->uploads[0].temp_path, stage, &extracted) != 0) {
+        remove_tree(stage);
+        return queue_json(connection, 400, "{\"ok\":false,\"error\":\"backup ZIP is invalid or unsupported\"}");
+    }
+
+    char path[PATH_MAX], error[192];
+    struct mp_ipc_config_blob *new_config = calloc(1, sizeof(*new_config));
+    if (!new_config) { remove_tree(stage); return queue_json(connection, 500, "{\"ok\":false,\"error\":\"allocation failed\"}"); }
+    snprintf(path, sizeof(path), "%s/config/clock.conf", stage);
+    if (load_config_blob(path, new_config) != 0) {
+        free(new_config); remove_tree(stage);
+        return queue_json(connection, 400, "{\"ok\":false,\"error\":\"backup configuration is missing\"}");
+    }
+    char new_source_raw[MP_WEATHER_SOURCE_URL_MAX], new_source[MP_WEATHER_SOURCE_URL_MAX];
+    snprintf(path, sizeof(path), "%s/weather/source.url", stage);
+    if (read_small_text_file(path, new_source_raw, sizeof(new_source_raw)) != 0 ||
+        mp_weather_source_validate(new_source_raw, new_source, sizeof(new_source), error, sizeof(error)) != 0) {
+        free(new_config); remove_tree(stage);
+        return queue_json(connection, 400, "{\"ok\":false,\"error\":\"backup Weather source is invalid\"}");
+    }
+    struct mp_weather_frames_config new_frames;
+    snprintf(path, sizeof(path), "%s/weather/frames.conf", stage);
+    if (mp_weather_frames_read_path(path, &new_frames, error, sizeof(error)) != 0) {
+        free(new_config); remove_tree(stage);
+        return queue_json(connection, 400, "{\"ok\":false,\"error\":\"backup Weather panels are invalid\"}");
+    }
+
+    struct ipc_result old_config;
+    memset(&old_config, 0, sizeof(old_config));
+    if (ipc_call(MP_IPC_OP_CONFIG_EXPORT, NULL, 0, &old_config) != 0 || old_config.status != 200 ||
+        old_config.content_type != MP_IPC_CONTENT_TEXT || old_config.body_len == 0 ||
+        old_config.body_len > MP_IPC_CONFIG_MAX_BYTES) {
+        ipc_result_free(&old_config); free(new_config); remove_tree(stage);
+        return queue_json(connection, 503, "{\"ok\":false,\"error\":\"current settings could not be protected\"}");
+    }
+    struct mp_ipc_config_blob *rollback_config = calloc(1, sizeof(*rollback_config));
+    if (!rollback_config) {
+        ipc_result_free(&old_config); free(new_config); remove_tree(stage);
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"allocation failed\"}");
+    }
+    rollback_config->length = (uint32_t)old_config.body_len;
+    memcpy(rollback_config->data, old_config.body, old_config.body_len);
+    ipc_result_free(&old_config);
+
+    char old_source[MP_WEATHER_SOURCE_URL_MAX];
+    struct mp_weather_frames_config old_frames;
+    if (mp_weather_source_read(old_source, sizeof(old_source), error, sizeof(error)) != 0 ||
+        mp_weather_frames_read(&old_frames, error, sizeof(error)) != 0) {
+        free(rollback_config); free(new_config); remove_tree(stage);
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"current Weather settings could not be protected\"}");
+    }
+
+    char rollback_root[PATH_MAX] = "";
+    if (stage_current_fonts(rollback_root, sizeof(rollback_root)) != 0) {
+        free(rollback_config); free(new_config); remove_tree(stage);
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"current fonts could not be protected\"}");
+    }
+
+    char canonical[MP_WEATHER_SOURCE_URL_MAX];
+    int files_ok = copy_staged_fonts(stage) == 0;
+    int weather_ok = files_ok &&
+        mp_weather_source_write(new_source, canonical, sizeof(canonical), error, sizeof(error)) == 0 &&
+        mp_weather_frames_write(&new_frames, error, sizeof(error)) == 0;
+    struct ipc_result imported;
+    memset(&imported, 0, sizeof(imported));
+    int config_ok = weather_ok && ipc_call(MP_IPC_OP_CONFIG_IMPORT, new_config, sizeof(*new_config), &imported) == 0 &&
+                    imported.status >= 200 && imported.status < 300;
+    ipc_result_free(&imported);
+    free(new_config);
+    remove_tree(stage);
+
+    if (!config_ok) {
+        restore_old_fonts(rollback_root);
+        (void)mp_weather_source_write(old_source, canonical, sizeof(canonical), error, sizeof(error));
+        (void)mp_weather_frames_write(&old_frames, error, sizeof(error));
+        struct ipc_result rolled_back;
+        memset(&rolled_back, 0, sizeof(rolled_back));
+        (void)ipc_call(MP_IPC_OP_CONFIG_IMPORT, rollback_config, sizeof(*rollback_config), &rolled_back);
+        ipc_result_free(&rolled_back);
+        free(rollback_config);
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"restore failed; previous settings and fonts were restored\"}");
+    }
+
+    free(rollback_config);
+    remove_tree(rollback_root);
+    char response[192];
+    snprintf(response, sizeof(response), "{\"ok\":true,\"restored_files\":%d,\"music_preserved\":true}", extracted);
+    return queue_json(connection, 200, response);
+}
+
+static enum MHD_Result restore_backup(struct MHD_Connection *connection,
+                                      struct request_context *context) {
+    if (pthread_mutex_trylock(&g_maintenance_lock) != 0)
+        return queue_json(connection, 409, "{\"ok\":false,\"error\":\"another backup or restore is running\"}");
+    enum MHD_Result result = restore_backup_locked(connection, context);
+    pthread_mutex_unlock(&g_maintenance_lock);
+    return result;
+}
+
+
 static struct form_field *field_slot(struct request_context *context, const char *key, uint64_t off) {
     for (size_t i = 0; i < context->field_count; i++) {
         if (strcmp(context->fields[i].key, key) == 0) {
@@ -887,6 +2051,8 @@ static int parse_weather_slot_kind(const char *value, int fallback) {
         return MP_WEATHER_SLOT_OUTSIDE;
     if (strcasecmp(value, "forecast") == 0 || strcasecmp(value, "offset") == 0)
         return MP_WEATHER_SLOT_FORECAST;
+    if (strcasecmp(value, "today") == 0 || strcasecmp(value, "daily") == 0)
+        return MP_WEATHER_SLOT_TODAY;
     return 0;
 }
 
@@ -1014,7 +2180,8 @@ static enum MHD_Result serve_fonts_list(struct MHD_Connection *connection) {
     mp_buffer_append(&body,
         "\",\"builtin_fonts\":["
         "{\"id\":0,\"name\":\"Seven Segment\"},{\"id\":1,\"name\":\"Seven Thin\"},"
-        "{\"id\":2,\"name\":\"Pixel\"},{\"id\":3,\"name\":\"Pixel Bold\"}],"
+        "{\"id\":2,\"name\":\"Pixel\"},{\"id\":3,\"name\":\"Pixel Bold\"},"
+        "{\"id\":4,\"name\":\"Automatic font detection\"}],"
         "\"system_fonts\":[");
     for (int i = 0; i < system_count && !body.failed; i++) {
         char display_name[256];
@@ -1432,13 +2599,16 @@ static enum MHD_Result weather_frames_get(struct MHD_Connection *connection) {
         json,
         sizeof(json),
         "{\"ok\":true,\"editable\":true,\"config_file\":\"%s\","
-        "\"slot1\":{\"mode\":\"%s\",\"offset_hours\":%d},"
-        "\"slot2\":{\"mode\":\"%s\",\"offset_hours\":%d},"
-        "\"slot3\":{\"mode\":\"%s\",\"offset_hours\":%d}}",
+        "\"slot1\":{\"mode\":\"%s\",\"offset_hours\":%d,\"time\":\"%02d:00\"},"
+        "\"slot2\":{\"mode\":\"%s\",\"offset_hours\":%d,\"time\":\"%02d:00\"},"
+        "\"slot3\":{\"mode\":\"%s\",\"offset_hours\":%d,\"time\":\"%02d:00\"}}",
         MP_WEATHER_FRAMES_FILE,
         mp_weather_frame_mode_name(config.slots[0].mode), config.slots[0].offset_hours,
+        config.slots[0].time_hour,
         mp_weather_frame_mode_name(config.slots[1].mode), config.slots[1].offset_hours,
-        mp_weather_frame_mode_name(config.slots[2].mode), config.slots[2].offset_hours
+        config.slots[1].time_hour,
+        mp_weather_frame_mode_name(config.slots[2].mode), config.slots[2].offset_hours,
+        config.slots[2].time_hour
     );
     return queue_json(connection, 200, json);
 }
@@ -1463,7 +2633,7 @@ static enum MHD_Result weather_frames_set(
             return queue_json(
                 connection,
                 400,
-                "{\"ok\":false,\"error\":\"weather panel mode must be room, outside, or offset\"}"
+                "{\"ok\":false,\"error\":\"weather panel mode must be room, outside, today, offset, or time\"}"
             );
         }
 
@@ -1471,6 +2641,21 @@ static enum MHD_Result weather_frames_set(
         if (form_value(context, key))
             config.slots[index].offset_hours =
                 form_int(context, key, config.slots[index].offset_hours);
+
+        snprintf(key, sizeof(key), "slot%d_time", index + 1);
+        const char *time_value = form_value(context, key);
+        if (time_value) {
+            int hour = 0;
+            int minute = 0;
+            if (parse_time_value(time_value, &hour, &minute) != 0 || minute != 0) {
+                return queue_json(
+                    connection,
+                    400,
+                    "{\"ok\":false,\"error\":\"specific weather-panel time must be on the hour\"}"
+                );
+            }
+            config.slots[index].time_hour = hour;
+        }
     }
 
     if (mp_weather_frames_write(&config, error, sizeof(error)) != 0) {
@@ -1487,13 +2672,16 @@ static enum MHD_Result weather_frames_set(
         json,
         sizeof(json),
         "{\"ok\":true,\"changed\":%s,\"refresh_requested\":true,"
-        "\"slot1\":{\"mode\":\"%s\",\"offset_hours\":%d},"
-        "\"slot2\":{\"mode\":\"%s\",\"offset_hours\":%d},"
-        "\"slot3\":{\"mode\":\"%s\",\"offset_hours\":%d}}",
+        "\"slot1\":{\"mode\":\"%s\",\"offset_hours\":%d,\"time\":\"%02d:00\"},"
+        "\"slot2\":{\"mode\":\"%s\",\"offset_hours\":%d,\"time\":\"%02d:00\"},"
+        "\"slot3\":{\"mode\":\"%s\",\"offset_hours\":%d,\"time\":\"%02d:00\"}}",
         changed ? "true" : "false",
         mp_weather_frame_mode_name(config.slots[0].mode), config.slots[0].offset_hours,
+        config.slots[0].time_hour,
         mp_weather_frame_mode_name(config.slots[1].mode), config.slots[1].offset_hours,
-        mp_weather_frame_mode_name(config.slots[2].mode), config.slots[2].offset_hours
+        config.slots[1].time_hour,
+        mp_weather_frame_mode_name(config.slots[2].mode), config.slots[2].offset_hours,
+        config.slots[2].time_hour
     );
     return queue_json(connection, 200, json);
 }
@@ -1528,28 +2716,159 @@ static enum MHD_Result weather_activity_get(struct MHD_Connection *connection) {
 
 
 static enum MHD_Result serve_network_diagnostics(struct MHD_Connection *connection) {
-    struct network_diagnostics info;
-    collect_network_diagnostics(&info);
+    struct adult_diagnostic_info info;
+    collect_adult_diagnostics(&info);
     struct mp_buffer body;
-    if (mp_buffer_init(&body, 512, 4096) != 0)
+    if (mp_buffer_init(&body, 4096, 32768) != 0)
         return queue_json(connection, 500, "{\"ok\":false,\"error\":\"allocation failed\"}");
-    mp_buffer_append(&body, "{\"ok\":true,\"hostname\":\"");
-    mp_buffer_append_json_string(&body, info.hostname);
-    mp_buffer_append(&body, "\",\"interface\":\"");
-    mp_buffer_append_json_string(&body, info.interface_name);
-    mp_buffer_append(&body, "\",\"ip_address\":\"");
-    mp_buffer_append_json_string(&body, info.ip_address);
-    mp_buffer_append(&body, "\",\"ssid\":\"");
-    mp_buffer_append_json_string(&body, info.ssid);
+    mp_buffer_append(&body, "{\"ok\":true");
+    diag_append_json_string(&body, "product_version", PRODUCT_VERSION);
+    diag_append_json_string(&body, "api_version", API_VERSION);
+    diag_append_json_string(&body, "weather_version", MP_WEATHER_VERSION);
+    diag_append_json_string(&body, "compiled_at", BUILD_TIMESTAMP);
+    diag_append_json_string(&body, "hostname", info.network.hostname);
+    diag_append_json_string(&body, "interface", info.network.interface_name);
+    diag_append_json_string(&body, "ip_address", info.network.ip_address);
+    diag_append_json_string(&body, "ssid", info.network.ssid);
     mp_buffer_appendf(&body,
-        "\",\"wifi_signal_percent\":%d,\"wifi_signal_dbm\":%d,"
-        "\"wifi_signal_available\":%s,\"ntp_synchronized\":%s,"
-        "\"system_time_valid\":%s}",
-        info.wifi_signal_percent, info.wifi_signal_dbm,
-        info.wifi_signal_available ? "true" : "false",
-        info.ntp_synchronized ? "true" : "false",
-        info.system_time_valid ? "true" : "false");
+        ",\"wifi_signal_percent\":%d,\"wifi_signal_dbm\":%d,\"wifi_signal_available\":%s"
+        ",\"ntp_synchronized\":%s,\"system_time_valid\":%s,\"cpu_temperature_c\":%.1f"
+        ",\"storage_free_bytes\":%llu,\"storage_used_bytes\":%llu,\"storage_total_bytes\":%llu"
+        ",\"music_bytes\":%llu,\"music_files\":%llu,\"fonts_bytes\":%llu,\"fonts_files\":%llu"
+        ",\"config_bytes\":%llu,\"config_files\":%llu"
+        ",\"api_healthy\":%s,\"core_healthy\":%s,\"oled_ok\":%s,\"touch_ok\":%s"
+        ",\"last_successful_alarm\":%lld,\"uptime_seconds\":%llu",
+        info.network.wifi_signal_percent, info.network.wifi_signal_dbm,
+        info.network.wifi_signal_available ? "true" : "false",
+        info.network.ntp_synchronized ? "true" : "false", info.network.system_time_valid ? "true" : "false",
+        info.cpu_temperature_c, (unsigned long long)info.storage_free_bytes,
+        (unsigned long long)info.storage_used_bytes, (unsigned long long)info.storage_total_bytes,
+        (unsigned long long)info.music_bytes, (unsigned long long)info.music_files,
+        (unsigned long long)info.fonts_bytes, (unsigned long long)info.fonts_files,
+        (unsigned long long)info.config_bytes, (unsigned long long)info.config_files,
+        info.api_healthy ? "true" : "false", info.core_healthy ? "true" : "false",
+        info.oled_ok ? "true" : "false", info.touch_ok ? "true" : "false",
+        info.last_successful_alarm, (unsigned long long)info.uptime_seconds);
+    diag_append_json_string(&body, "next_alarm_text", info.next_alarm_text);
+    diag_append_json_string(&body, "room_sensor_status", info.room_sensor_status);
+    mp_buffer_appendf(&body, ",\"room_temperature_c\":%.1f,\"room_humidity_percent\":%.1f,\"room_measured_at\":%lld",
+                      info.room_temperature_c, info.room_humidity_percent, info.room_measured_at);
+    diag_append_json_string(&body, "room_sensor_error", info.room_sensor_error);
+    diag_append_json_string(&body, "weather_location", info.weather_location);
+    diag_append_json_string(&body, "weather_warning", info.weather_warning);
+    mp_buffer_appendf(&body, ",\"weather_observed_at\":%lld,\"weather_status_available\":%s",
+                      info.weather_observed_at, info.weather_status_available ? "true" : "false");
+    diag_append_json_string(&body, "weather_source_url", info.weather_source_url);
+    diag_append_json_string(&body, "weather_result", info.weather_result);
+    diag_append_json_string(&body, "weather_message", info.weather_message);
+    diag_append_json_string(&body, "weather_run_at", info.weather_run_at);
+    diag_append_json_string(&body, "os_pretty_name", info.os_pretty_name);
+    diag_append_json_string(&body, "os_version_id", info.os_version_id);
+    diag_append_json_string(&body, "os_codename", info.os_codename);
+    diag_append_json_string(&body, "kernel_release", info.kernel_release);
+    diag_append_json_string(&body, "architecture", info.architecture);
+    diag_append_json_string(&body, "hardware_model", info.hardware_model);
+    diag_append_json_string(&body, "pi_serial", info.pi_serial);
+    diag_append_json_string(&body, "board_revision", info.board_revision);
+    diag_append_json_string(&body, "machine_id", info.machine_id);
+    diag_append_json_string(&body, "inventory_id", info.inventory_id);
+    diag_append_json_string(&body, "cpu_signature", info.cpu_signature);
+    diag_append_json_string(&body, "root_device", info.root_device);
+    diag_append_json_string(&body, "root_disk", info.root_disk);
+    diag_append_json_string(&body, "root_filesystem", info.root_filesystem);
+    mp_buffer_appendf(&body, ",\"root_read_only\":%s", info.root_read_only ? "true" : "false");
+    diag_append_json_string(&body, "boot_device", info.boot_device);
+    diag_append_json_string(&body, "boot_filesystem", info.boot_filesystem);
+    diag_append_json_string(&body, "boot_mount_point", info.boot_mount_point);
+    mp_buffer_appendf(&body, ",\"sd_present\":%s,\"sd_capacity_bytes\":%llu",
+                      info.sd_present ? "true" : "false", (unsigned long long)info.sd_capacity_bytes);
+    diag_append_json_string(&body, "sd_device", info.sd_device);
+    diag_append_json_string(&body, "sd_type", info.sd_type);
+    diag_append_json_string(&body, "sd_name", info.sd_name);
+    diag_append_json_string(&body, "sd_manufacturer_id", info.sd_manufacturer_id);
+    diag_append_json_string(&body, "sd_oem_id", info.sd_oem_id);
+    diag_append_json_string(&body, "sd_serial", info.sd_serial);
+    diag_append_json_string(&body, "sd_manufacture_date", info.sd_manufacture_date);
+    diag_append_json_string(&body, "sd_cid", info.sd_cid);
+    mp_buffer_append(&body, "}");
     return queue_json_builder(connection, 200, &body);
+}
+
+static enum MHD_Result queue_diagnostic_download(struct MHD_Connection *connection, char *body,
+                                                  size_t body_len, const char *filename) {
+    struct MHD_Response *response = MHD_create_response_from_buffer(body_len, body, MHD_RESPMEM_MUST_FREE);
+    if (!response) { free(body); return MHD_NO; }
+    (void)add_header(response, MHD_HTTP_HEADER_CONTENT_TYPE, "text/plain; charset=utf-8");
+    char disposition[256];
+    snprintf(disposition, sizeof(disposition), "attachment; filename=\"%s\"", filename);
+    (void)add_header(response, "Content-Disposition", disposition);
+    add_api_headers(connection, response);
+    enum MHD_Result result = MHD_queue_response(connection, 200, response);
+    MHD_destroy_response(response);
+    return result;
+}
+
+static enum MHD_Result serve_diagnostic_report(struct MHD_Connection *connection) {
+    struct adult_diagnostic_info info;
+    collect_adult_diagnostics(&info);
+    struct mp_buffer report;
+    if (mp_buffer_init(&report, 4096, 65536) != 0)
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"allocation failed\"}");
+    time_t now = time(NULL); struct tm tmv; char generated[64];
+    localtime_r(&now, &tmv); strftime(generated, sizeof(generated), "%Y-%m-%d %H:%M:%S %Z", &tmv);
+    char last_alarm[64] = "Never";
+    if (info.last_successful_alarm > 0) {
+        time_t value = (time_t)info.last_successful_alarm; struct tm alarm_tm;
+        localtime_r(&value, &alarm_tm); strftime(last_alarm, sizeof(last_alarm), "%Y-%m-%d %H:%M:%S %Z", &alarm_tm);
+    }
+    mp_buffer_appendf(&report,
+        "mk-clock-adult Diagnostic Report\nGenerated: %s\nProduct: %s\nAPI: %s\nWeather: %s\nCompiled: %s\n\n"
+        "Platform\nHardware: %s\nOperating system: %s\nOS version: %s\nOS codename: %s\nKernel: %s\nArchitecture: %s\nUptime: %llu seconds\n\n"
+        "Device identity\nInventory ID: %s\nRaspberry Pi serial: %s\nBoard revision: %s\nOS machine ID: %s\nCPU signature: %s\n\n"
+        "Network and time\nHostname: %s\nInterface: %s\nIP address: %s\nSSID: %s\nWi-Fi signal: %s\nNTP synchronized: %s\nSystem time valid: %s\n\n"
+        "Storage\nSystem drive: %s\nRoot partition: %s\nRoot filesystem: %s\nRoot state: %s\nUsed: %llu bytes\nAvailable: %llu bytes\nTotal: %llu bytes\n"
+        "Music: %llu bytes in %llu files\nFonts: %llu bytes in %llu files\nConfiguration: %llu bytes in %llu files\n"
+        "Boot partition: %s\nBoot filesystem: %s\nBoot mount point: %s\n\n"
+        "SD card\nPresent: %s\nDevice: %s\nType: %s\nProduct: %s\nManufacturer ID: %s\nOEM ID: %s\nSerial: %s\nManufactured: %s\nCapacity: %llu bytes\nCID: %s\n\n"
+        "Health\nCPU temperature: %.1f C\nAPI: %s\nCore: %s\nOLED: %s\nTouch: %s\nNext alarm: %s\nLast successful alarm: %s\n\n"
+        "Inside sensor\nStatus: %s\nTemperature: %.1f C\nHumidity: %.1f%%\nMeasured epoch: %lld\nError: %s\n\n"
+        "Weather service\nSource: %s\nLast result: %s\nLast run: %s\nMessage: %s\nDisplay location: %s\nObserved epoch: %lld\nActive warning: %s\n",
+        generated, PRODUCT_VERSION, API_VERSION, MP_WEATHER_VERSION, BUILD_TIMESTAMP,
+        info.hardware_model[0]?info.hardware_model:"Unavailable", info.os_pretty_name[0]?info.os_pretty_name:"Unavailable",
+        info.os_version_id[0]?info.os_version_id:"Unavailable", info.os_codename[0]?info.os_codename:"Unavailable",
+        info.kernel_release[0]?info.kernel_release:"Unavailable", info.architecture[0]?info.architecture:"Unavailable",
+        (unsigned long long)info.uptime_seconds, info.inventory_id[0]?info.inventory_id:"Unavailable",
+        info.pi_serial[0]?info.pi_serial:"Unavailable", info.board_revision[0]?info.board_revision:"Unavailable",
+        info.machine_id[0]?info.machine_id:"Unavailable", info.cpu_signature[0]?info.cpu_signature:"Unavailable",
+        info.network.hostname, info.network.interface_name[0]?info.network.interface_name:"Unavailable",
+        info.network.ip_address[0]?info.network.ip_address:"Unavailable", info.network.ssid[0]?info.network.ssid:"Unavailable",
+        info.network.wifi_signal_available ? "Available" : "Unavailable",
+        info.network.ntp_synchronized?"Yes":"No", info.network.system_time_valid?"Yes":"No",
+        info.root_disk[0]?info.root_disk:"Unavailable", info.root_device[0]?info.root_device:"Unavailable",
+        info.root_filesystem[0]?info.root_filesystem:"Unavailable", info.root_device[0]?(info.root_read_only?"Read-only":"Read/write"):"Unavailable",
+        (unsigned long long)info.storage_used_bytes, (unsigned long long)info.storage_free_bytes,
+        (unsigned long long)info.storage_total_bytes, (unsigned long long)info.music_bytes,
+        (unsigned long long)info.music_files, (unsigned long long)info.fonts_bytes, (unsigned long long)info.fonts_files,
+        (unsigned long long)info.config_bytes, (unsigned long long)info.config_files,
+        info.boot_device[0]?info.boot_device:"Unavailable", info.boot_filesystem[0]?info.boot_filesystem:"Unavailable",
+        info.boot_mount_point[0]?info.boot_mount_point:"Unavailable", info.sd_present?"Yes":"No",
+        info.sd_device[0]?info.sd_device:"Unavailable", info.sd_type[0]?info.sd_type:"Unavailable",
+        info.sd_name[0]?info.sd_name:"Unavailable", info.sd_manufacturer_id[0]?info.sd_manufacturer_id:"Unavailable",
+        info.sd_oem_id[0]?info.sd_oem_id:"Unavailable", info.sd_serial[0]?info.sd_serial:"Unavailable",
+        info.sd_manufacture_date[0]?info.sd_manufacture_date:"Unavailable", (unsigned long long)info.sd_capacity_bytes,
+        info.sd_cid[0]?info.sd_cid:"Unavailable", info.cpu_temperature_c,
+        info.api_healthy?"Working":"Unavailable", info.core_healthy?"Working":"Unavailable",
+        info.oled_ok?"Working":"Unavailable", info.touch_ok?"Working":"Unavailable",
+        info.next_alarm_text[0]?info.next_alarm_text:"No alarm scheduled", last_alarm,
+        info.room_sensor_status[0]?info.room_sensor_status:"Unavailable", info.room_temperature_c,
+        info.room_humidity_percent, info.room_measured_at, info.room_sensor_error[0]?info.room_sensor_error:"None",
+        info.weather_source_url[0]?info.weather_source_url:"Unavailable", info.weather_result[0]?info.weather_result:"Unavailable",
+        info.weather_run_at[0]?info.weather_run_at:"Unavailable", info.weather_message[0]?info.weather_message:"Unavailable",
+        info.weather_location[0]?info.weather_location:"Unavailable", info.weather_observed_at,
+        info.weather_warning[0]?info.weather_warning:"None");
+    size_t length = 0; char *body = mp_buffer_steal(&report, &length); mp_buffer_free(&report);
+    if (!body) return queue_json(connection, 500, "{\"ok\":false,\"error\":\"report could not be created\"}");
+    return queue_diagnostic_download(connection, body, length, "mk-clock-adult-diagnostic-report.txt");
 }
 
 static enum MHD_Result dispatch_route(struct MHD_Connection *connection,
@@ -1560,6 +2879,12 @@ static enum MHD_Result dispatch_route(struct MHD_Connection *connection,
             return call_core(connection, MP_IPC_OP_STATUS, NULL, 0);
         case ROUTE_DIAGNOSTICS:
             return serve_network_diagnostics(connection);
+        case ROUTE_DIAGNOSTIC_REPORT:
+            return serve_diagnostic_report(connection);
+        case ROUTE_BACKUP_DOWNLOAD:
+            return download_backup(connection);
+        case ROUTE_BACKUP_RESTORE:
+            return restore_backup(connection, context);
         case ROUTE_FONTS_LIST:
             return serve_fonts_list(connection);
         case ROUTE_MUSIC_LIST:
@@ -1656,6 +2981,10 @@ static enum MHD_Result dispatch_route(struct MHD_Connection *connection,
                 request.present_mask |= MP_IPC_DISPLAY_FONT_FILE;
                 mp_safe_str(request.oled_font_file, sizeof(request.oled_font_file), form_value(context, "oled_font_file"));
             }
+            if (form_value(context, "inside_font_file") != NULL) {
+                request.present_mask |= MP_IPC_DISPLAY_INSIDE_FONT_FILE;
+                mp_safe_str(request.inside_font_file, sizeof(request.inside_font_file), form_value(context, "inside_font_file"));
+            }
             if (form_value(context, "bedtime_enabled")) {
                 request.present_mask |= MP_IPC_DISPLAY_BEDTIME_ENABLED;
                 request.bedtime_enabled = (uint8_t)(form_int(context, "bedtime_enabled", 0) != 0);
@@ -1711,7 +3040,37 @@ static enum MHD_Result dispatch_route(struct MHD_Connection *connection,
             struct mp_ipc_weather_update request;
             memset(&request, 0, sizeof(request));
             mp_safe_str(request.location, sizeof(request.location), form_value(context, "location"));
-            mp_safe_str(request.warning_type, sizeof(request.warning_type), form_value(context, "warning_type"));
+
+            int requested_warning_count = form_int(context, "warning_count", -1);
+            int warning_count = 0;
+            if (requested_warning_count >= 0) {
+                if (requested_warning_count > MP_WEATHER_WARNING_SLOTS)
+                    requested_warning_count = MP_WEATHER_WARNING_SLOTS;
+                for (int i = 0; i < requested_warning_count; i++) {
+                    char key[48];
+                    snprintf(key, sizeof(key), "warning%d_description", i);
+                    const char *description = form_value(context, key);
+                    if (!description || !*description) continue;
+                    mp_safe_str(
+                        request.warning_descriptions[warning_count],
+                        sizeof(request.warning_descriptions[warning_count]),
+                        description
+                    );
+                    warning_count++;
+                }
+            }
+            if (warning_count == 0) {
+                const char *legacy_warning = form_value(context, "warning_type");
+                if (legacy_warning && *legacy_warning) {
+                    mp_safe_str(
+                        request.warning_descriptions[0],
+                        sizeof(request.warning_descriptions[0]),
+                        legacy_warning
+                    );
+                    warning_count = 1;
+                }
+            }
+            request.warning_count = (uint8_t)warning_count;
 
             int current_temperature_c = form_int(context, "current_temperature_c", 0);
             int current_temperature_available = form_int(context, "current_temperature_available", 0);
@@ -1724,6 +3083,12 @@ static enum MHD_Result dispatch_route(struct MHD_Connection *connection,
 
             int slot_temperatures[MP_WEATHER_FORECAST_SLOTS] = {0};
             int slot_temperature_available[MP_WEATHER_FORECAST_SLOTS] = {0};
+            int slot_low_temperatures[MP_WEATHER_FORECAST_SLOTS] = {0};
+            int slot_low_temperature_available[MP_WEATHER_FORECAST_SLOTS] = {0};
+            int slot_low_hours[MP_WEATHER_FORECAST_SLOTS] = {0};
+            int slot_high_temperatures[MP_WEATHER_FORECAST_SLOTS] = {0};
+            int slot_high_temperature_available[MP_WEATHER_FORECAST_SLOTS] = {0};
+            int slot_high_hours[MP_WEATHER_FORECAST_SLOTS] = {0};
             int slot_precipitation[MP_WEATHER_FORECAST_SLOTS] = {0};
             for (int i = 0; i < MP_WEATHER_FORECAST_SLOTS; i++) {
                 char key[48];
@@ -1731,7 +3096,7 @@ static enum MHD_Result dispatch_route(struct MHD_Connection *connection,
                 int default_kind = i == 0 ? MP_WEATHER_SLOT_ROOM : MP_WEATHER_SLOT_FORECAST;
                 int kind = parse_weather_slot_kind(form_value(context, key), default_kind);
                 if (kind == 0)
-                    return queue_json(connection, 400, "{\"ok\":false,\"error\":\"weather slot kind must be room, outside, or forecast\"}");
+                    return queue_json(connection, 400, "{\"ok\":false,\"error\":\"weather slot kind must be room, outside, forecast, or today\"}");
                 request.slots[i].kind = (uint8_t)kind;
 
                 snprintf(key, sizeof(key), "slot%d_label", i);
@@ -1748,6 +3113,24 @@ static enum MHD_Result dispatch_route(struct MHD_Connection *connection,
 
                 snprintf(key, sizeof(key), "slot%d_temperature_c", i);
                 slot_temperatures[i] = form_int(context, key, 0);
+
+                snprintf(key, sizeof(key), "slot%d_low_temperature_available", i);
+                slot_low_temperature_available[i] = form_int(context, key, 0);
+
+                snprintf(key, sizeof(key), "slot%d_low_temperature_c", i);
+                slot_low_temperatures[i] = form_int(context, key, 0);
+
+                snprintf(key, sizeof(key), "slot%d_low_hour", i);
+                slot_low_hours[i] = form_int(context, key, 0);
+
+                snprintf(key, sizeof(key), "slot%d_high_temperature_available", i);
+                slot_high_temperature_available[i] = form_int(context, key, 0);
+
+                snprintf(key, sizeof(key), "slot%d_high_temperature_c", i);
+                slot_high_temperatures[i] = form_int(context, key, 0);
+
+                snprintf(key, sizeof(key), "slot%d_high_hour", i);
+                slot_high_hours[i] = form_int(context, key, 0);
 
                 snprintf(key, sizeof(key), "slot%d_precipitation_probability_percent", i);
                 slot_precipitation[i] = form_int(context, key, 0);
@@ -1778,12 +3161,29 @@ static enum MHD_Result dispatch_route(struct MHD_Connection *connection,
             for (int i = 0; i < MP_WEATHER_FORECAST_SLOTS; i++) {
                 if (slot_temperature_available[i] != 0 && slot_temperature_available[i] != 1)
                     return queue_json(connection, 400, "{\"ok\":false,\"error\":\"weather slot availability fields must be 0 or 1\"}");
+                if ((slot_low_temperature_available[i] != 0 && slot_low_temperature_available[i] != 1) ||
+                    (slot_high_temperature_available[i] != 0 && slot_high_temperature_available[i] != 1))
+                    return queue_json(connection, 400, "{\"ok\":false,\"error\":\"daily weather availability fields must be 0 or 1\"}");
                 if (slot_temperatures[i] < -99 || slot_temperatures[i] > 99)
                     return queue_json(connection, 400, "{\"ok\":false,\"error\":\"forecast temperatures must be between -99 and 99\"}");
+                if (slot_low_temperatures[i] < -99 || slot_low_temperatures[i] > 99 ||
+                    slot_high_temperatures[i] < -99 || slot_high_temperatures[i] > 99)
+                    return queue_json(connection, 400, "{\"ok\":false,\"error\":\"daily low and high temperatures must be between -99 and 99\"}");
+                if (slot_low_hours[i] < 0 || slot_low_hours[i] > 23 ||
+                    slot_high_hours[i] < 0 || slot_high_hours[i] > 23)
+                    return queue_json(connection, 400, "{\"ok\":false,\"error\":\"daily low and high hours must be between 0 and 23\"}");
                 if (slot_precipitation[i] < 0 || slot_precipitation[i] > 100)
                     return queue_json(connection, 400, "{\"ok\":false,\"error\":\"forecast precipitation must be between 0 and 100\"}");
                 request.slots[i].temperature_c = (int16_t)slot_temperatures[i];
                 request.slots[i].temperature_available = (uint8_t)slot_temperature_available[i];
+                request.slots[i].low_temperature_c = (int16_t)slot_low_temperatures[i];
+                request.slots[i].low_temperature_available =
+                    (uint8_t)slot_low_temperature_available[i];
+                request.slots[i].low_hour = (uint8_t)slot_low_hours[i];
+                request.slots[i].high_temperature_c = (int16_t)slot_high_temperatures[i];
+                request.slots[i].high_temperature_available =
+                    (uint8_t)slot_high_temperature_available[i];
+                request.slots[i].high_hour = (uint8_t)slot_high_hours[i];
                 request.slots[i].precipitation_probability_percent = (uint8_t)slot_precipitation[i];
             }
 
@@ -1823,7 +3223,7 @@ static enum MHD_Result serve_local_api(struct MHD_Connection *connection, const 
             "\"audio.metadata\",\"audio.optimize\",\"audio.processing-status\",\"audio.queue-clear\","
             "\"touch.input\","
             "\"assets.read\",\"assets.upload\",\"assets.delete\",\"display.color\","
-            "\"network.open-controls\",\"logs.read\"]}");
+            "\"network.open-controls\",\"logs.read\",\"backup.download\",\"backup.restore\"]}");
     }
     return MHD_YES;
 }

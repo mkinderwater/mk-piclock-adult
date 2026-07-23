@@ -57,7 +57,7 @@
 #define safe_str mp_safe_str
 
 #define APP_NAME "mk-clock-adult-core"
-#define APP_VERSION "mk-clock-adult-1.2.40"
+#define APP_VERSION "mk-clock-adult-1.2.62"
 #define DEFAULT_CLOCK_NAME "Adult Clock"
 #define APP_ROOT "/opt/mk-piclock"
 #define MUSIC_DIR APP_ROOT "/assets/music"
@@ -67,6 +67,8 @@
 #define MESSAGE_CHIME_LABEL "Weather Warning Chime"
 #define MESSAGE_CHIME_VOLUME_MAX 55
 #define FONT_DIR APP_ROOT "/assets/fonts"
+#define SYSTEM_DEFAULT_FONT_ID 4
+#define FONT_POLICY_VERSION 1
 #define CONFIG_DIR APP_ROOT "/config"
 #define CONFIG_FILE CONFIG_DIR "/clock.conf"
 #define LOG_FILE CONFIG_DIR "/event.log"
@@ -74,7 +76,6 @@
 #define LOG_KEEP_BYTES 32768
 #define LOG_VIEW_LINES 200
 
-#define ROOM_SENSOR_ASSET_DIR APP_ROOT "/assets/room-sensor"
 #define ROOM_SENSOR_POLL_SECONDS_DEFAULT 10
 #define ROOM_SENSOR_STALE_SECONDS_DEFAULT 120
 
@@ -101,6 +102,7 @@
 #define DIAGNOSTIC_REFRESH_MS 2000u
 
 #define MAX_ALARMS 7
+#define ALARM_MAX_DURATION_SECONDS 1800
 #define MUSIC_FILE_MAX 256
 
 
@@ -150,12 +152,15 @@ struct app_state {
     uint64_t audio_scroll_started_ms;
     int alarm_active;             /* 1 only while an alarm MP3 is currently playing */
     int alarm_volume_percent;     /* current alarm ramp volume, 0..100 */
+    long long last_successful_alarm; /* epoch when alarm audio last opened successfully */
     struct alarm_slot alarms[MAX_ALARMS];
     int oled_ok;
     char clock_name[64];
-    int oled_font;         /* 0 seven, 1 seven thin, 2 pixel, 3 pixel bold */
+    int oled_font;         /* 0..3 built-in, 4 automatic font detection */
     char oled_font_file[128]; /* uploaded filename or system font key, empty = built-in */
+    char inside_font_file[128]; /* empty = follow clock font; otherwise system/uploaded font */
     int oled_font_size;    /* TrueType pixel size */
+    int font_policy_version;
     int clock_24h_mode;    /* 0 = 12-hour, 1 = 24-hour */
     int oled_color;        /* GUI panel colour: yellow, green, or white */
     pthread_mutex_t lock;
@@ -187,11 +192,14 @@ static struct app_state g_state = {
     .audio_scroll_started_ms = 0,
     .alarm_active = 0,
     .alarm_volume_percent = 0,
+    .last_successful_alarm = 0,
     .oled_ok = 0,
     .clock_name = DEFAULT_CLOCK_NAME,
-    .oled_font = 0,
+    .oled_font = SYSTEM_DEFAULT_FONT_ID,
     .oled_font_file = "",
+    .inside_font_file = "",
     .oled_font_size = 48,
+    .font_policy_version = 0,
     .clock_24h_mode = 0,
     .oled_color = MP_OLED_COLOR_GREEN,
     .lock = PTHREAD_MUTEX_INITIALIZER
@@ -204,14 +212,20 @@ struct weather_slot_state {
     char date_label[16];
     int temperature_c;
     int temperature_available;
+    int low_temperature_c;
+    int low_temperature_available;
+    int low_hour;
+    int high_temperature_c;
+    int high_temperature_available;
+    int high_hour;
     int precipitation_probability_percent;
     int icon;
 };
 
 struct weather_dashboard_state {
     char location[64];
-    char warning_type[128];
-    uint64_t warning_scroll_started_ms;
+    int warning_count;
+    char warning_descriptions[MP_WEATHER_WARNING_SLOTS][MP_WEATHER_WARNING_TEXT_MAX];
     int current_temperature_c;
     int current_temperature_available;
     int current_temperature_is_forecast;
@@ -226,8 +240,8 @@ struct weather_dashboard_state {
 
 struct weather_dashboard_snapshot {
     char location[64];
-    char warning_type[128];
-    uint64_t warning_scroll_started_ms;
+    int warning_count;
+    char warning_descriptions[MP_WEATHER_WARNING_SLOTS][MP_WEATHER_WARNING_TEXT_MAX];
     int current_temperature_c;
     int current_temperature_available;
     int current_temperature_is_forecast;
@@ -241,8 +255,8 @@ struct weather_dashboard_snapshot {
 
 static struct weather_dashboard_state g_weather = {
     .location = "",
-    .warning_type = "",
-    .warning_scroll_started_ms = 0,
+    .warning_count = 0,
+    .warning_descriptions = {{0}},
     .current_temperature_c = 0,
     .current_temperature_available = 0,
     .current_temperature_is_forecast = 0,
@@ -252,12 +266,30 @@ static struct weather_dashboard_state g_weather = {
     .uv_index = 0,
     .observed_at = 0,
     .slots = {
-        { .kind = MP_WEATHER_SLOT_ROOM, .label = "ROOM", .temperature_available = 0, .icon = MP_WEATHER_ICON_UNKNOWN },
+        { .kind = MP_WEATHER_SLOT_ROOM, .label = "INSIDE", .temperature_available = 0, .icon = MP_WEATHER_ICON_UNKNOWN },
         { .kind = MP_WEATHER_SLOT_FORECAST, .label = "LATER", .temperature_available = 0, .icon = MP_WEATHER_ICON_UNKNOWN },
         { .kind = MP_WEATHER_SLOT_FORECAST, .label = "LATER", .temperature_available = 0, .icon = MP_WEATHER_ICON_UNKNOWN }
     },
     .lock = PTHREAD_MUTEX_INITIALIZER
 };
+
+/*
+ * The active warning is owned by the OLED render thread. Weather updates may
+ * replace the pending warning list at any time, but this copy is not changed
+ * until the current display period reaches its natural boundary.
+ */
+struct weather_warning_display_state {
+    char text[MP_WEATHER_WARNING_TEXT_MAX];
+    uint64_t started_ms;
+    int refresh_needed;
+};
+
+static struct weather_warning_display_state g_weather_warning_display = {
+    .text = "",
+    .started_ms = 0,
+    .refresh_needed = 0
+};
+
 
 enum room_sensor_status {
     ROOM_SENSOR_DISABLED = 0,
@@ -327,12 +359,18 @@ static struct font_cache_state g_font = {
 static char g_dashboard_fit_font[128] = "";
 static int g_dashboard_fit_upper_size = 0;
 static int g_dashboard_fit_selected_size = 0;
+static char g_room_fit_font[128] = "";
+static int g_room_fit_upper_size = 0;
+static int g_room_fit_selected_size = 0;
 
 struct audio_player_state {
     pthread_mutex_t lock;
     pthread_cond_t stopped;
     int running;
     int stop_requested;
+    int alarm_mode;
+    int timed_out;
+    uint64_t alarm_deadline_ms;
     char file[MUSIC_FILE_MAX];
 };
 
@@ -341,6 +379,9 @@ static struct audio_player_state g_audio = {
     .stopped = PTHREAD_COND_INITIALIZER,
     .running = 0,
     .stop_requested = 0,
+    .alarm_mode = 0,
+    .timed_out = 0,
+    .alarm_deadline_ms = 0,
     .file = ""
 };
 
@@ -751,13 +792,16 @@ static void make_music_path(const char *file, char *out, size_t out_len) {
 
 
 enum asset_list_kind {
-    ASSET_LIST_MUSIC_MP3 = 1
+    ASSET_LIST_MUSIC_MP3 = 1,
+    ASSET_LIST_FONT = 2
 };
 
 
 static int asset_file_matches_kind(const char *dir, const char *name, int kind) {
-    if (!dir || !name) return 0;
-    return safe_asset_filename(name) && kind == ASSET_LIST_MUSIC_MP3 && has_mp3_ext(name);
+    if (!dir || !name || !safe_asset_filename(name)) return 0;
+    if (kind == ASSET_LIST_MUSIC_MP3) return has_mp3_ext(name);
+    if (kind == ASSET_LIST_FONT) return has_font_ext(name);
+    return 0;
 }
 
 static int scan_asset_files(const char *dir, int kind, char files[][ASSET_LIST_NAME_MAX], int max_files) {
@@ -784,6 +828,49 @@ static int scan_asset_files(const char *dir, int kind, char files[][ASSET_LIST_N
     return count;
 }
 
+static int apply_default_font_selection(void) {
+    char current[sizeof(g_state.oled_font_file)];
+    int builtin;
+
+    pthread_mutex_lock(&g_state.lock);
+    safe_str(current, sizeof(current), g_state.oled_font_file);
+    builtin = g_state.oled_font;
+    pthread_mutex_unlock(&g_state.lock);
+
+    int current_valid = 0;
+    if (current[0]) {
+        char path[MP_SYSTEM_FONT_PATH_MAX];
+        make_font_path(current, path, sizeof(path));
+        current_valid = path[0] && access(path, R_OK) == 0;
+    }
+    if (current_valid || (!current[0] && builtin != SYSTEM_DEFAULT_FONT_ID)) return 0;
+
+    char candidate[sizeof(g_state.oled_font_file)] = "";
+    char files[ASSET_LIST_MAX_FILES][ASSET_LIST_NAME_MAX];
+    int uploaded_count = scan_asset_files(FONT_DIR, ASSET_LIST_FONT, files, ASSET_LIST_MAX_FILES);
+    if (uploaded_count > 0) {
+        safe_str(candidate, sizeof(candidate), files[0]);
+    } else {
+        char system_path[MP_SYSTEM_FONT_PATH_MAX];
+        (void)mp_system_font_find_filename("DejaVuSansMono.ttf", candidate, sizeof(candidate),
+                                           system_path, sizeof(system_path));
+    }
+
+    int changed = 0;
+    pthread_mutex_lock(&g_state.lock);
+    if (strcmp(g_state.oled_font_file, current) == 0 && g_state.oled_font == builtin) {
+        if (strcmp(g_state.oled_font_file, candidate) != 0 ||
+            g_state.oled_font != SYSTEM_DEFAULT_FONT_ID) {
+            safe_str(g_state.oled_font_file, sizeof(g_state.oled_font_file), candidate);
+            g_state.oled_font = SYSTEM_DEFAULT_FONT_ID;
+            g_state.display_dirty = 1;
+            changed = 1;
+        }
+    }
+    pthread_mutex_unlock(&g_state.lock);
+    return changed;
+}
+
 static void init_alarm_defaults(void) {
     for (int i = 0; i < MAX_ALARMS; i++) {
         g_state.alarms[i].enabled = 0;
@@ -795,6 +882,32 @@ static void init_alarm_defaults(void) {
         g_state.alarms[i].fired_yday = -1;
         g_state.alarms[i].music_file[0] = '\0';
     }
+}
+
+static void reset_persistent_state_locked(void) {
+    g_state.display_mode = 0;
+    g_state.display_dirty = 1;
+    g_state.diagnostic_return_mode = 0;
+    g_state.diagnostic_until = 0;
+    g_state.global_volume = 80;
+    g_state.bedtime_enabled = 0;
+    g_state.bedtime_start_hour = 21;
+    g_state.bedtime_start_min = 0;
+    g_state.bedtime_end_hour = 7;
+    g_state.bedtime_end_min = 0;
+    g_state.bedtime_dim_percent = 35;
+    g_state.weather_warning_chime_enabled = 1;
+    g_state.weather_warning_chime_during_bedtime = 0;
+    g_state.last_successful_alarm = 0;
+    safe_str(g_state.clock_name, sizeof(g_state.clock_name), DEFAULT_CLOCK_NAME);
+    g_state.oled_font = SYSTEM_DEFAULT_FONT_ID;
+    g_state.oled_font_file[0] = '\0';
+    g_state.inside_font_file[0] = '\0';
+    g_state.oled_font_size = 48;
+    g_state.font_policy_version = 0;
+    g_state.clock_24h_mode = 0;
+    g_state.oled_color = MP_OLED_COLOR_GREEN;
+    init_alarm_defaults();
 }
 
 
@@ -810,12 +923,14 @@ static void init_alarm_defaults(void) {
     X("weather_warning_chime_during_bedtime", g_state.weather_warning_chime_during_bedtime, "%d") \
     X("oled_font", g_state.oled_font, "%d") \
     X("oled_font_size", g_state.oled_font_size, "%d") \
+    X("font_policy_version", g_state.font_policy_version, "%d") \
     X("clock_24h_mode", g_state.clock_24h_mode, "%d") \
     X("oled_color", g_state.oled_color, "%d")
 
 #define CONFIG_STRING_FIELDS(X) \
     X("clock_name", g_state.clock_name, sizeof(g_state.clock_name)) \
-    X("oled_font_file", g_state.oled_font_file, sizeof(g_state.oled_font_file))
+    X("oled_font_file", g_state.oled_font_file, sizeof(g_state.oled_font_file)) \
+    X("inside_font_file", g_state.inside_font_file, sizeof(g_state.inside_font_file))
 
 #define CONFIG_ALARM_INT_FIELDS(X) \
     for (int i = 0; i < MAX_ALARMS; i++) { \
@@ -842,6 +957,7 @@ static void save_config(void) {
     if (!f) return;
 
     pthread_mutex_lock(&g_state.lock);
+fprintf(f, "last_successful_alarm=%lld\n", g_state.last_successful_alarm);
 #define SAVE_CONFIG_INT(cfg_key, field, fmt) fprintf(f, cfg_key "=" fmt "\n", field);
     CONFIG_INT_FIELDS(SAVE_CONFIG_INT)
 #undef SAVE_CONFIG_INT
@@ -894,6 +1010,14 @@ static void load_config(void) {
 
         int matched = 0;
         char tmp_key[128];
+        if (strcmp(key, "last_successful_alarm") == 0) {
+            char *end = NULL;
+            errno = 0;
+            long long parsed = strtoll(val, &end, 10);
+            if (!errno && end != val && *end == '\0' && parsed >= 0)
+                g_state.last_successful_alarm = parsed;
+            matched = 1;
+        }
 #define LOAD_CONFIG_ALARM_INT(idx, field_str, field, fmt, conversion) \
         do { \
             snprintf(tmp_key, sizeof(tmp_key), "alarm%d_%s", (idx) + 1, field_str); \
@@ -954,6 +1078,7 @@ static void load_config(void) {
     g_state.weather_warning_chime_during_bedtime = g_state.weather_warning_chime_during_bedtime ? 1 : 0;
     g_state.clock_24h_mode = g_state.clock_24h_mode ? 1 : 0;
     g_state.oled_color = clamp_int(g_state.oled_color, MP_OLED_COLOR_YELLOW, MP_OLED_COLOR_WHITE);
+    if (g_state.last_successful_alarm < 0) g_state.last_successful_alarm = 0;
 
     for (int i = 0; i < MAX_ALARMS; i++) {
         struct alarm_slot *a = &g_state.alarms[i];
@@ -971,8 +1096,19 @@ static void load_config(void) {
     }
 
     sanitize_clock_name(g_state.clock_name);
-    if (g_state.oled_font < 0 || g_state.oled_font > 3) g_state.oled_font = 0;
+    if (g_state.font_policy_version < FONT_POLICY_VERSION) {
+        if (!g_state.oled_font_file[0] && g_state.oled_font == 0)
+            g_state.oled_font = SYSTEM_DEFAULT_FONT_ID;
+        g_state.font_policy_version = FONT_POLICY_VERSION;
+    }
+    if (g_state.oled_font < 0 || g_state.oled_font > SYSTEM_DEFAULT_FONT_ID)
+        g_state.oled_font = SYSTEM_DEFAULT_FONT_ID;
     if (g_state.oled_font_size < 18 || g_state.oled_font_size > 54) g_state.oled_font_size = 48;
+    if (g_state.inside_font_file[0]) {
+        char path[MP_SYSTEM_FONT_PATH_MAX];
+        make_font_path(g_state.inside_font_file, path, sizeof(path));
+        if (!path[0] || access(path, R_OK) != 0) g_state.inside_font_file[0] = '\0';
+    }
 }
 
 /* ---------------- OLED low level ---------------- */
@@ -1134,6 +1270,13 @@ static void oled_set_px(int x, int y, uint8_t gray4) {
     } else {
         fb[idx] = (fb[idx] & 0xF0) | gray4;
     }
+}
+
+static uint8_t oled_get_px(int x, int y) {
+    if (x < 0 || y < 0 || x >= OLED_W || y >= OLED_H) return 0;
+    const uint8_t *fb = oled_draw_fb();
+    size_t idx = (size_t)(y * OLED_W + x) / 2;
+    return (x & 1) == 0 ? (uint8_t)(fb[idx] >> 4) : (uint8_t)(fb[idx] & 0x0F);
 }
 
 /*
@@ -1653,17 +1796,17 @@ static const int weather_separators[] = {102, 153, 204};
 #define DASHBOARD_SECONDS_LINE_LEVEL 7
 #define DASHBOARD_SECONDS_LINE_CLEAR_PX 3 /* clear pixels inside each usable clock-panel edge */
 #define DASHBOARD_CLOCK_DATE_Y 54
-#define DASHBOARD_CLOCK_X_SHIFT -2
+#define DASHBOARD_CLOCK_CONTENT_X0 (WEATHER_LEFT_X0 + 2)
+#define DASHBOARD_CLOCK_CONTENT_X1 (WEATHER_LEFT_X1 - 2)
 #define DASHBOARD_FOOTER_X0 2
 #define DASHBOARD_FOOTER_X1 100
 #define DASHBOARD_MARQUEE_SPEED_PX_PER_SEC 18u
 #define DASHBOARD_MARQUEE_GAP_PX 24
 #define DASHBOARD_MARQUEE_FRAME_US 75000u
+#define WEATHER_WARNING_MIN_DISPLAY_MS 12000u
 
 static int dashboard_clock_center_x(void) {
-    return WEATHER_LEFT_X0 +
-           ((WEATHER_LEFT_X1 - WEATHER_LEFT_X0 + 1) / 2) +
-           DASHBOARD_CLOCK_X_SHIFT;
+    return (DASHBOARD_CLOCK_CONTENT_X0 + DASHBOARD_CLOCK_CONTENT_X1) / 2;
 }
 
 static void oled_draw_line(int x0, int y0, int x1, int y1, uint8_t c) {
@@ -1749,6 +1892,7 @@ static int weather_compact_glyph(char ch, uint8_t rows[5]) {
         case 'Z': { const uint8_t v[5] = {7,1,2,4,7}; memcpy(rows, v, 5); return 3; }
         case '%': { const uint8_t v[5] = {5,1,2,4,5}; memcpy(rows, v, 5); return 3; }
         case '-': { const uint8_t v[5] = {0,0,7,0,0}; memcpy(rows, v, 5); return 3; }
+        case '.': { const uint8_t v[5] = {0,0,0,0,1}; memcpy(rows, v, 5); return 1; }
         case '^': { const uint8_t v[5] = {2,5,2,0,0}; memcpy(rows, v, 5); return 3; }
         case '(': { const uint8_t v[5] = {1,2,2,2,1}; memcpy(rows, v, 5); return 2; }
         case ')': { const uint8_t v[5] = {2,1,1,1,2}; memcpy(rows, v, 5); return 2; }
@@ -1767,6 +1911,37 @@ static int weather_compact_text_width(const char *text) {
         width += glyph_width + 1;
     }
     return width > 0 ? width - 1 : 0;
+}
+
+/* Centre compact text by its illuminated pixels, not only its advance box. */
+static int weather_compact_text_optical_x(const char *text, int target_center_x) {
+    int pen_x = 0;
+    int lit_count = 0;
+    int lit_x_sum = 0;
+
+    if (!text || !*text) return target_center_x;
+
+    for (const char *p = text; *p; p++) {
+        uint8_t rows[5];
+        int glyph_width = weather_compact_glyph(*p, rows);
+        if (glyph_width <= 0) continue;
+
+        for (int row = 0; row < 5; row++) {
+            for (int col = 0; col < glyph_width; col++) {
+                if (rows[row] & (1u << (glyph_width - 1 - col))) {
+                    lit_x_sum += pen_x + col;
+                    lit_count++;
+                }
+            }
+        }
+        pen_x += glyph_width + 1;
+    }
+
+    if (lit_count == 0)
+        return target_center_x - (weather_compact_text_width(text) / 2);
+
+    int optical_center_x = (lit_x_sum + (lit_count / 2)) / lit_count;
+    return target_center_x - optical_center_x;
 }
 
 static void make_weather_location_label(const char *location, char *label, size_t label_size) {
@@ -1800,6 +1975,34 @@ static void make_weather_location_label(const char *location, char *label, size_
     }
 }
 
+static void make_weather_header_label(const char *location, int alarm_on,
+                                      char *label, size_t label_size) {
+    static const char alarm_suffix[] = " - ALARM ON";
+    char location_label[64];
+    const int max_width = WEATHER_LEFT_X1 - WEATHER_LEFT_X0 - 4;
+
+    if (!label || label_size == 0) return;
+    make_weather_location_label(location, location_label, sizeof(location_label));
+
+    if (!alarm_on) {
+        safe_str(label, label_size, location_label);
+        return;
+    }
+
+    while (location_label[0]) {
+        snprintf(label, label_size, "%s%s", location_label, alarm_suffix);
+        if (weather_compact_text_width(label) <= max_width) return;
+
+        size_t used = strlen(location_label);
+        location_label[--used] = '\0';
+        while (used > 0 &&
+               (location_label[used - 1] == ' ' || location_label[used - 1] == '-'))
+            location_label[--used] = '\0';
+    }
+
+    safe_str(label, label_size, "ALARM ON");
+}
+
 static void draw_weather_compact_text(int x, int y, const char *text, uint8_t c) {
     if (!text) return;
     for (const char *p = text; *p; p++) {
@@ -1814,6 +2017,30 @@ static void draw_weather_compact_text(int x, int y, const char *text, uint8_t c)
         }
         x += glyph_width + 1;
     }
+}
+
+static void draw_weather_compact_text_centered(
+    int x0,
+    int x1,
+    int y,
+    const char *text,
+    uint8_t c
+) {
+    if (!text) return;
+    int width = weather_compact_text_width(text);
+    int x = x0 + ((x1 - x0 + 1 - width) / 2);
+    draw_weather_compact_text(x, y, text, c);
+}
+
+static void draw_weather_compact_text_right_aligned(
+    int x1,
+    int y,
+    const char *text,
+    uint8_t c
+) {
+    if (!text) return;
+    int width = weather_compact_text_width(text);
+    draw_weather_compact_text(x1 - width + 1, y, text, c);
 }
 
 static void draw_weather_temperature_precip_centered(
@@ -1838,32 +2065,57 @@ static void draw_weather_temperature_precip_centered(
         snprintf(text, sizeof(text), "--^");
     }
 
-    int width = weather_compact_text_width(text);
-    int x = x0 + ((x1 - x0 + 1 - width) / 2);
-    draw_weather_compact_text(x, y, text, c);
+    draw_weather_compact_text_centered(x0, x1, y, text, c);
 }
 
-static void draw_room_temperature_humidity_centered(
+/* Shared lower-row baseline keeps TODAY POP, OUTSIDE temperature,
+   forecast temperature, and INSIDE relative humidity level across panels. */
+#define WEATHER_PANEL_LOWER_ROW_Y 47
+#define WEATHER_TODAY_ROW_SPACING 15
+#define WEATHER_TODAY_HIGH_ROW_Y \
+    (WEATHER_PANEL_LOWER_ROW_Y - WEATHER_TODAY_ROW_SPACING)
+#define WEATHER_TODAY_LOW_ROW_Y \
+    (WEATHER_TODAY_HIGH_ROW_Y - WEATHER_TODAY_ROW_SPACING)
+
+static void draw_weather_today_panel(
     int x0,
     int x1,
-    int y,
-    const struct room_sensor_snapshot *sensor,
-    uint8_t c
+    const struct weather_slot_state *slot
 ) {
-    char text[32];
-    if (sensor && (sensor->status == ROOM_SENSOR_ACTIVE ||
-                   sensor->status == ROOM_SENSOR_STALE)) {
-        int temperature = clamp_int((int)lround(sensor->temperature_c), -99, 99);
-        int humidity = clamp_int((int)lround(sensor->humidity_percent), 0, 100);
-        snprintf(text, sizeof(text), "%d^ %d%%", temperature, humidity);
-    } else {
-        snprintf(text, sizeof(text), "--^ --%%");
-    }
+    if (!slot) return;
 
-    int width = weather_compact_text_width(text);
-    int x = x0 + ((x1 - x0 + 1 - width) / 2);
-    draw_weather_compact_text(x, y, text, c);
+    char low_value[16];
+    char high_value[16];
+    char precipitation_value[16];
+    const int label_x = x0 + 5;
+    const int value_x1 = x1 - 5;
+
+    if (slot->low_temperature_available)
+        snprintf(low_value, sizeof(low_value), "%d^",
+                 slot->low_temperature_c);
+    else
+        snprintf(low_value, sizeof(low_value), "--^");
+
+    if (slot->high_temperature_available)
+        snprintf(high_value, sizeof(high_value), "%d^",
+                 slot->high_temperature_c);
+    else
+        snprintf(high_value, sizeof(high_value), "--^");
+
+    snprintf(precipitation_value, sizeof(precipitation_value), "%d%%",
+             clamp_int(slot->precipitation_probability_percent, 0, 100));
+
+    draw_weather_compact_text(label_x, WEATHER_TODAY_LOW_ROW_Y, "L", 13);
+    draw_weather_compact_text_right_aligned(
+        value_x1, WEATHER_TODAY_LOW_ROW_Y, low_value, 13);
+    draw_weather_compact_text(label_x, WEATHER_TODAY_HIGH_ROW_Y, "H", 13);
+    draw_weather_compact_text_right_aligned(
+        value_x1, WEATHER_TODAY_HIGH_ROW_Y, high_value, 13);
+    draw_weather_compact_text(label_x, WEATHER_PANEL_LOWER_ROW_Y, "POP", 11);
+    draw_weather_compact_text_right_aligned(
+        value_x1, WEATHER_PANEL_LOWER_ROW_Y, precipitation_value, 11);
 }
+
 
 
 #define WEATHER_ICON_ASSET_SIZE 32
@@ -1930,22 +2182,6 @@ static int draw_weather_icon_asset(int slot_index, int cx, int cy) {
     return draw_grayscale_icon_asset(path, cx, cy);
 }
 
-static const char *room_sensor_icon_filename(enum room_sensor_status status) {
-    if (status == ROOM_SENSOR_ACTIVE) return "room-sensor-normal.raw";
-    if (status == ROOM_SENSOR_STALE) return "room-sensor-stale.raw";
-    if (status == ROOM_SENSOR_ERROR || status == ROOM_SENSOR_DISABLED)
-        return "room-sensor-error.raw";
-    return "room-sensor-waiting.raw";
-}
-
-static int draw_room_sensor_icon(enum room_sensor_status status, int cx, int cy) {
-    char path[256];
-    int written = snprintf(path, sizeof(path), ROOM_SENSOR_ASSET_DIR "/%s",
-                           room_sensor_icon_filename(status));
-    if (written < 0 || (size_t)written >= sizeof(path)) return -1;
-    return draw_grayscale_icon_asset(path, cx, cy);
-}
-
 static void draw_weather_icon_missing(int cx, int cy) {
     int x0 = cx - 10;
     int y0 = cy - 12;
@@ -1966,8 +2202,9 @@ static void weather_snapshot(struct weather_dashboard_snapshot *out) {
     if (!out) return;
     pthread_mutex_lock(&g_weather.lock);
     safe_str(out->location, sizeof(out->location), g_weather.location);
-    safe_str(out->warning_type, sizeof(out->warning_type), g_weather.warning_type);
-    out->warning_scroll_started_ms = g_weather.warning_scroll_started_ms;
+    out->warning_count = g_weather.warning_count;
+    memcpy(out->warning_descriptions, g_weather.warning_descriptions,
+           sizeof(out->warning_descriptions));
     out->current_temperature_c = g_weather.current_temperature_c;
     out->current_temperature_available = g_weather.current_temperature_available;
     out->current_temperature_is_forecast = g_weather.current_temperature_is_forecast;
@@ -2011,7 +2248,7 @@ static void draw_dashboard_marquee_line(const char *text, uint64_t started_ms) {
     }
 
     int cycle_width = width + DASHBOARD_MARQUEE_GAP_PX;
-    int x = clip_x1 - 1 - width + 1 - dashboard_marquee_offset(cycle_width, started_ms);
+    int x = clip_x0 - dashboard_marquee_offset(cycle_width, started_ms);
     draw_text5x7_clipped(x, DASHBOARD_CLOCK_DATE_Y, text, 11, clip_x0, clip_x1);
     x += cycle_width;
     draw_text5x7_clipped(x, DASHBOARD_CLOCK_DATE_Y, text, 11, clip_x0, clip_x1);
@@ -2393,6 +2630,252 @@ static int draw_dashboard_time_ttf_binary(const char *font_file, int upper_size,
     return 0;
 }
 
+
+struct dashboard_text_metrics {
+    int min_x;
+    int max_x;
+    int min_y;
+    int max_y;
+    int advance_x;
+};
+
+static int dashboard_text_metrics_locked(FT_Face face, const char *text,
+                                         struct dashboard_text_metrics *metrics) {
+    if (!face || !text || !*text || !metrics) return -1;
+
+    int pen_x = 0;
+    int min_x = 99999;
+    int max_x = -99999;
+    int min_y = 99999;
+    int max_y = -99999;
+
+    for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
+        if (dashboard_load_mono_glyph_locked(face, *p) != 0) return -1;
+        FT_GlyphSlot glyph = face->glyph;
+        FT_Bitmap *bitmap = &glyph->bitmap;
+        int glyph_x0 = pen_x + glyph->bitmap_left;
+        int glyph_x1 = glyph_x0 + (int)bitmap->width;
+        int glyph_y0 = -glyph->bitmap_top;
+        int glyph_y1 = glyph_y0 + (int)bitmap->rows;
+        if (glyph_x0 < min_x) min_x = glyph_x0;
+        if (glyph_x1 > max_x) max_x = glyph_x1;
+        if (glyph_y0 < min_y) min_y = glyph_y0;
+        if (glyph_y1 > max_y) max_y = glyph_y1;
+
+        int advance = (int)(glyph->advance.x >> 6);
+        if (advance <= 0) advance = (int)bitmap->width + 1;
+        pen_x += advance;
+    }
+
+    if (max_x <= min_x || max_y <= min_y) return -1;
+    metrics->min_x = min_x;
+    metrics->max_x = max_x;
+    metrics->min_y = min_y;
+    metrics->max_y = max_y;
+    metrics->advance_x = pen_x;
+    return 0;
+}
+
+static void dashboard_draw_text_glyph_locked(FT_Face face, unsigned char ch,
+                                             int pen_x, int baseline_y,
+                                             uint8_t level) {
+    if (!face || level == 0 || dashboard_load_mono_glyph_locked(face, ch) != 0) return;
+
+    FT_GlyphSlot glyph = face->glyph;
+    FT_Bitmap *bitmap = &glyph->bitmap;
+    int gx = pen_x + glyph->bitmap_left;
+    int gy = baseline_y - glyph->bitmap_top;
+    int pitch = bitmap->pitch;
+    int row_stride = pitch >= 0 ? pitch : -pitch;
+
+    for (unsigned int row = 0; row < bitmap->rows; row++) {
+        unsigned int source_row = pitch >= 0 ? row : bitmap->rows - 1u - row;
+        const unsigned char *row_data =
+            bitmap->buffer + source_row * (unsigned int)row_stride;
+        for (unsigned int col = 0; col < bitmap->width; col++) {
+            if (row_data[col >> 3] & (0x80u >> (col & 7u)))
+                oled_set_px(gx + (int)col, gy + (int)row, level);
+        }
+    }
+}
+
+static int draw_room_temperature_ttf_binary(const char *font_file, int upper_size,
+                                             const char *temperature_text,
+                                             int region_x0, int region_y0,
+                                             int region_x1, int region_y1,
+                                             uint8_t level) {
+    if (!font_file || !*font_file || !temperature_text || !*temperature_text)
+        return -1;
+
+    char font_path[512];
+    make_font_path(font_file, font_path, sizeof(font_path));
+    upper_size = clamp_int(upper_size, 14, 34);
+
+    pthread_mutex_lock(&g_font.lock);
+
+    int selected_size = 0;
+    struct dashboard_text_metrics metrics;
+    memset(&metrics, 0, sizeof(metrics));
+    const int region_w = region_x1 - region_x0 + 1;
+    const int region_h = region_y1 - region_y0 + 1;
+    const int degree_reserve = 4;
+
+    int cached = strcmp(g_room_fit_font, font_file) == 0 &&
+                 g_room_fit_upper_size == upper_size &&
+                 g_room_fit_selected_size >= 14;
+
+    if (cached) {
+        selected_size = g_room_fit_selected_size;
+        if (font_cache_ensure_locked(font_file, font_path, selected_size) != 0 ||
+            !g_font.face ||
+            dashboard_text_metrics_locked(g_font.face, temperature_text, &metrics) != 0) {
+            pthread_mutex_unlock(&g_font.lock);
+            return -1;
+        }
+    } else {
+        if (font_cache_ensure_locked(font_file, font_path, upper_size) != 0 || !g_font.face) {
+            pthread_mutex_unlock(&g_font.lock);
+            return -1;
+        }
+
+        struct dashboard_text_metrics worst_case;
+        memset(&worst_case, 0, sizeof(worst_case));
+        for (int size = upper_size; size >= 14; size--) {
+            if (FT_Set_Pixel_Sizes(g_font.face, 0, (FT_UInt)size) != 0) continue;
+            if (dashboard_text_metrics_locked(g_font.face, "-99.9", &worst_case) != 0)
+                continue;
+            int worst_w = worst_case.max_x - worst_case.min_x;
+            int worst_h = worst_case.max_y - worst_case.min_y;
+            if (worst_w + degree_reserve <= region_w && worst_h <= region_h) {
+                selected_size = size;
+                break;
+            }
+        }
+
+        if (selected_size == 0 ||
+            FT_Set_Pixel_Sizes(g_font.face, 0, (FT_UInt)selected_size) != 0 ||
+            dashboard_text_metrics_locked(g_font.face, temperature_text, &metrics) != 0) {
+            pthread_mutex_unlock(&g_font.lock);
+            return -1;
+        }
+
+        g_font.loaded_size = selected_size;
+        safe_str(g_room_fit_font, sizeof(g_room_fit_font), font_file);
+        g_room_fit_upper_size = upper_size;
+        g_room_fit_selected_size = selected_size;
+    }
+
+    int text_w = metrics.max_x - metrics.min_x;
+    int text_h = metrics.max_y - metrics.min_y;
+    int total_w = text_w + degree_reserve;
+    int text_left = region_x0 + (region_w - total_w) / 2;
+    int pen_x = text_left - metrics.min_x;
+    int baseline_y = region_y0 + (region_h - text_h) / 2 - metrics.min_y;
+
+    for (const unsigned char *ch = (const unsigned char *)temperature_text; *ch; ch++) {
+        if (dashboard_load_mono_glyph_locked(g_font.face, *ch) != 0) continue;
+        int advance = (int)(g_font.face->glyph->advance.x >> 6);
+        if (advance <= 0) advance = (int)g_font.face->glyph->bitmap.width + 1;
+        dashboard_draw_text_glyph_locked(g_font.face, *ch, pen_x, baseline_y, level);
+        pen_x += advance;
+    }
+
+    int degree_x = text_left + text_w + 1;
+    int degree_y = baseline_y + metrics.min_y + 1;
+    oled_set_px(degree_x + 1, degree_y, level);
+    oled_set_px(degree_x, degree_y + 1, level);
+    oled_set_px(degree_x + 2, degree_y + 1, level);
+    oled_set_px(degree_x + 1, degree_y + 2, level);
+
+    pthread_mutex_unlock(&g_font.lock);
+    return 0;
+}
+
+static void draw_weather_compact_text_scaled_centered(
+    int x0,
+    int x1,
+    int y,
+    const char *text,
+    int scale,
+    uint8_t level
+) {
+    if (!text || scale < 1) return;
+
+    int unscaled_width = weather_compact_text_width(text);
+    int width = unscaled_width * scale;
+    int x = x0 + ((x1 - x0 + 1 - width) / 2);
+
+    for (const char *p = text; *p; p++) {
+        uint8_t rows[5];
+        int glyph_width = weather_compact_glyph(*p, rows);
+        if (glyph_width <= 0) continue;
+        for (int row = 0; row < 5; row++) {
+            for (int col = 0; col < glyph_width; col++) {
+                if (rows[row] & (1u << (glyph_width - 1 - col)))
+                    oled_fill_rect(x + col * scale, y + row * scale,
+                                   scale, scale, level);
+            }
+        }
+        x += (glyph_width + 1) * scale;
+    }
+}
+
+static void draw_room_temperature_panel(
+    int x0,
+    int x1,
+    const char *font_file,
+    int upper_font_size,
+    const struct room_sensor_snapshot *sensor
+) {
+    char temperature_text[16];
+    char fallback_text[16];
+    char humidity_text[16];
+
+    int has_reading = sensor &&
+        (sensor->status == ROOM_SENSOR_ACTIVE || sensor->status == ROOM_SENSOR_STALE);
+    uint8_t temperature_level =
+        sensor && sensor->status == ROOM_SENSOR_STALE ? 9 : 15;
+    uint8_t humidity_level =
+        sensor && sensor->status == ROOM_SENSOR_STALE ? 6 : 10;
+
+    if (has_reading) {
+        double temperature = sensor->temperature_c;
+        if (temperature < -99.9) temperature = -99.9;
+        if (temperature > 99.9) temperature = 99.9;
+        int humidity = clamp_int((int)lround(sensor->humidity_percent), 0, 100);
+        snprintf(temperature_text, sizeof(temperature_text), "%.1f", temperature);
+        snprintf(fallback_text, sizeof(fallback_text), "%.1f^", temperature);
+        snprintf(humidity_text, sizeof(humidity_text), "%d%%", humidity);
+    } else {
+        safe_str(temperature_text, sizeof(temperature_text), "--.-");
+        safe_str(fallback_text, sizeof(fallback_text), "--.-^");
+        safe_str(humidity_text, sizeof(humidity_text), "--%");
+        temperature_level = 8;
+        humidity_level = 6;
+    }
+
+    int used_ttf = font_file && *font_file &&
+        draw_room_temperature_ttf_binary(
+            font_file,
+            upper_font_size,
+            temperature_text,
+            x0 + 2,
+            13,
+            x1 - 2,
+            43,
+            temperature_level
+        ) == 0;
+
+    if (!used_ttf)
+        draw_weather_compact_text_scaled_centered(
+            x0 + 1, x1 - 1, 23, fallback_text, 2, temperature_level);
+
+    draw_weather_compact_text_centered(
+        x0 + 1, x1 - 1, WEATHER_PANEL_LOWER_ROW_Y,
+        humidity_text, humidity_level);
+}
+
+
 static void draw_dashboard_pixel_digit_right_aligned(int cell_x, int cell_w,
                                                        int y, int sx, int sy,
                                                        int digit, uint8_t level) {
@@ -2449,6 +2932,55 @@ static void draw_dashboard_time_pixel_fallback(int hour, int minute,
 
 
 
+/*
+ * Centre the clock from the pixels that were actually rendered.
+ *
+ * Font advance widths, side bearings, and narrow digits can make a nominally
+ * centred cell grid look offset. This pass finds the visible horizontal bounds
+ * and translates the complete clock as one image. It therefore works for every
+ * FreeType font and for the built-in pixel fallback without font-specific
+ * offsets. The colon blink cannot change the result because the outer digits
+ * define the horizontal bounds.
+ */
+static int dashboard_center_rendered_clock_x(int x0, int y0, int x1, int y1) {
+    x0 = clamp_int(x0, 0, OLED_W - 1);
+    x1 = clamp_int(x1, 0, OLED_W - 1);
+    y0 = clamp_int(y0, 0, OLED_H - 1);
+    y1 = clamp_int(y1, 0, OLED_H - 1);
+    if (x1 < x0 || y1 < y0) return 0;
+
+    int ink_x0 = x1 + 1;
+    int ink_x1 = x0 - 1;
+    for (int y = y0; y <= y1; y++) {
+        for (int x = x0; x <= x1; x++) {
+            if (oled_get_px(x, y) == 0) continue;
+            if (x < ink_x0) ink_x0 = x;
+            if (x > ink_x1) ink_x1 = x;
+        }
+    }
+    if (ink_x1 < ink_x0) return 0;
+
+    const int target_center2 = x0 + x1;
+    const int ink_center2 = ink_x0 + ink_x1;
+    const int delta2 = target_center2 - ink_center2;
+    int shift_x = delta2 >= 0 ? (delta2 + 1) / 2 : (delta2 - 1) / 2;
+    shift_x = clamp_int(shift_x, x0 - ink_x0, x1 - ink_x1);
+    if (shift_x == 0) return 0;
+
+    uint8_t row[OLED_W];
+    const int width = x1 - x0 + 1;
+    for (int y = y0; y <= y1; y++) {
+        for (int i = 0; i < width; i++) row[i] = oled_get_px(x0 + i, y);
+        for (int x = x0; x <= x1; x++) oled_set_px(x, y, 0);
+        for (int i = 0; i < width; i++) {
+            int destination_x = x0 + i + shift_x;
+            if (row[i] != 0 && destination_x >= x0 && destination_x <= x1)
+                oled_set_px(destination_x, y, row[i]);
+        }
+    }
+    return shift_x;
+}
+
 static void dashboard_audio_display(char *out, size_t out_len,
                                     const char *title, const char *artist,
                                     const char *file) {
@@ -2473,6 +3005,92 @@ static void dashboard_audio_display(char *out, size_t out_len,
         safe_str(out, out_len, oled_file);
     else
         safe_str(out, out_len, "NOW PLAYING");
+}
+
+static int dashboard_footer_text_is_marquee(const char *text) {
+    int available = DASHBOARD_FOOTER_X1 - DASHBOARD_FOOTER_X0 + 1;
+    return text5x7_ink_width(text ? text : "") > available;
+}
+
+static uint64_t weather_warning_display_duration_ms(const char *text) {
+    int width = text5x7_ink_width(text ? text : "");
+    int available = DASHBOARD_FOOTER_X1 - DASHBOARD_FOOTER_X0 + 1;
+    if (width <= available) return WEATHER_WARNING_MIN_DISPLAY_MS;
+
+    /* One exact marquee cycle. Never rotate or restart midway through a pass. */
+    uint64_t cycle_pixels = (uint64_t)width + DASHBOARD_MARQUEE_GAP_PX;
+    return (cycle_pixels * 1000u + DASHBOARD_MARQUEE_SPEED_PX_PER_SEC - 1u) /
+           DASHBOARD_MARQUEE_SPEED_PX_PER_SEC;
+}
+
+static int weather_warning_next_text(
+    const struct weather_dashboard_snapshot *weather,
+    const char *current_text,
+    char *out,
+    size_t out_len
+) {
+    if (!out || out_len == 0) return 0;
+    out[0] = '\0';
+    if (!weather || weather->warning_count <= 0) return 0;
+
+    int next_index = 0;
+    if (current_text && current_text[0]) {
+        for (int i = 0; i < weather->warning_count; i++) {
+            if (strcmp(weather->warning_descriptions[i], current_text) == 0) {
+                next_index = (i + 1) % weather->warning_count;
+                break;
+            }
+        }
+    }
+
+    safe_str(out, out_len, weather->warning_descriptions[next_index]);
+    return out[0] != '\0';
+}
+
+static int dashboard_weather_warning_state(
+    const struct weather_dashboard_snapshot *weather,
+    char *text,
+    size_t text_len,
+    uint64_t *started_ms
+) {
+    if (!text || text_len == 0) return 0;
+
+    uint64_t now_ms = monotonic_millis();
+    if (!g_weather_warning_display.text[0]) {
+        if (!weather_warning_next_text(
+                weather, "", g_weather_warning_display.text,
+                sizeof(g_weather_warning_display.text))) {
+            return 0;
+        }
+        g_weather_warning_display.started_ms = now_ms;
+        g_weather_warning_display.refresh_needed = 1;
+    } else {
+        uint64_t duration_ms = weather_warning_display_duration_ms(
+            g_weather_warning_display.text);
+        uint64_t elapsed_ms = now_ms >= g_weather_warning_display.started_ms
+            ? now_ms - g_weather_warning_display.started_ms : 0;
+
+        if (elapsed_ms >= duration_ms) {
+            char next_text[MP_WEATHER_WARNING_TEXT_MAX];
+            if (!weather_warning_next_text(
+                    weather, g_weather_warning_display.text,
+                    next_text, sizeof(next_text))) {
+                g_weather_warning_display.text[0] = '\0';
+                g_weather_warning_display.started_ms = 0;
+                g_weather_warning_display.refresh_needed = 1;
+                return 0;
+            }
+
+            safe_str(g_weather_warning_display.text,
+                     sizeof(g_weather_warning_display.text), next_text);
+            g_weather_warning_display.started_ms = now_ms;
+            g_weather_warning_display.refresh_needed = 1;
+        }
+    }
+
+    safe_str(text, text_len, g_weather_warning_display.text);
+    if (started_ms) *started_ms = g_weather_warning_display.started_ms;
+    return text[0] != '\0';
 }
 
 static int dashboard_footer_state(char *text, size_t text_len,
@@ -2502,15 +3120,12 @@ static int dashboard_footer_state(char *text, size_t text_len,
         struct weather_dashboard_snapshot weather;
         memset(&weather, 0, sizeof(weather));
         weather_snapshot(&weather);
-        if (weather.warning_type[0]) {
-            safe_str(text, text_len, weather.warning_type);
-            if (started_ms) *started_ms = weather.warning_scroll_started_ms;
-        }
+        (void)dashboard_weather_warning_state(
+            &weather, text, text_len, started_ms);
     }
 
     if (!text[0]) return 0;
-    if (is_marquee)
-        *is_marquee = text5x7_ink_width(text) > (DASHBOARD_FOOTER_X1 - DASHBOARD_FOOTER_X0 + 1);
+    if (is_marquee) *is_marquee = dashboard_footer_text_is_marquee(text);
     return 1;
 }
 
@@ -2533,11 +3148,15 @@ static void draw_dashboard_footer(const struct tm *tmv) {
                           DASHBOARD_CLOCK_DATE_Y, date_text, 11);
 }
 
-static int dashboard_footer_marquee_active(void) {
+static int dashboard_footer_refresh_active(void) {
     char footer_text[MP_ID3_TEXT_MAX * 2 + 4];
     uint64_t started_ms = 0;
     int marquee = 0;
-    return dashboard_footer_state(footer_text, sizeof(footer_text), &started_ms, &marquee) && marquee;
+    int has_footer = dashboard_footer_state(
+        footer_text, sizeof(footer_text), &started_ms, &marquee);
+    int refresh_needed = g_weather_warning_display.refresh_needed;
+    g_weather_warning_display.refresh_needed = 0;
+    return refresh_needed || (has_footer && marquee);
 }
 
 static void refresh_dashboard_footer(void) {
@@ -2563,11 +3182,20 @@ static void draw_weather_dashboard_screen(void) {
 
     int clock_24h_mode;
     int upper_font_size;
+    int alarm_on = 0;
     char font_file[128];
+    char inside_font_file[128];
     pthread_mutex_lock(&g_state.lock);
     clock_24h_mode = g_state.clock_24h_mode;
     upper_font_size = clamp_int(g_state.oled_font_size, 18, 72);
     safe_str(font_file, sizeof(font_file), g_state.oled_font_file);
+    safe_str(inside_font_file, sizeof(inside_font_file), g_state.inside_font_file);
+    for (int i = 0; i < MAX_ALARMS; i++) {
+        if (g_state.alarms[i].enabled && g_state.alarms[i].weekdays) {
+            alarm_on = 1;
+            break;
+        }
+    }
     pthread_mutex_unlock(&g_state.lock);
 
     struct weather_dashboard_snapshot weather;
@@ -2593,13 +3221,8 @@ static void draw_weather_dashboard_screen(void) {
     for (size_t i = 0; i < sizeof(weather_separators) / sizeof(weather_separators[0]); i++)
         oled_draw_line(weather_separators[i], 3, weather_separators[i], 60, 7);
 
-    char location_label[32];
-    make_weather_location_label(weather.location, location_label, sizeof(location_label));
-    if (location_label[0]) {
-        int location_width = weather_compact_text_width(location_label);
-        int location_x = dashboard_clock_center_x() - (location_width / 2);
-        draw_weather_compact_text(location_x, DASHBOARD_LOCATION_Y, location_label, 11);
-    }
+    char header_label[96];
+    make_weather_header_label(weather.location, alarm_on, header_label, sizeof(header_label));
 
     uint8_t colon_level = clock_colon_blink_level();
     int used_ttf = 0;
@@ -2619,6 +3242,18 @@ static void draw_weather_dashboard_screen(void) {
     if (!used_ttf)
         draw_dashboard_time_pixel_fallback(hour, tmv.tm_min, clock_24h_mode, colon_level);
 
+    (void)dashboard_center_rendered_clock_x(
+        DASHBOARD_CLOCK_CONTENT_X0,
+        DASHBOARD_CLOCK_TIME_Y0,
+        DASHBOARD_CLOCK_CONTENT_X1,
+        DASHBOARD_CLOCK_TIME_Y1);
+
+    if (header_label[0]) {
+        int header_x = weather_compact_text_optical_x(
+            header_label, dashboard_clock_center_x());
+        draw_weather_compact_text(header_x, DASHBOARD_LOCATION_Y, header_label, 11);
+    }
+
     draw_dashboard_seconds_position_line(tmv.tm_sec);
 
     draw_dashboard_footer(&tmv);
@@ -2628,12 +3263,13 @@ static void draw_weather_dashboard_screen(void) {
         int x1 = weather_panel_x1[i];
         int cx = (x0 + x1) / 2;
         int is_room = weather.slots[i].kind == MP_WEATHER_SLOT_ROOM;
+        int is_today = weather.slots[i].kind == MP_WEATHER_SLOT_TODAY;
         uint8_t label_level = is_room ? 15 : 11;
         uint8_t temperature_level = is_room ? 15 : 13;
 
         char label[8];
         if (is_room) {
-            safe_str(label, sizeof(label), "ROOM");
+            safe_str(label, sizeof(label), "INSIDE");
         } else {
             safe_str(label, sizeof(label), weather.slots[i].label);
             if (!label[0])
@@ -2644,17 +3280,22 @@ static void draw_weather_dashboard_screen(void) {
         draw_text5x7_centered(x0 + 2, x1 - 2, 3, label, label_level);
 
         if (is_room) {
-            if (draw_room_sensor_icon(room.status, cx, WEATHER_ICON_CENTER_Y) != 0)
-                draw_weather_icon_missing(cx, WEATHER_ICON_CENTER_Y);
-            draw_room_temperature_humidity_centered(
-                x0 + 1, x1 - 1, 47, &room, temperature_level);
+            draw_room_temperature_panel(
+                x0,
+                x1,
+                inside_font_file[0] ? inside_font_file : font_file,
+                upper_font_size,
+                &room
+            );
+        } else if (is_today) {
+            draw_weather_today_panel(x0, x1, &weather.slots[i]);
         } else {
             if (draw_weather_icon_asset(i, cx, WEATHER_ICON_CENTER_Y) != 0)
                 draw_weather_icon_missing(cx, WEATHER_ICON_CENTER_Y);
             draw_weather_temperature_precip_centered(
                 x0 + 1,
                 x1 - 1,
-                47,
+                WEATHER_PANEL_LOWER_ROW_Y,
                 weather.slots[i].temperature_c,
                 weather.slots[i].temperature_available,
                 weather.slots[i].precipitation_probability_percent,
@@ -2695,7 +3336,13 @@ static int choose_random_music_file(char *out, size_t out_len) {
 
 static int audio_should_stop(void) {
     int stop;
+    uint64_t now_ms = monotonic_millis();
     pthread_mutex_lock(&g_audio.lock);
+    if (!g_audio.stop_requested && g_audio.alarm_mode && g_audio.alarm_deadline_ms > 0 &&
+        now_ms >= g_audio.alarm_deadline_ms) {
+        g_audio.stop_requested = 1;
+        g_audio.timed_out = 1;
+    }
     stop = g_audio.stop_requested;
     pthread_mutex_unlock(&g_audio.lock);
     return stop;
@@ -2834,6 +3481,14 @@ static void *audio_thread_main(void *arg) {
     buf = malloc(buf_size);
     if (!buf) goto done;
 
+    if (req->use_ramp) {
+        pthread_mutex_lock(&g_state.lock);
+        g_state.last_successful_alarm = (long long)time(NULL);
+        pthread_mutex_unlock(&g_state.lock);
+        save_config();
+        app_log("alarm", "Alarm audio started: %s; repeats until dismissed or the 30-minute safety limit", req->file);
+    }
+
     while (!audio_should_stop()) {
         size_t done_bytes = 0;
         int r = mpg123_read(mh, buf, buf_size, &done_bytes);
@@ -2864,7 +3519,13 @@ static void *audio_thread_main(void *arg) {
             if (audio_write_pcm(pcm, buf, done_bytes, channels) != 0) break;
             played_samples += frames;
         }
-        if (r == MPG123_DONE) break;
+        if (r == MPG123_DONE) {
+            if (req->use_ramp && !audio_should_stop() && mpg123_seek(mh, 0, SEEK_SET) >= 0) {
+                played_samples = 0;
+                continue;
+            }
+            break;
+        }
         if (r == MPG123_NEW_FORMAT) continue;
         if (r != MPG123_OK) break;
     }
@@ -2882,7 +3543,15 @@ done:
         mpg123_delete(mh);
     }
 
-    if (req->use_ramp) alarm_volume_state_set(0, 0);
+    int timed_out = 0;
+    pthread_mutex_lock(&g_audio.lock);
+    timed_out = g_audio.timed_out;
+    pthread_mutex_unlock(&g_audio.lock);
+
+    if (req->use_ramp) {
+        alarm_volume_state_set(0, 0);
+        if (timed_out) app_log("alarm", "Alarm stopped after the 30-minute safety limit");
+    }
 
     pthread_mutex_lock(&g_state.lock);
     g_state.audio_playing = 0;
@@ -2897,6 +3566,9 @@ done:
     pthread_mutex_lock(&g_audio.lock);
     g_audio.running = 0;
     g_audio.stop_requested = 0;
+    g_audio.alarm_mode = 0;
+    g_audio.timed_out = 0;
+    g_audio.alarm_deadline_ms = 0;
     g_audio.file[0] = '\0';
     pthread_cond_broadcast(&g_audio.stopped);
     pthread_mutex_unlock(&g_audio.lock);
@@ -2978,7 +3650,7 @@ static int audio_stop_and_wait(unsigned int timeout_ms) {
     return audio_wait_stopped(timeout_ms);
 }
 
-static void audio_play_music_file(const char *music_file, int start_volume, int end_volume, int use_ramp) {
+static int audio_play_music_file(const char *music_file, int start_volume, int end_volume, int use_ramp) {
     char safe_file[MUSIC_FILE_MAX];
     char path[512];
     char song_title[MP_ID3_TEXT_MAX];
@@ -3008,7 +3680,7 @@ static void audio_play_music_file(const char *music_file, int start_volume, int 
     if (!path[0]) {
         if (!alarm_mode || access(DEFAULT_ALARM_PATH, R_OK) != 0) {
             app_log(alarm_mode ? "alarm" : "music", "No playable audio file is available");
-            return;
+            return -1;
         }
         safe_str(safe_file, sizeof(safe_file), DEFAULT_ALARM_LABEL);
         safe_str(path, sizeof(path), DEFAULT_ALARM_PATH);
@@ -3037,10 +3709,10 @@ static void audio_play_music_file(const char *music_file, int start_volume, int 
         end_volume = global_volume;
     }
 
-    if (audio_stop_and_wait(3000u) != 0) return;
+    if (audio_stop_and_wait(3000u) != 0) return -3;
 
     struct audio_play_request *req = calloc(1, sizeof(*req));
-    if (!req) return;
+    if (!req) return -1;
     safe_str(req->path, sizeof(req->path), path);
     safe_str(req->file, sizeof(req->file), safe_file);
     req->start_volume = clamp_int(start_volume, 0, 100);
@@ -3050,6 +3722,10 @@ static void audio_play_music_file(const char *music_file, int start_volume, int 
     pthread_mutex_lock(&g_audio.lock);
     g_audio.running = 1;
     g_audio.stop_requested = 0;
+    g_audio.alarm_mode = alarm_mode;
+    g_audio.timed_out = 0;
+    g_audio.alarm_deadline_ms = alarm_mode
+        ? monotonic_millis() + (uint64_t)ALARM_MAX_DURATION_SECONDS * 1000u : 0;
     safe_str(g_audio.file, sizeof(g_audio.file), safe_file);
     pthread_mutex_unlock(&g_audio.lock);
 
@@ -3067,6 +3743,9 @@ static void audio_play_music_file(const char *music_file, int start_volume, int 
         pthread_mutex_lock(&g_audio.lock);
         g_audio.running = 0;
         g_audio.stop_requested = 0;
+        g_audio.alarm_mode = 0;
+        g_audio.timed_out = 0;
+        g_audio.alarm_deadline_ms = 0;
         g_audio.file[0] = '\0';
         pthread_cond_broadcast(&g_audio.stopped);
         pthread_mutex_unlock(&g_audio.lock);
@@ -3077,9 +3756,10 @@ static void audio_play_music_file(const char *music_file, int start_volume, int 
         g_state.display_dirty = 1;
         pthread_mutex_unlock(&g_state.lock);
         free(req);
-        return;
+        return -1;
     }
     pthread_detach(tid);
+    return 0;
 
 }
 
@@ -3112,6 +3792,9 @@ static int audio_play_weather_warning_chime(void) {
     }
     g_audio.running = 1;
     g_audio.stop_requested = 0;
+    g_audio.alarm_mode = 0;
+    g_audio.timed_out = 0;
+    g_audio.alarm_deadline_ms = 0;
     safe_str(g_audio.file, sizeof(g_audio.file), MESSAGE_CHIME_LABEL);
     pthread_mutex_unlock(&g_audio.lock);
 
@@ -3120,6 +3803,9 @@ static int audio_play_weather_warning_chime(void) {
         pthread_mutex_lock(&g_audio.lock);
         g_audio.running = 0;
         g_audio.stop_requested = 0;
+        g_audio.alarm_mode = 0;
+        g_audio.timed_out = 0;
+        g_audio.alarm_deadline_ms = 0;
         g_audio.file[0] = '\0';
         pthread_cond_broadcast(&g_audio.stopped);
         pthread_mutex_unlock(&g_audio.lock);
@@ -3491,6 +4177,7 @@ static const char *oled_font_name_for_id(int id) {
         case 1: return "Seven Thin";
         case 2: return "Pixel";
         case 3: return "Pixel Bold";
+        case SYSTEM_DEFAULT_FONT_ID: return "Automatic font detection";
         default: return "Seven Segment";
     }
 }
@@ -3524,6 +4211,76 @@ static void oled_font_choice_name(const char *font_file, int font_id, char *out,
         if (dot && (strcasecmp(dot, ".ttf") == 0 || strcasecmp(dot, ".otf") == 0)) *dot = '\0';
     }
     if (!out[0]) safe_str(out, out_len, font_file);
+}
+
+static time_t next_alarm_time(const struct alarm_slot alarms[MAX_ALARMS], time_t now,
+                              int *alarm_id) {
+    struct tm base;
+    localtime_r(&now, &base);
+    time_t best = 0;
+    int best_id = 0;
+
+    for (int day_offset = 0; day_offset <= 7; day_offset++) {
+        struct tm candidate_day = base;
+        candidate_day.tm_mday += day_offset;
+        candidate_day.tm_hour = 12;
+        candidate_day.tm_min = 0;
+        candidate_day.tm_sec = 0;
+        candidate_day.tm_isdst = -1;
+        time_t normalized = mktime(&candidate_day);
+        if (normalized == (time_t)-1) continue;
+        localtime_r(&normalized, &candidate_day);
+
+        for (int i = 0; i < MAX_ALARMS; i++) {
+            const struct alarm_slot *alarm = &alarms[i];
+            if (!alarm->enabled || !(alarm->weekdays & (1 << candidate_day.tm_wday))) continue;
+            struct tm candidate = candidate_day;
+            candidate.tm_hour = alarm->hour;
+            candidate.tm_min = alarm->min;
+            candidate.tm_sec = 0;
+            candidate.tm_isdst = -1;
+            time_t when = mktime(&candidate);
+            if (when <= now) continue;
+            if (!best || when < best) {
+                best = when;
+                best_id = i + 1;
+            }
+        }
+        if (best) break;
+    }
+    if (alarm_id) *alarm_id = best_id;
+    return best;
+}
+
+static void format_next_alarm(time_t value, int clock_24h_mode, char *out, size_t out_len) {
+    if (!out || out_len == 0) return;
+    if (value <= 0) {
+        safe_str(out, out_len, "No alarm scheduled");
+        return;
+    }
+    time_t now = time(NULL);
+    struct tm current;
+    struct tm alarm;
+    localtime_r(&now, &current);
+    localtime_r(&value, &alarm);
+    char time_text[32];
+    strftime(time_text, sizeof(time_text), clock_24h_mode ? "%H:%M" : "%I:%M %p", &alarm);
+    if (!clock_24h_mode && time_text[0] == '0') memmove(time_text, time_text + 1, strlen(time_text));
+
+    struct tm today = current;
+    today.tm_hour = 0;
+    today.tm_min = 0;
+    today.tm_sec = 0;
+    today.tm_isdst = -1;
+    time_t today_start = mktime(&today);
+    long days = today_start == (time_t)-1 ? -1 : (long)((value - today_start) / 86400);
+    if (days == 0) snprintf(out, out_len, "Today at %s", time_text);
+    else if (days == 1) snprintf(out, out_len, "Tomorrow at %s", time_text);
+    else {
+        char weekday[24];
+        strftime(weekday, sizeof(weekday), "%A", &alarm);
+        snprintf(out, out_len, "%s at %s", weekday, time_text);
+    }
 }
 
 static const char *display_mode_name(int mode) {
@@ -3594,6 +4351,7 @@ static int ipc_status(int client) {
     int beh = g_state.bedtime_end_hour;
     int bem = g_state.bedtime_end_min;
     int bedtime_dim = g_state.bedtime_dim_percent;
+    long long last_successful_alarm = g_state.last_successful_alarm;
     int weather_warning_chime_enabled = g_state.weather_warning_chime_enabled;
     int weather_warning_chime_during_bedtime = g_state.weather_warning_chime_during_bedtime;
     int clock_24h_mode = g_state.clock_24h_mode;
@@ -3602,12 +4360,14 @@ static int ipc_status(int client) {
     int touch_ok = 0;
     int touch_pressed = 0;
     char font_file[128];
+    char inside_font_file[128];
     char clock_name[64];
     char audio_file[MUSIC_FILE_MAX];
     char audio_title[MP_ID3_TEXT_MAX];
     char audio_artist[MP_ID3_TEXT_MAX];
     struct alarm_slot alarms[MAX_ALARMS];
     mp_safe_str(font_file, sizeof(font_file), g_state.oled_font_file);
+    mp_safe_str(inside_font_file, sizeof(inside_font_file), g_state.inside_font_file);
     mp_safe_str(clock_name, sizeof(clock_name), g_state.clock_name);
     mp_safe_str(audio_file, sizeof(audio_file), g_state.audio_file);
     mp_safe_str(audio_title, sizeof(audio_title), g_state.audio_title);
@@ -3615,6 +4375,11 @@ static int ipc_status(int client) {
     memcpy(alarms, g_state.alarms, sizeof(alarms));
     pthread_mutex_unlock(&g_state.lock);
     touch_get_state(&touch_ok, &touch_pressed);
+
+    int next_alarm_id = 0;
+    time_t next_alarm_at = next_alarm_time(alarms, now, &next_alarm_id);
+    char next_alarm_text[96];
+    format_next_alarm(next_alarm_at, clock_24h_mode, next_alarm_text, sizeof(next_alarm_text));
 
     struct weather_dashboard_snapshot weather;
     memset(&weather, 0, sizeof(weather));
@@ -3625,8 +4390,11 @@ static int ipc_status(int client) {
     room_sensor_snapshot(&room);
 
     char e_time[128], e_date[192], e_clock_name[160], e_audio_file[512];
-    char e_audio_title[384], e_audio_artist[384], e_weather_location[192], e_weather_warning[384];
-    char e_font_file[256], e_font_name[256], e_room_device[256], e_room_error[384];
+    char e_audio_title[384], e_audio_artist[384], e_weather_location[192];
+    char e_weather_warning[(MP_WEATHER_WARNING_TEXT_MAX * 6) + 1];
+    char e_weather_warnings[MP_WEATHER_WARNING_SLOTS][(MP_WEATHER_WARNING_TEXT_MAX * 6) + 1];
+    char e_font_file[256], e_font_name[256], e_inside_font_file[256];
+    char e_room_device[256], e_room_error[384], e_next_alarm[192];
     char font_choice_name[256];
     oled_font_choice_name(font_file, font, font_choice_name, sizeof(font_choice_name));
     mp_json_escape(e_time, sizeof(e_time), timestr);
@@ -3636,11 +4404,20 @@ static int ipc_status(int client) {
     mp_json_escape(e_audio_title, sizeof(e_audio_title), audio_title);
     mp_json_escape(e_audio_artist, sizeof(e_audio_artist), audio_artist);
     mp_json_escape(e_weather_location, sizeof(e_weather_location), weather.location);
-    mp_json_escape(e_weather_warning, sizeof(e_weather_warning), weather.warning_type);
+    const char *primary_weather_warning = weather.warning_count > 0
+        ? weather.warning_descriptions[0] : "";
+    mp_json_escape(e_weather_warning, sizeof(e_weather_warning), primary_weather_warning);
+    for (int i = 0; i < MP_WEATHER_WARNING_SLOTS; i++)
+        mp_json_escape(
+            e_weather_warnings[i], sizeof(e_weather_warnings[i]),
+            i < weather.warning_count ? weather.warning_descriptions[i] : ""
+        );
     mp_json_escape(e_font_file, sizeof(e_font_file), font_file);
     mp_json_escape(e_font_name, sizeof(e_font_name), font_choice_name);
+    mp_json_escape(e_inside_font_file, sizeof(e_inside_font_file), inside_font_file);
     mp_json_escape(e_room_device, sizeof(e_room_device), room.device);
     mp_json_escape(e_room_error, sizeof(e_room_error), room.error);
+    mp_json_escape(e_next_alarm, sizeof(e_next_alarm), next_alarm_text);
 
     struct mp_buffer body;
     if (mp_buffer_init(&body, 4608, MP_IPC_MAX_PAYLOAD) != 0)
@@ -3653,46 +4430,63 @@ static int ipc_status(int client) {
         "\"bedtime_start_hour\":%d,\"bedtime_start_min\":%d,\"bedtime_end_hour\":%d,\"bedtime_end_min\":%d,"
         "\"bedtime_dim_percent\":%d,\"weather_warning_chime_enabled\":%d,\"weather_warning_chime_during_bedtime\":%d,"
         "\"clock_24h_mode\":%d,\"oled_color\":\"%s\",\"bedtime_active\":%d,\"oled_brightness_percent\":%d,"
+        "\"next_alarm_id\":%d,\"next_alarm_at\":%lld,\"next_alarm_text\":\"%s\",\"last_successful_alarm\":%lld,"
         "\"audio_playing\":%d,\"alarm_active\":%d,\"alarm_volume_percent\":%d,\"display_mode\":\"%s\",\"oled_ok\":%d,"
         "\"touch_ok\":%d,\"touch_pressed\":%d,\"touch_gpio\":%d,"
-        "\"oled_font\":%d,\"oled_font_size\":%d,\"oled_font_file\":\"%s\",\"oled_font_name\":\"%s\",\"weather\":{",
+        "\"oled_font\":%d,\"oled_font_size\":%d,\"oled_font_file\":\"%s\",\"oled_font_name\":\"%s\","
+        "\"inside_font_file\":\"%s\",\"weather\":{",
         e_time, e_date, e_clock_name, APP_VERSION, uptime_seconds, e_audio_file,
         e_audio_title, e_audio_artist, global_volume,
         bedtime_enabled,
         bsh, bsm, beh, bem, bedtime_dim, weather_warning_chime_enabled,
         weather_warning_chime_during_bedtime, clock_24h_mode, oled_color_name_for_id(oled_color),
-        is_bedtime_now(), oled_brightness, audio, alarm_active, alarm_volume_percent,
+        is_bedtime_now(), oled_brightness, next_alarm_id, (long long)next_alarm_at, e_next_alarm,
+        last_successful_alarm, audio, alarm_active, alarm_volume_percent,
         display_mode_name(mode), oled_ok, touch_ok, touch_pressed, GPIO_TOUCH,
-        font, font_size, e_font_file, e_font_name);
+        font, font_size, e_font_file, e_font_name, e_inside_font_file);
 
     mp_buffer_appendf(&body,
-        "\"location\":\"%s\",\"warning_type\":\"%s\",\"current_temperature_c\":%d,\"current_temperature_available\":%s,\"current_temperature_is_forecast\":%s,\"humidity_percent\":%d,\"humidity_available\":%s,\"precipitation_probability_percent\":%d,\"uv_index\":%d,"
-        "\"observed_at\":%lld,\"slots\":["
-        "{\"kind\":\"%s\",\"label\":\"%s\",\"date_label\":\"%s\",\"temperature_c\":%d,\"temperature_available\":%s,\"precipitation_probability_percent\":%d,\"icon\":%d},"
-        "{\"kind\":\"%s\",\"label\":\"%s\",\"date_label\":\"%s\",\"temperature_c\":%d,\"temperature_available\":%s,\"precipitation_probability_percent\":%d,\"icon\":%d},"
-        "{\"kind\":\"%s\",\"label\":\"%s\",\"date_label\":\"%s\",\"temperature_c\":%d,\"temperature_available\":%s,\"precipitation_probability_percent\":%d,\"icon\":%d}]},"
-        "\"room_sensor\":{\"type\":\"AHT10\",\"enabled\":%s,\"status\":\"%s\","
-        "\"device\":\"%s\",\"address\":\"0x%02X\",\"poll_seconds\":%d,\"stale_seconds\":%d,"
-        "\"temperature_c\":%.1f,\"humidity_percent\":%.1f,\"measured_at\":%lld,\"error\":\"%s\"},"
-        "\"alarms\":[",
-        e_weather_location, e_weather_warning, weather.current_temperature_c,
+        "\"location\":\"%s\",\"warning_type\":\"%s\",\"warning_count\":%d,\"warnings\":[",
+        e_weather_location, e_weather_warning, weather.warning_count);
+    for (int i = 0; i < weather.warning_count && !body.failed; i++)
+        mp_buffer_appendf(&body, "%s\"%s\"", i ? "," : "", e_weather_warnings[i]);
+    mp_buffer_appendf(&body,
+        "],\"current_temperature_c\":%d,\"current_temperature_available\":%s,\"current_temperature_is_forecast\":%s,\"humidity_percent\":%d,\"humidity_available\":%s,\"precipitation_probability_percent\":%d,\"uv_index\":%d,"
+        "\"observed_at\":%lld,\"slots\":[",
+        weather.current_temperature_c,
         weather.current_temperature_available ? "true" : "false",
         weather.current_temperature_is_forecast ? "true" : "false",
         weather.humidity_percent, weather.humidity_available ? "true" : "false",
         weather.precipitation_probability_percent, weather.uv_index,
-        (long long)weather.observed_at,
-        mp_weather_slot_kind_name(weather.slots[0].kind), weather.slots[0].label, weather.slots[0].date_label, weather.slots[0].temperature_c,
-        weather.slots[0].temperature_available ? "true" : "false",
-        weather.slots[0].precipitation_probability_percent, weather.slots[0].icon,
-        mp_weather_slot_kind_name(weather.slots[1].kind), weather.slots[1].label, weather.slots[1].date_label, weather.slots[1].temperature_c,
-        weather.slots[1].temperature_available ? "true" : "false",
-        weather.slots[1].precipitation_probability_percent, weather.slots[1].icon,
-        mp_weather_slot_kind_name(weather.slots[2].kind), weather.slots[2].label, weather.slots[2].date_label, weather.slots[2].temperature_c,
-        weather.slots[2].temperature_available ? "true" : "false",
-        weather.slots[2].precipitation_probability_percent, weather.slots[2].icon,
+        (long long)weather.observed_at);
+
+    for (int i = 0; i < MP_WEATHER_FORECAST_SLOTS && !body.failed; i++) {
+        const struct weather_slot_state *slot = &weather.slots[i];
+        mp_buffer_appendf(&body,
+            "%s{\"kind\":\"%s\",\"label\":\"%s\",\"date_label\":\"%s\","
+            "\"temperature_c\":%d,\"temperature_available\":%s,"
+            "\"low_temperature_c\":%d,\"low_temperature_available\":%s,\"low_hour\":%d,"
+            "\"high_temperature_c\":%d,\"high_temperature_available\":%s,\"high_hour\":%d,"
+            "\"precipitation_probability_percent\":%d,\"icon\":%d}",
+            i ? "," : "", mp_weather_slot_kind_name(slot->kind), slot->label,
+            slot->date_label, slot->temperature_c,
+            slot->temperature_available ? "true" : "false",
+            slot->low_temperature_c,
+            slot->low_temperature_available ? "true" : "false", slot->low_hour,
+            slot->high_temperature_c,
+            slot->high_temperature_available ? "true" : "false", slot->high_hour,
+            slot->precipitation_probability_percent, slot->icon);
+    }
+
+    mp_buffer_appendf(&body,
+        "]},\"room_sensor\":{\"type\":\"AHT10\",\"enabled\":%s,\"status\":\"%s\","
+        "\"device\":\"%s\",\"address\":\"0x%02X\",\"poll_seconds\":%d,\"stale_seconds\":%d,"
+        "\"temperature_c\":%.1f,\"humidity_percent\":%.1f,\"measured_at\":%lld,\"error\":\"%s\"},"
+        "\"alarms\":[",
         room.enabled ? "true" : "false", room_sensor_status_name(room.status),
         e_room_device, room.address, room.poll_seconds, room.stale_seconds,
-        room.temperature_c, room.humidity_percent, (long long)room.measured_at, e_room_error);
+        room.temperature_c, room.humidity_percent, (long long)room.measured_at,
+        e_room_error);
 
     for (int i = 0; i < MAX_ALARMS && !body.failed; i++) {
         mp_buffer_appendf(&body,
@@ -3914,10 +4708,12 @@ static int ipc_config_display(int client, const struct mp_ipc_display_config *re
     int beh = g_state.bedtime_end_hour;
     int bem = g_state.bedtime_end_min;
     char font_file[128];
+    char inside_font_file[128];
     mp_safe_str(font_file, sizeof(font_file), g_state.oled_font_file);
+    mp_safe_str(inside_font_file, sizeof(inside_font_file), g_state.inside_font_file);
     pthread_mutex_unlock(&g_state.lock);
 
-    if (request->present_mask & MP_IPC_DISPLAY_FONT) font = clamp_int(request->oled_font, 0, 3);
+    if (request->present_mask & MP_IPC_DISPLAY_FONT) font = clamp_int(request->oled_font, 0, SYSTEM_DEFAULT_FONT_ID);
     if (request->present_mask & MP_IPC_DISPLAY_FONT_SIZE) font_size = clamp_int(request->oled_font_size, 18, 54);
     if (request->present_mask & MP_IPC_DISPLAY_BEDTIME_ENABLED) bedtime_enabled = request->bedtime_enabled ? 1 : 0;
     if (request->present_mask & MP_IPC_DISPLAY_BEDTIME_DIM) bedtime_dim = clamp_int(request->bedtime_dim_percent, 0, 100);
@@ -3949,9 +4745,24 @@ static int ipc_config_display(int client, const struct mp_ipc_display_config *re
             }
         }
     }
+    if (request->present_mask & MP_IPC_DISPLAY_INSIDE_FONT_FILE) {
+        inside_font_file[0] = '\0';
+        if (request->inside_font_file[0]) {
+            int valid_choice = mp_system_font_is_key(request->inside_font_file) ||
+                (safe_asset_filename(request->inside_font_file) && has_font_ext(request->inside_font_file));
+            if (valid_choice) {
+                char path[MP_SYSTEM_FONT_PATH_MAX];
+                make_font_path(request->inside_font_file, path, sizeof(path));
+                if (path[0] && access(path, R_OK) == 0)
+                    mp_safe_str(inside_font_file, sizeof(inside_font_file), request->inside_font_file);
+            }
+        }
+    }
 
     pthread_mutex_lock(&g_state.lock);
-    int changed = g_state.oled_font_size != font_size || strcmp(g_state.oled_font_file, font_file) != 0;
+    int changed = g_state.oled_font_size != font_size ||
+        strcmp(g_state.oled_font_file, font_file) != 0 ||
+        strcmp(g_state.inside_font_file, inside_font_file) != 0;
     g_state.oled_font = font;
     g_state.oled_font_size = font_size;
     g_state.clock_24h_mode = clock_mode;
@@ -3965,8 +4776,11 @@ static int ipc_config_display(int client, const struct mp_ipc_display_config *re
     g_state.bedtime_end_hour = beh;
     g_state.bedtime_end_min = bem;
     mp_safe_str(g_state.oled_font_file, sizeof(g_state.oled_font_file), font_file);
+    mp_safe_str(g_state.inside_font_file, sizeof(g_state.inside_font_file), inside_font_file);
     g_state.display_dirty = 1;
     pthread_mutex_unlock(&g_state.lock);
+    if (!font_file[0] && font == SYSTEM_DEFAULT_FONT_ID)
+        changed |= apply_default_font_selection();
     if (changed) font_cache_reset();
     save_config();
     app_log("display", "Saved display settings");
@@ -3982,7 +4796,7 @@ static void sanitize_weather_label(char *label, size_t label_len, const char *fa
         if (isalnum(*p)) out[j++] = (char)toupper(*p);
     }
     out[j] = '\0';
-    if (!out[0]) safe_str(out, sizeof(out), fallback ? fallback : "ROOM");
+    if (!out[0]) safe_str(out, sizeof(out), fallback ? fallback : "INSIDE");
     safe_str(label, label_len, out);
 }
 
@@ -4012,11 +4826,21 @@ static int ipc_weather_update(int client, const struct mp_ipc_weather_update *re
     for (int i = 0; i < MP_WEATHER_FORECAST_SLOTS; i++) {
         memset(&slots[i], 0, sizeof(slots[i]));
         int kind = request->slots[i].kind;
-        if (kind < MP_WEATHER_SLOT_ROOM || kind > MP_WEATHER_SLOT_FORECAST)
+        if (kind < MP_WEATHER_SLOT_ROOM || kind > MP_WEATHER_SLOT_TODAY)
             kind = i == 0 ? MP_WEATHER_SLOT_ROOM : MP_WEATHER_SLOT_FORECAST;
         slots[i].kind = kind;
         slots[i].temperature_c = clamp_int(request->slots[i].temperature_c, -99, 99);
         slots[i].temperature_available = request->slots[i].temperature_available != 0;
+        slots[i].low_temperature_c =
+            clamp_int(request->slots[i].low_temperature_c, -99, 99);
+        slots[i].low_temperature_available =
+            request->slots[i].low_temperature_available != 0;
+        slots[i].low_hour = clamp_int(request->slots[i].low_hour, 0, 23);
+        slots[i].high_temperature_c =
+            clamp_int(request->slots[i].high_temperature_c, -99, 99);
+        slots[i].high_temperature_available =
+            request->slots[i].high_temperature_available != 0;
+        slots[i].high_hour = clamp_int(request->slots[i].high_hour, 0, 23);
         slots[i].precipitation_probability_percent =
             clamp_int(request->slots[i].precipitation_probability_percent, 0, 100);
         slots[i].icon = clamp_int(request->slots[i].icon, MP_WEATHER_ICON_UNKNOWN, MP_WEATHER_ICON_FOG);
@@ -4027,13 +4851,49 @@ static int ipc_weather_update(int client, const struct mp_ipc_weather_update *re
         sanitize_weather_date_label(slots[i].date_label, sizeof(slots[i].date_label));
     }
 
-    int new_warning_type = 0;
+    char incoming_warnings[MP_WEATHER_WARNING_SLOTS][MP_WEATHER_WARNING_TEXT_MAX];
+    memset(incoming_warnings, 0, sizeof(incoming_warnings));
+    int incoming_warning_count = clamp_int(request->warning_count, 0, MP_WEATHER_WARNING_SLOTS);
+    int compacted_warning_count = 0;
+    for (int i = 0; i < incoming_warning_count; i++) {
+        if (!request->warning_descriptions[i][0]) continue;
+        safe_str(
+            incoming_warnings[compacted_warning_count],
+            sizeof(incoming_warnings[compacted_warning_count]),
+            request->warning_descriptions[i]
+        );
+        compacted_warning_count++;
+    }
+    incoming_warning_count = compacted_warning_count;
+
+    int new_warning_added = 0;
     pthread_mutex_lock(&g_weather.lock);
     safe_str(g_weather.location, sizeof(g_weather.location), request->location);
-    if (strcmp(g_weather.warning_type, request->warning_type) != 0) {
-        new_warning_type = request->warning_type[0] != '\0';
-        safe_str(g_weather.warning_type, sizeof(g_weather.warning_type), request->warning_type);
-        g_weather.warning_scroll_started_ms = request->warning_type[0] ? monotonic_millis() : 0;
+
+    for (int i = 0; i < incoming_warning_count && !new_warning_added; i++) {
+        int already_present = 0;
+        for (int j = 0; j < g_weather.warning_count; j++) {
+            if (strcmp(g_weather.warning_descriptions[j], incoming_warnings[i]) == 0) {
+                already_present = 1;
+                break;
+            }
+        }
+        if (!already_present) new_warning_added = 1;
+    }
+
+    int warning_set_changed = g_weather.warning_count != incoming_warning_count;
+    if (!warning_set_changed) {
+        for (int i = 0; i < incoming_warning_count; i++) {
+            if (strcmp(g_weather.warning_descriptions[i], incoming_warnings[i]) != 0) {
+                warning_set_changed = 1;
+                break;
+            }
+        }
+    }
+    if (warning_set_changed) {
+        g_weather.warning_count = incoming_warning_count;
+        memset(g_weather.warning_descriptions, 0, sizeof(g_weather.warning_descriptions));
+        memcpy(g_weather.warning_descriptions, incoming_warnings, sizeof(incoming_warnings));
     }
     g_weather.current_temperature_c = clamp_int(request->current_temperature_c, -99, 99);
     g_weather.current_temperature_available = request->current_temperature_available != 0;
@@ -4055,10 +4915,10 @@ static int ipc_weather_update(int client, const struct mp_ipc_weather_update *re
     g_state.display_dirty = 1;
     pthread_mutex_unlock(&g_state.lock);
 
-    if (new_warning_type && warning_chime_enabled) {
+    if (new_warning_added && warning_chime_enabled) {
         if (!warning_chime_during_bedtime && is_bedtime_now()) {
             app_log("weather", "Weather warning chime suppressed during bedtime: %s",
-                    request->warning_type);
+                    incoming_warnings[0]);
         } else {
             int chime_result = audio_play_weather_warning_chime();
             if (chime_result == -4)
@@ -4066,7 +4926,7 @@ static int ipc_weather_update(int client, const struct mp_ipc_weather_update *re
             else if (chime_result != 0)
                 app_log("weather", "Weather warning chime could not be played");
             else
-                app_log("weather", "Weather warning chime played: %s", request->warning_type);
+                app_log("weather", "Weather warning chime played: %s", incoming_warnings[0]);
         }
     }
 
@@ -4082,6 +4942,7 @@ static int ipc_asset_event(int client, const struct mp_ipc_asset_event *event) {
     if (event->action == MP_IPC_ASSET_UPLOADED) {
         if (event->kind == MP_IPC_ASSET_FONT) {
             pthread_mutex_lock(&g_state.lock);
+            g_state.oled_font = SYSTEM_DEFAULT_FONT_ID;
             mp_safe_str(g_state.oled_font_file, sizeof(g_state.oled_font_file), event->file);
             g_state.display_dirty = 1;
             pthread_mutex_unlock(&g_state.lock);
@@ -4115,9 +4976,15 @@ static int ipc_asset_event(int client, const struct mp_ipc_asset_event *event) {
             if (config_changed) save_config();
         } else if (event->kind == MP_IPC_ASSET_FONT) {
             pthread_mutex_lock(&g_state.lock);
-            if (strcmp(g_state.oled_font_file, event->file) == 0) g_state.oled_font_file[0] = '\0';
+            if (strcmp(g_state.oled_font_file, event->file) == 0) {
+                g_state.oled_font_file[0] = '\0';
+                g_state.oled_font = SYSTEM_DEFAULT_FONT_ID;
+            }
+            if (strcmp(g_state.inside_font_file, event->file) == 0)
+                g_state.inside_font_file[0] = '\0';
             g_state.display_dirty = 1;
             pthread_mutex_unlock(&g_state.lock);
+            (void)apply_default_font_selection();
             font_cache_reset();
             save_config();
         } else {
@@ -4153,6 +5020,112 @@ static int ipc_asset_state(int client) {
     mp_safe_str(state.selected_font, sizeof(state.selected_font), g_state.oled_font_file);
     pthread_mutex_unlock(&g_state.lock);
     return ipc_send_response(client, 200, MP_IPC_CONTENT_BINARY, &state, sizeof(state));
+}
+
+static int config_read_full(int fd, void *buffer, size_t length) {
+    unsigned char *cursor = buffer;
+    while (length > 0) {
+        ssize_t got = read(fd, cursor, length);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) return -1;
+        cursor += (size_t)got;
+        length -= (size_t)got;
+    }
+    return 0;
+}
+
+static int config_write_full(int fd, const void *buffer, size_t length) {
+    const unsigned char *cursor = buffer;
+    while (length > 0) {
+        ssize_t wrote = write(fd, cursor, length);
+        if (wrote < 0 && errno == EINTR) continue;
+        if (wrote <= 0) return -1;
+        cursor += (size_t)wrote;
+        length -= (size_t)wrote;
+    }
+    return 0;
+}
+
+static int ipc_config_export(int client) {
+    save_config();
+    int fd = open(CONFIG_FILE, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+        return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"configuration could not be read\"}");
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+        (uint64_t)st.st_size > MP_IPC_CONFIG_MAX_BYTES) {
+        close(fd);
+        return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"configuration is invalid or too large\"}");
+    }
+    char *data = malloc((size_t)st.st_size);
+    if (!data) {
+        close(fd);
+        return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"allocation failed\"}");
+    }
+    int ok = config_read_full(fd, data, (size_t)st.st_size) == 0;
+    close(fd);
+    if (!ok) {
+        free(data);
+        return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"configuration could not be read\"}");
+    }
+    int rc = ipc_send_response(client, 200, MP_IPC_CONTENT_TEXT, data, (size_t)st.st_size);
+    free(data);
+    return rc;
+}
+
+static int config_blob_valid(const struct mp_ipc_config_blob *blob) {
+    if (!blob || blob->length == 0 || blob->length > MP_IPC_CONFIG_MAX_BYTES) return 0;
+    int has_clock_name = 0;
+    int has_alarm = 0;
+    for (uint32_t i = 0; i < blob->length; i++) {
+        unsigned char ch = (unsigned char)blob->data[i];
+        if (ch == 0 || ch == '\r') return 0;
+        if (ch < 0x09 || (ch > 0x0a && ch < 0x20)) return 0;
+    }
+    char copy[MP_IPC_CONFIG_MAX_BYTES + 1u];
+    memcpy(copy, blob->data, blob->length);
+    copy[blob->length] = '\0';
+    char *save = NULL;
+    for (char *line = strtok_r(copy, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        if (!strchr(line, '=')) return 0;
+        if (strncmp(line, "clock_name=", 11) == 0) has_clock_name = 1;
+        if (strncmp(line, "alarm1_enabled=", 15) == 0) has_alarm = 1;
+    }
+    return has_clock_name && has_alarm;
+}
+
+static int ipc_config_import(int client, const struct mp_ipc_config_blob *blob) {
+    if (!config_blob_valid(blob))
+        return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"backup configuration is invalid\"}");
+    (void)audio_stop_and_wait(3000u);
+    ensure_dir(CONFIG_DIR);
+    char tmp_path[512];
+    snprintf(tmp_path, sizeof(tmp_path), CONFIG_FILE ".restore");
+    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0640);
+    int failed = fd < 0;
+    if (!failed && (config_write_full(fd, blob->data, blob->length) != 0 || fsync(fd) != 0)) failed = 1;
+    if (fd >= 0 && close(fd) != 0) failed = 1;
+    if (failed) {
+        unlink(tmp_path);
+        return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"configuration could not be restored\"}");
+    }
+    if (rename(tmp_path, CONFIG_FILE) != 0) {
+        unlink(tmp_path);
+        return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"configuration could not be activated\"}");
+    }
+    pthread_mutex_lock(&g_state.lock);
+    reset_persistent_state_locked();
+    pthread_mutex_unlock(&g_state.lock);
+    load_config();
+    (void)apply_default_font_selection();
+    font_cache_reset();
+    pthread_mutex_lock(&g_state.lock);
+    g_state.display_mode = 0;
+    g_state.display_dirty = 1;
+    pthread_mutex_unlock(&g_state.lock);
+    save_config();
+    app_log("backup", "Configuration restored from backup");
+    return ipc_send_json(client, 200, "{\"ok\":true}");
 }
 
 static int ipc_dispatch(int client, uint16_t opcode, const void *payload, size_t payload_len) {
@@ -4200,6 +5173,12 @@ static int ipc_dispatch(int client, uint16_t opcode, const void *payload, size_t
         case MP_IPC_OP_BRIGHTNESS_PREVIEW:
             EXPECT(struct mp_ipc_brightness_preview);
             return ipc_brightness_preview(client, payload);
+        case MP_IPC_OP_CONFIG_EXPORT:
+            if (payload_len != 0) return ipc_bad_payload(client);
+            return ipc_config_export(client);
+        case MP_IPC_OP_CONFIG_IMPORT:
+            EXPECT(struct mp_ipc_config_blob);
+            return ipc_config_import(client, payload);
         default:
             return ipc_send_json(client, 404, "{\"ok\":false,\"error\":\"unknown IPC opcode\"}");
     }
@@ -4247,6 +5226,7 @@ static ssize_t ipc_expected_payload_size(uint16_t opcode) {
         case MP_IPC_OP_ASSET_STATE:
         case MP_IPC_OP_PING:
         case MP_IPC_OP_DISPLAY_PREVIEW:
+        case MP_IPC_OP_CONFIG_EXPORT:
             return 0;
         case MP_IPC_OP_DISPLAY_ACTION: return sizeof(struct mp_ipc_display_action);
         case MP_IPC_OP_BRIGHTNESS_PREVIEW: return sizeof(struct mp_ipc_brightness_preview);
@@ -4256,6 +5236,7 @@ static ssize_t ipc_expected_payload_size(uint16_t opcode) {
         case MP_IPC_OP_CONFIG_DISPLAY: return sizeof(struct mp_ipc_display_config);
         case MP_IPC_OP_WEATHER_UPDATE: return sizeof(struct mp_ipc_weather_update);
         case MP_IPC_OP_ASSET_EVENT: return sizeof(struct mp_ipc_asset_event);
+        case MP_IPC_OP_CONFIG_IMPORT: return sizeof(struct mp_ipc_config_blob);
         default: return -1;
     }
 }
@@ -4387,7 +5368,8 @@ static void check_alarm(void) {
 
     if (fire) {
         app_log("alarm", "Alarm fired at %02d:%02d", fire_alarm.hour, fire_alarm.min);
-        audio_play_music_file(fire_alarm.music_file, fire_alarm.start_volume, fire_alarm.end_volume, 1);
+        if (audio_play_music_file(fire_alarm.music_file, fire_alarm.start_volume, fire_alarm.end_volume, 1) != 0)
+            app_log("alarm", "Alarm could not start because no playable audio was available");
     }
 }
 
@@ -4409,6 +5391,11 @@ int main(void) {
     ensure_dir(CONFIG_DIR);
     init_alarm_defaults();
     load_config();
+    if (apply_default_font_selection())
+        app_log("display", "Applied automatic clock font selection");
+    pthread_mutex_lock(&g_state.lock);
+    g_state.font_policy_version = FONT_POLICY_VERSION;
+    pthread_mutex_unlock(&g_state.lock);
     save_config(); /* normalize the file and discard retired configuration keys */
     app_log("system", "mk-clock-adult %s starting", APP_VERSION);
     room_sensor_configure();
@@ -4483,7 +5470,7 @@ int main(void) {
         int oled_ok = g_state.oled_ok;
         pthread_mutex_unlock(&g_state.lock);
 
-        int marquee_active = 0;
+        int footer_refresh_active = 0;
         if (oled_ok) {
             if (mode == 3) {
                 time_t diagnostic_until;
@@ -4511,12 +5498,12 @@ int main(void) {
                 struct tm tmv;
                 localtime_r(&now, &tmv);
                 int colon_phase = clock_colon_blink_phase();
-                marquee_active = dashboard_footer_marquee_active();
+                footer_refresh_active = dashboard_footer_refresh_active();
                 if (dirty || mode != last_mode || tmv.tm_min != last_min || colon_phase != last_colon_phase) {
                     last_min = tmv.tm_min;
                     last_colon_phase = colon_phase;
                     draw_weather_dashboard_screen();
-                } else if (marquee_active) {
+                } else if (footer_refresh_active) {
                     refresh_dashboard_footer();
                 }
             } else if (mode == 1) {
@@ -4528,7 +5515,7 @@ int main(void) {
         }
 
         last_mode = mode;
-        usleep(marquee_active ? DASHBOARD_MARQUEE_FRAME_US : 250000u);
+        usleep(footer_refresh_active ? DASHBOARD_MARQUEE_FRAME_US : 250000u);
     }
 
     if (touch_thread_started) pthread_join(touch_thread, NULL);

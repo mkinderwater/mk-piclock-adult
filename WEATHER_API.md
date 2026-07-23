@@ -12,7 +12,7 @@ Content-Type: application/x-www-form-urlencoded
 | Field | Description |
 |---|---|
 | `location` | Weather location displayed above the OLED clock |
-| `warning_type` | Highest-priority active ECCC warning type, or empty |
+| `warning_type` | First active ECCC warning description in source order, or empty |
 | `current_temperature_c` | Resolved current outside temperature, -99 to 99 |
 | `current_temperature_available` | `1` only when `current_temperature_c` is valid |
 | `current_temperature_is_forecast` | `1` when the current value came from the nearest hourly fallback |
@@ -38,7 +38,7 @@ For each panel `N`, where `N` is 0 through 2:
 | `slotN_precipitation_probability_percent` | Outside or forecast precipitation chance, 0 to 100 |
 | `slotN_icon` | Outside or forecast icon name |
 
-ROOM ignores weather temperature, precipitation, and icon fields. It renders the local AHT10 reading and sensor-state sprite. Missing OUTSIDE or forecast temperatures render as `--^`; a valid `0°C` renders as `0^`.
+INSIDE ignores weather temperature, precipitation, and icon fields. It renders the local AHT10 reading with one decimal place using the selected INSIDE font, or the clock font when `inside_font_file` is empty. Relative humidity uses the same lower row as the other panel temperatures. Missing INSIDE data renders as `--.-°` and `--%`. Missing OUTSIDE or forecast temperatures render as `--^`; a valid `0°C` renders as `0^`.
 
 Supported icon names are `clear`, `partly`, `cloudy`, `rain`, `storm`, `snow`, `wind`, and `fog`. Missing or unsupported icons use the unknown-image fallback.
 
@@ -49,8 +49,11 @@ All three panels are configured through `GET` and `POST /api/v1/config/weather-f
 - `room`: local AHT10 temperature and humidity
 - `outside`: current ECCC conditions, with field-level nearest-hour fallback when required
 - `offset`: hourly forecast from 1 through 48 hours ahead
+- `time`: next occurrence of a specific local forecast hour, from `00:00` through `23:00`
 
-Each panel is independent and selections may repeat. The default is ROOM, +3 hours, and +6 hours.
+Each panel is independent and selections may repeat. The default is INSIDE, +3 hours, and +6 hours.
+
+The configuration API returns both `offset_hours` and `time` for every panel. `time` is formatted as `HH:00`. POST requests use `slot1_time`, `slot2_time`, and `slot3_time`. Specific times must be on the hour because the ECCC source is hourly.
 
 ## Example
 
@@ -66,7 +69,7 @@ curl -X POST http://mk-piclock.local:8080/api/v1/weather \
   --data-urlencode 'precipitation_probability_percent=30' \
   --data-urlencode 'uv_index=5' \
   --data-urlencode 'slot0_kind=room' \
-  --data-urlencode 'slot0_label=ROOM' \
+  --data-urlencode 'slot0_label=INSIDE' \
   --data-urlencode 'slot0_date_label=' \
   --data-urlencode 'slot0_temperature_available=0' \
   --data-urlencode 'slot0_temperature_c=0' \
@@ -93,6 +96,8 @@ The complete weather state, including each panel `kind` and `temperature_availab
 ## Warning Marquee
 
 When `warning_type` is non-empty, its value replaces the normal date in the OLED footer. Playing song metadata has higher priority than a weather warning.
+
+The OLED keeps an active warning unchanged until its current display period completes. Long warnings complete one full marquee cycle before refreshed, reordered, added, or cleared warnings are applied. Short warnings retain the 12-second minimum display period.
 
 ## Warning Chime
 

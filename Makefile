@@ -45,11 +45,11 @@ prepare-build:
 mk-piclock-core: mk-piclock.c aht10_sensor.c font_catalog.c util.c ipc_protocol.h compiler_attrs.h aht10_sensor.h font_catalog.h util.h
 	$(CC) $(CORE_CPPFLAGS) $(CORE_CFLAGS) mk-piclock.c aht10_sensor.c font_catalog.c util.c $(LDFLAGS) $(CORE_LIBS) -lm -o $@
 
-mk-piclock-api: mk-piclock-api.c asset_store.c music_jobs.c font_catalog.c util.c weather_source_store.c weather_frames.c io_helpers.c ipc_protocol.h compiler_attrs.h asset_store.h music_jobs.h font_catalog.h util.h weather_source_store.h weather_frames.h io_helpers.h
+mk-piclock-api: mk-piclock-api.c asset_store.c music_jobs.c font_catalog.c util.c weather_source_store.c weather_frames.c io_helpers.c ipc_protocol.h compiler_attrs.h asset_store.h music_jobs.h font_catalog.h util.h weather_source_store.h weather_frames.h weather_version.h io_helpers.h
 	$(CC) $(API_CPPFLAGS) $(API_CFLAGS) mk-piclock-api.c weather_source_store.c weather_frames.c io_helpers.c asset_store.c music_jobs.c font_catalog.c util.c $(LDFLAGS) $(API_LIBS) -o $@
 
 weather:
-	$(MAKE) -C weather all
+	$(MAKE) -C weather clean all
 
 check-i2c:
 	@if command -v "$(RASPI_CONFIG)" >/dev/null 2>&1; then \
@@ -83,11 +83,11 @@ install: all
 	sudo mkdir -p /opt/mk-piclock/assets/music \
 		/opt/mk-piclock/assets/music/.processing \
 		/opt/mk-piclock/assets/fonts \
-		/opt/mk-piclock/assets/room-sensor \
 		/opt/mk-piclock/config
 	sudo rm -rf /opt/mk-piclock/assets/images \
 		/opt/mk-piclock/assets/bedtime-images \
-		/opt/mk-piclock/assets/stories
+		/opt/mk-piclock/assets/stories \
+		/opt/mk-piclock/assets/room-sensor
 	sudo chown -R mk-piclock-api:mk-piclock /opt/mk-piclock/assets
 	sudo chmod -R u=rwX,g=rX,o= /opt/mk-piclock/assets
 	sudo chown -R mk-piclock-core:mk-piclock /opt/mk-piclock/config
@@ -100,7 +100,6 @@ install: all
 	@printf '%s  %s\n' "$(MESSAGE_CHIME_SHA256)" assets/message-chime.mp3 | sha256sum -c -
 	sudo install -m 0640 -o root -g mk-piclock assets/message-chime.mp3 /opt/mk-piclock/assets/message-chime.mp3
 	@printf '%s  %s\n' "$(MESSAGE_CHIME_SHA256)" /opt/mk-piclock/assets/message-chime.mp3 | sudo sha256sum -c -
-	sudo install -m 0644 -o root -g mk-piclock assets/room-sensor/*.raw /opt/mk-piclock/assets/room-sensor/
 	sudo rm -rf /opt/mk-piclock/web /opt/mk-piclock/api
 	sudo install -d -m 0755 /opt/mk-piclock/web /opt/mk-piclock/api
 	sudo cp -a web/. /opt/mk-piclock/web/
@@ -112,7 +111,7 @@ install: all
 	-sudo udevadm control --reload-rules
 	-sudo udevadm trigger --subsystem-match=i2c-dev
 	sudo install -m 0644 mk-piclock-api.service /etc/systemd/system/mk-piclock-api.service
-	sudo ./weather/install.sh --defer-start
+	sudo sh ./weather/install.sh --defer-start
 	sudo systemctl daemon-reload
 	sudo systemctl enable --now \
 		mk-piclock-core.service \
@@ -123,7 +122,7 @@ install: all
 	@echo "Installed and started."
 
 uninstall:
-	-sudo ./weather/uninstall.sh
+	-sudo sh ./weather/uninstall.sh
 	-sudo systemctl disable --now mk-piclock-api.service mk-piclock-core.service
 	sudo rm -f /etc/systemd/system/mk-piclock-api.service /etc/systemd/system/mk-piclock-core.service \
 		/etc/udev/rules.d/99-mk-piclock-i2c.rules
@@ -134,13 +133,31 @@ uninstall:
 	sudo systemctl daemon-reload
 
 test:
+	rm -f tests/test_aht10 tests/test_font_catalog
+	$(MAKE) -C weather clean
+	find . -type d -name '__pycache__' -prune -exec rm -rf {} +
+	find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+	python3 tests/test_release_integrity.py
 	$(CC) $(C_STANDARD) $(WARNINGS) $(CFLAGS) tests/test_aht10.c aht10_sensor.c -lm -o tests/test_aht10
 	./tests/test_aht10
-	python3 tests/test_room_icons.py
+	$(CC) $(C_STANDARD) $(WARNINGS) $(CFLAGS) tests/test_font_catalog.c font_catalog.c -o tests/test_font_catalog
+	./tests/test_font_catalog
+	python3 tests/test_room_panel.py
 	python3 tests/test_install_docs.py
-	@if command -v node >/dev/null 2>&1; then node tests/test_dashboard_weather.mjs; fi
+	python3 tests/test_alarm_safety.py
+	python3 tests/test_alarm_header.py
+	python3 tests/test_clock_alignment.py
+	python3 tests/test_diagnostics.py
+	python3 tests/test_backup_restore.py
+	python3 tests/test_weather_warning_rotation.py
+	python3 tests/test_weather_panel_config.py
+	@if command -v node >/dev/null 2>&1; then node tests/test_dashboard_weather.mjs && node tests/test_display_fonts.mjs; fi
 	$(MAKE) -C weather test
+	$(MAKE) --no-print-directory clean
+	python3 tests/test_release_integrity.py
 
 clean:
-	rm -f mk-piclock-core mk-piclock-api tests/test_aht10
+	rm -f mk-piclock-core mk-piclock-api tests/test_aht10 tests/test_font_catalog
 	$(MAKE) -C weather clean
+	find . -type d -name '__pycache__' -prune -exec rm -rf {} +
+	find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete

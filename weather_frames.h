@@ -11,12 +11,15 @@
 enum mp_weather_frame_mode {
     MP_WEATHER_FRAME_ROOM = 1,
     MP_WEATHER_FRAME_OUTSIDE = 2,
-    MP_WEATHER_FRAME_OFFSET = 3
+    MP_WEATHER_FRAME_OFFSET = 3,
+    MP_WEATHER_FRAME_TIME = 4,
+    MP_WEATHER_FRAME_TODAY = 5
 };
 
 struct mp_weather_frame_selection {
     enum mp_weather_frame_mode mode;
     int offset_hours;
+    int time_hour;
 };
 
 struct mp_weather_frames_config {

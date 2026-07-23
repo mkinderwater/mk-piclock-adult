@@ -163,6 +163,28 @@ int mp_system_font_scan(struct mp_system_font_entry *entries, int max_entries) {
     return count;
 }
 
+int mp_system_font_find_filename(const char *filename, char *key, size_t key_len,
+                                 char *path, size_t path_len) {
+    if (!filename || !*filename || !key || key_len == 0 || !path || path_len == 0) return -1;
+    key[0] = '\0';
+    path[0] = '\0';
+
+    struct mp_system_font_entry *entries = calloc(MP_SYSTEM_FONT_LIST_MAX, sizeof(*entries));
+    if (!entries) return -1;
+
+    int count = mp_system_font_scan(entries, MP_SYSTEM_FONT_LIST_MAX);
+    int result = -1;
+    for (int i = 0; i < count; i++) {
+        if (strcasecmp(entries[i].filename, filename) != 0) continue;
+        snprintf(key, key_len, "%s", entries[i].key);
+        snprintf(path, path_len, "%s", entries[i].path);
+        result = 0;
+        break;
+    }
+    free(entries);
+    return result;
+}
+
 int mp_system_font_resolve(const char *key, char *path, size_t path_len) {
     if (!mp_system_font_is_key(key) || !path || path_len == 0) return -1;
     path[0] = '\0';

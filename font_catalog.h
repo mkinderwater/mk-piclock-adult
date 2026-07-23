@@ -17,6 +17,8 @@ struct mp_system_font_entry {
 
 int mp_system_font_is_key(const char *value);
 int mp_system_font_scan(struct mp_system_font_entry *entries, int max_entries);
+int mp_system_font_find_filename(const char *filename, char *key, size_t key_len,
+                                 char *path, size_t path_len);
 int mp_system_font_resolve(const char *key, char *path, size_t path_len);
 
 #endif

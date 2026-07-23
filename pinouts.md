@@ -1,6 +1,6 @@
-# mk-clock-adult 1.2.40 Pinouts
+# mk-clock-adult 1.2.62 Pinouts
 
-This document defines the production wiring for the Raspberry Pi 40-pin header, SSD1322 OLED, MAX98357A I2S amplifier, TTP223B touch sensor, AHT10 room sensor, speaker, and external power input.
+This document defines the production wiring for the Raspberry Pi 40-pin header, SSD1322 OLED, MAX98357A I2S amplifier, TTP223B touch sensor, AHT10 inside sensor, speaker, and external power input.
 
 The software uses **BCM GPIO numbering**. Physical pin numbers refer to the Raspberry Pi 40-pin header. Never identify a connection by wire colour alone.
 
@@ -35,10 +35,10 @@ The software uses **BCM GPIO numbering**. Physical pin numbers refer to the Rasp
 | TTP223B touch | VCC | 3.3 V distribution | - | 17 | Pi to sensor |
 | TTP223B touch | GND | Ground | - | 39 | Common ground |
 | TTP223B touch | OUT / SIG | Digital input | 20 | 38 | Sensor to Pi |
-| AHT10 room sensor | VCC | 3.3 V distribution | - | 17 | Pi to sensor |
-| AHT10 room sensor | GND | Ground | - | 34 | Common ground |
-| AHT10 room sensor | SDA | I2C1 SDA | 2 | 3 | Bidirectional |
-| AHT10 room sensor | SCL | I2C1 SCL | 3 | 5 | Bidirectional clock |
+| AHT10 inside sensor | VCC | 3.3 V distribution | - | 17 | Pi to sensor |
+| AHT10 inside sensor | GND | Ground | - | 34 | Common ground |
+| AHT10 inside sensor | SDA | I2C1 SDA | 2 | 3 | Bidirectional |
+| AHT10 inside sensor | SCL | I2C1 SCL | 3 | 5 | Bidirectional clock |
 | Speaker | `+` | MAX98357A `SPK+` | - | - | Amp to speaker |
 | Speaker | `-` | MAX98357A `SPK-` | - | - | Amp to speaker |
 
@@ -112,9 +112,9 @@ Notes:
 - Follow the signal labels printed on the OLED module. Module header order varies.
 - Confirm the module is configured for 4-wire SPI and 3.3 V logic.
 
-## AHT10 room temperature and humidity sensor
+## AHT10 inside temperature and humidity sensor
 
-ROOM reads the AHT10 directly over Linux I2C1. It is independent from ECCC outside weather.
+INSIDE reads the AHT10 directly over Linux I2C1. It is independent from ECCC outside weather.
 
 ```text
 AHT10 module          Raspberry Pi
@@ -143,12 +143,11 @@ Placement and bus notes:
 - The AHT10 uses fixed address `0x38`. Do not connect a second AHT10 to the same bus.
 - The core owns address `0x38`. Do not bind another userspace program or kernel hwmon driver to that address while the clock is running.
 
-ROOM image states:
+INSIDE display states:
 
-- Active: thermometer and humidity droplet
-- Starting: sensor waiting image
-- Stale: retained reading with clock badge
-- Unavailable: sensor with X badge
+- Active: decimal temperature and whole-percent RH at normal brightness
+- Stale: retained temperature and RH shown dimmed
+- Starting or unavailable: `--.-°` and `--%`
 
 ## MAX98357A I2S amplifier
 

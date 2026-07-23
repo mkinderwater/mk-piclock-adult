@@ -1,59 +1,56 @@
-# mk-clock-adult 1.2.40 Code Audit
-
-The code audit is unchanged from the validated 1.2.39 audit. Release 1.2.40 changes installation documentation and version identifiers only.
+# mk-clock-adult 1.2.62 Code Audit
 
 ## Scope
 
-Reviewed the native core, HTTP API, Weather daemon, shared configuration code, browser JavaScript, tests, installation rules, and packaged assets.
+Reviewed clock rendering, Weather panel configuration, GeoMet normalization, daily extrema selection, HTTP form parsing, private IPC, OLED rendering, dashboard output, browser controls, installation rules, tests, documentation, and packaged assets.
 
-## Removed or consolidated
+## Clock alignment
 
-- Removed unused exported function `mp_system_font_find_filename()`.
-- Consolidated duplicate weather-panel configuration parsing into `weather_frames.c`.
-- Consolidated duplicate full-write and parent-directory sync logic into `io_helpers.c`.
-- Consolidated duplicate 32 x 32 grayscale icon loading and rendering in the core.
-- Consolidated weather slot kind names and safe default labels in `ipc_protocol.h`.
-- Removed duplicate ROOM PNG masters, obsolete preview PNGs, and the contact sheet from `assets/room-sensor`.
+- Removed the fixed clock X correction.
+- Added one framebuffer post-render function for both FreeType and built-in clocks.
+- The function scans only the clock region, finds visible horizontal bounds, calculates the required translation, clamps it to the panel, and moves the rendered pixels as one image.
+- Header drawing occurs after the scan and uses the corrected clock centre axis.
 
-## Logic corrections
+## Today panel
 
-- Added per-panel temperature availability across Weather, API, IPC, core, status JSON, OLED, and GUI.
-- Missing temperatures now display as `--°`; valid `0°C` readings remain valid.
-- Removed fabricated startup weather readings and weather icons.
-- Changed omitted availability fields to unavailable instead of assuming valid zero values.
-- Changed label fallbacks from panel position assumptions to source-aware labels: ROOM, OUTSIDE, or LATER.
-- Fixed unchecked `/proc/net/route` header reading.
-- Fixed a malformed shared-config `snprintf` call and added strict format warnings plus a serialization test.
-- Updated the Weather user agent to follow the compiled Weather version.
-- Weather activity records now state when temperature is unavailable instead of logging `0 C`.
+- Added `MP_WEATHER_FRAME_TODAY` to persisted Weather panel configuration.
+- Added `MP_WEATHER_SLOT_TODAY` and explicit low, high, availability, and occurrence-hour IPC fields.
+- Selects current-day hourly values in the configured Weather timezone.
+- Includes the current observed temperature when it expands the available daily range.
+- Uses the maximum current-day hourly precipitation probability.
+- Added a compact OLED layout without loading an unnecessary Weather icon.
+- Anchors TODAY precipitation, OUTSIDE/forecast temperature, and INSIDE humidity to the shared `WEATHER_PANEL_LOWER_ROW_Y` baseline.
+- Derives the TODAY low and high rows from a single 15-pixel spacing constant.
+- Uses concise low, high, and precipitation rows without occurrence-time text on the OLED.
+- Added web controls, dashboard text, API validation, and OpenAPI definitions.
 
-## Configuration rules
+## Weather warning marquee
 
-The shared weather-panel parser now rejects:
+- Stores the active warning independently from the asynchronously refreshed warning list.
+- Applies pending warning changes only after the active display period completes.
+- Uses an exact pixel-cycle duration for long warnings and the existing 12-second hold for short warnings.
+- Starts scrolling text at the footer's left edge and preserves continuous duplicated-text wraparound.
+- Removed the obsolete warning-set start timestamp and its reset path.
 
-- Unknown keys
-- Duplicate keys
-- Invalid modes
-- Offsets outside 1 through 48 hours
-- Incomplete configurations
-- Mixed legacy and current fields
-- Overlong lines
+## Cleanup and compatibility
 
-Legacy 1.2.37 migration remains covered by tests.
+- Existing `room`, `outside`, `offset`, and `time` modes remain valid.
+- Legacy Weather configuration parsing remains intact.
+- The four obsolete room-sensor PNGs and their code paths remain absent.
+- Weather scripts remain executable and are also invoked through `sh`.
+- Product and web cache keys are now 1.2.62.
 
-## Validation completed
+## Validation
 
-- Native Weather build with `-Wall -Wextra -Wformat=2 -Werror`
-- Native Weather regression suite
-- AHT10 decoder tests
-- Dashboard Weather JavaScript tests
-- ROOM RAW and browser PNG validation
-- Clang syntax checks for all native source files using hardware-library stubs
-- Clang static analysis for all native source files
-- AddressSanitizer and UndefinedBehaviorSanitizer runs for Weather and AHT10 tests
-- Exact duplicate function-body scan
-- Exported-symbol usage scan
-- Duplicate packaged-file hash scan
-- OpenAPI JSON and JavaScript syntax validation
+- Clock visible-bound centring regression tests
+- Native AHT10 and font catalogue tests
+- Weather configuration and daily low / high tests
+- Dashboard daily-panel formatting tests
+- INSIDE panel and font-selector tests
+- Alarm, diagnostics, backup, restore, and warning-rotation tests
+- Native Weather strict build and C test suite
+- Browser JavaScript syntax checks
+- OpenAPI and JSON validation
+- Release-integrity checks
 
-No known dead functions, exact duplicate function bodies, duplicate packaged files, or unreferenced ROOM runtime assets remain.
+The Native Weather service builds and tests with strict warnings enabled. Full core and API linking is unavailable in this sandbox because the Raspberry Pi audio, GPIO, MP3, and HTTP development headers are not installed.

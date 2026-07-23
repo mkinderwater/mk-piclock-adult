@@ -4,59 +4,75 @@ Native OLED size: `256 x 64`
 
 ## Horizontal allocation
 
-The display uses a 40/20/20/20 allocation. Integer pixel widths are chosen so all 256 columns are used:
+The display uses a 40/20/20/20 allocation:
 
 ```text
-Location, clock and date | AHT10 ROOM | Next forecast | Later forecast
-x = 0..102     | x = 103..153 | x = 154..204 | x = 205..255
-width = 103    | width = 51    | width = 51    | width = 51
+Location, clock and date | Weather panel 1 | Weather panel 2 | Weather panel 3
+x = 0..102               | x = 103..153    | x = 154..204    | x = 205..255
+width = 103              | width = 51      | width = 51      | width = 51
 ```
 
-Vertical separators:
+Vertical separators occupy `x = 102, 153, 204`, from `y = 3..60`.
 
-```text
-x = 102, 153, 204
-y = 3..60
-OLED level = 7
-```
-
-The separators are exactly 51 pixels apart throughout the weather area.
+Each Weather panel may independently be INSIDE, OUTSIDE, TODAY, hours ahead, or a specific forecast time.
 
 ## Clock region
 
 ```text
-Weather location: x = 2..100, y = 1..5
+Weather location: x = 2..100, y = 3..7
 Clock time:       x = 2..100, y = 7..48
-Clock date:       x = 2..100, y = 56..62
+Seconds line:     x = 5..97,  y = 50
+Clock date:       x = 2..100, y = 54..60
 ```
 
-The Weather location comes from the configured ECCC source, is converted to uppercase, and is centred with the compact 3x5 font. The main clock is fitted from a maximum of 72 pixels down to the largest size that keeps the worst-case `88:88` footprint inside its region. Its vertical centre is Y=27.5, matching the Weather-icon centre at Y=28. FreeType coverage is thresholded at 128, so each clock pixel is either level 0 or level 15.
+The selected clock font is rendered first. The framebuffer is then scanned within the clock region, and the rendered clock is translated until its actual illuminated left and right bounds are centred. This removes font-dependent offsets caused by advance width, side bearings, or narrow digits.
 
-The clock-region date uses the core's internal fixed 5x7 font.
+The Weather location and optional `- ALARM ON` suffix use the same corrected clock centre axis.
 
-## Vertical layout
+## Weather panel labels
+
+Every panel label uses the fixed 5 x 7 renderer at `y = 3..9`.
+
+- INSIDE panels show `INSIDE`.
+- OUTSIDE panels show `OUTSIDE`.
+- TODAY panels show `TODAY`.
+- Forecast panels show the selected hour, such as `7AM` or `6PM`.
+
+## INSIDE panel
 
 ```text
-Weather location:      y = 1..5, compact 3x5 text
-Forecast labels:       y = 3..9
-Weather icons:         32 x 32, centred at y = 28, occupying y = 12..43
-Forecast values:       y = 46..50, compact 3x5 text
-Future forecast date:  y = 55..59, compact 3x5 text
-Clock time region:     y = 7..48
-Clock-region date:     y = 56..62, fixed 5x7 text
+INSIDE label:          y = 3..9
+Large TTF temperature: y = 13..43
+Relative humidity:     y = 47..51
 ```
 
-Each outdoor forecast footer is formatted as `25^ (20%)` when the selected hour has a non-zero precipitation chance. With a zero or unavailable chance, it is formatted as `25^`. ROOM is formatted as `21^ 42%`, using AHT10 temperature and relative humidity. The compact 3x5 footer keeps each string within its 51-pixel panel.
+The temperature uses the selected INSIDE font and is formatted with one decimal place, for example `23.1°`. An empty INSIDE font selection follows the clock font. Relative humidity is formatted as `45%` and shares the `y = 47` baseline used by OUTSIDE and forecast temperatures.
 
-When a selected forecast falls after the current date in the configured Weather timezone, a second compact line appears at Y=55..59, for example `JULY 23`. Same-day panels leave this line blank. Full month names fit within the 51-pixel panel, including `SEPTEMBER 30`.
+## OUTSIDE and forecast panels
 
-The first panel is labelled `ROOM` and uses the local AHT10 sensor. It always draws a dedicated thermometer-and-droplet sprite rather than a weather condition. Active, starting, stale, and unavailable states use separate 32 x 32 sprites. Outdoor weather is never substituted into ROOM.
+```text
+Weather icon:          32 x 32, centred at y = 28
+Temperature/precip:    y = 47..51
+Future forecast date:  y = 56..60
+```
 
-Configurable panels set to `Outside` show the realtime ECCC observation under the heading `OUTSIDE`. When ECCC provides no realtime temperature or icon, only OUTSIDE uses the nearest hourly value for the missing display field; daily highs and lows are never substituted.
+The footer is formatted as `25^ (20%)` when precipitation is non-zero and `25^` otherwise. Missing temperatures render as `--^`.
 
-The separate precipitation and UV metrics panel is not drawn. Top-level values remain available through the API.
+## TODAY high / low panel
 
+The TODAY panel does not draw an icon. It uses three evenly spaced compact data rows. Labels share a fixed left edge and values share a fixed right edge. Its precipitation row shares the same lower-row baseline as OUTSIDE temperature and INSIDE humidity:
 
-## Clock vertical balance
+```text
+TODAY label: y = 3..9
+Low row:     y = 17..21   label: L     right-aligned value: 10^
+High row:    y = 32..36   label: H     right-aligned value: 24^
+Precip row:  y = 47..51   label: POP   right-aligned value: 40%
+```
 
-The clock time uses Y=7..48, placing its centre at Y=27.5. The Weather icons are centred at Y=28, so the clock and icons appear level. The location occupies Y=1..5 above the clock, and the date occupies Y=56..62 at the bottom of the panel.
+Occurrence hours remain in Weather status data but are intentionally omitted from the OLED panel.
+
+The low and high are selected from available ECCC hourly entries on the current local date, with the current observed temperature also considered. `POP` is the highest available hourly precipitation probability for the current date.
+
+## Specific-time selection
+
+A fixed-time panel targets the next occurrence of the configured hour in `MK_WEATHER_TIMEZONE`. Once that hour has passed, the target advances to the following day. The panel then uses the first ECCC hourly forecast at or after that target.

@@ -1,4 +1,233 @@
+## v1.2.62 - 2026-07-23
+
+### Atomic Weather warning marquee
+
+- Keeps the active OLED warning text and start time unchanged until its current display period completes.
+- Applies refreshed, reordered, added, or cleared warning lists only at a warning boundary.
+- Uses one exact marquee cycle for scrolling warnings instead of restarting after a fixed minimum duration.
+- Starts long warnings at the left edge and preserves seamless wraparound with the existing inter-message gap.
+- Keeps short warnings visible for the existing 12-second minimum.
+- Removes the obsolete warning-set start timestamp and adds regression checks for boundary-only rotation.
+- HTTP API remains 1.44, private IPC remains 27, and Native Weather remains 2.0.14.
+
+## v1.2.61 - 2026-07-23
+
+### TODAY column alignment and cleaner humidity
+
+- Placed TODAY `L`, `H`, and `POP` labels on a fixed left edge.
+- Right-aligned all TODAY values to the same pixel column.
+- Changed OLED INSIDE humidity from `<percent>% RH` to `<percent>%`.
+- Preserved existing row spacing, shared lower baseline, Weather data, API, IPC, and dashboard details.
+- HTTP API remains 1.44, private IPC remains 27, and Native Weather remains 2.0.14.
+
+## v1.2.60 - 2026-07-23
+
+### Simplified TODAY panel
+
+- Removed low and high occurrence times from the OLED TODAY panel.
+- TODAY now renders only `L <temp>°`, `H <temp>°`, and `POP <percent>%` on three centred rows.
+- Retained occurrence-hour data in the Weather service, API, IPC, and dashboard details.
+- Removed the unused OLED occurrence-time formatter and its 12/24-hour display dependency.
+- HTTP API remains 1.44, private IPC remains 27, and Native Weather remains 2.0.14.
+
+## v1.2.60 - 2026-07-22
+
+- Removed all generated ELF binaries and the entire `weather/build` directory from release packages.
+- Weather is now cleaned and rebuilt from source on the target machine before installation, preventing a foreign-architecture binary from being installed on Raspberry Pi.
+- `make test` now finishes by cleaning generated binaries and rerunning release-integrity checks against the final source tree.
+- Added an integrity assertion requiring the target-local Weather rebuild rule.
+- HTTP API remains 1.44, private IPC remains 27, and Native Weather remains 2.0.14.
+
+## v1.2.58 - 2026-07-22
+
+### Weather panel baseline alignment
+
+- Aligned the TODAY `POP` row with the OUTSIDE and forecast temperature row.
+- Kept INSIDE relative humidity on the same shared lower-row baseline.
+- Replaced repeated Y coordinates with `WEATHER_PANEL_LOWER_ROW_Y`.
+- Spaced the TODAY low, high, and precipitation rows evenly at 15-pixel intervals.
+- HTTP API remains 1.44, private IPC remains 27, and Native Weather remains 2.0.14.
+
+## v1.2.57 - 2026-07-22
+
+### Full TODAY time suffixes
+
+- Changed TODAY low/high occurrence times from compact `A`/`P` suffixes to full `AM`/`PM` suffixes in 12-hour mode.
+- Retained two-digit hours in 24-hour mode.
+- HTTP API remains 1.44, private IPC remains 27, and Native Weather remains 2.0.14.
+
+## v1.2.56 - 2026-07-22
+
+### Clock centring and daily Weather summary
+
+- Added a framebuffer-based centring function that measures the clock pixels actually rendered and recentres both FreeType and built-in clocks without font-specific offsets.
+- Centres the Weather location and `ALARM ON` header on the same corrected clock axis.
+- Added a `today` Weather panel mode for any of the three OLED panels.
+- TODAY shows the current-day low and occurrence hour, high and occurrence hour, and maximum hourly precipitation probability.
+- Daily extrema use ECCC hourly entries on the current date in `MK_WEATHER_TIMEZONE`, with the current observed temperature also considered.
+- Added TODAY support to the Weather web controls, dashboard status, HTTP API, private IPC, OpenAPI schema, native Weather service, and OLED renderer.
+- Increased HTTP API to 1.44, private IPC to 27, and Native Weather to 2.0.14.
+
+## v1.2.55 - 2026-07-22
+
+### Font-independent clock centring
+
+- Removed the fixed `-4 px` clock offset.
+- Added a shared post-render centring function that measures the clock pixels actually drawn to the OLED framebuffer.
+- Recentres both FreeType and built-in fallback clocks from their visible horizontal bounds.
+- Keeps colon blinking from affecting alignment because the outer digits define the measured bounds.
+- Draws the location/alarm header after clock centring so it cannot contaminate the clock measurement.
+- Added regression coverage for left-biased, right-biased, narrow, and nearly full-width clock output.
+- HTTP API remains 1.43, private IPC remains 26, and Native Weather remains 2.0.13.
+
+## v1.2.54 - 2026-07-22
+
+- Centred the Weather header on its illuminated-pixel centroid instead of its advance box.
+- Moved `INVERMERE - ALARM ON` one pixel right so it is visually centred on the clock axis.
+- Added a regression assertion for the exact Invermere alarm-header position.
+
+## v1.2.53 - 2026-07-22
+
+### Display font loading and release integrity
+
+- Changed every web cache key to 1.2.54 so browsers cannot reuse the earlier Display module that left the INSIDE font selector at `Loading fonts...`.
+- Added a browser regression test that populates and selects the independent INSIDE font control.
+- Corrected font-preview teardown so loaded `FontFace` objects and temporary Blob URLs are removed cleanly.
+- Removed the four obsolete room-sensor state PNG files and all remaining HTML, JavaScript, and CSS references.
+- Restored executable permissions on the Weather install and uninstall scripts.
+- Made the main Makefile invoke the Weather scripts through `sh`, preventing archive permission loss from breaking installation.
+- Added release-integrity checks for version consistency, script execution, deleted assets, stale references, and generated build files.
+- HTTP API remains 1.43, private IPC remains 26, and Native Weather remains 2.0.13.
+
+## v1.2.52 - 2026-07-22
+
+### INSIDE alignment, separate font, and cleanup
+
+- Renamed the visible `ROOM` label to `INSIDE` while preserving the compatible `room` API mode.
+- Aligned INSIDE relative humidity with the temperature row used by the other Weather panels.
+- Added an independent INSIDE temperature font selector with a “Same as clock font” default.
+- Persisted and exposed `inside_font_file`, including backup and restore support.
+- Reset deleted or unavailable INSIDE fonts safely to the clock font.
+- Removed obsolete room-sensor asset diagnostics and the unused System storage row.
+- Re-ran native, browser, Weather, configuration, and asset cleanup checks.
+- Increased HTTP API to 1.43 and private IPC to 26; Native Weather remains 2.0.13.
+
+## v1.2.51 - 2026-07-22
+
+### Decimal ROOM temperature and fixed-time Weather panels
+
+- Replaced the OLED ROOM sprite with the live AHT10 temperature rendered in the selected TTF font.
+- Preserved one decimal place on the OLED, for example `23.1°`, with relative humidity directly below.
+- Added a compact built-in fallback and dimmed stale/unavailable states.
+- Removed obsolete native ROOM RAW sprite assets and their install path while retaining web status icons.
+- Added a distinct `Specific time` mode to every Weather panel.
+- Fixed-time panels select the next occurrence of the chosen forecast hour in the configured Weather timezone.
+- Preserved compatibility with existing Weather panel configuration files.
+- Increased HTTP API to 1.42 and Native Weather to 2.0.13; private IPC remains 25.
+
+## v1.2.50 - 2026-07-22
+
+### OLED clock alignment
+
+- Moved the main OLED clock axis 2 pixels left.
+- Applied the same shared axis to the TTF clock, built-in pixel fallback, and Weather location/alarm header.
+- Kept forecast panels, separators, and the seconds-position line fixed to their existing panel geometry.
+- HTTP API remains 1.41, private IPC remains 25, and Native Weather remains 2.0.12.
+
+## v1.2.49 - 2026-07-22
+
+### Alarm visibility and dashboard wording
+
+- Added `- ALARM ON` to the right of the OLED Weather location whenever an enabled alarm is scheduled on at least one weekday.
+- Preserved the complete alarm indicator by shortening long location labels as needed.
+- Shows `ALARM ON` alone when the Weather location has not loaded yet.
+- Replaced the Dashboard `At a glance` wording `Sound / Quiet` with `Audio / Stopped`.
+- HTTP API remains 1.41, private IPC remains 25, and Native Weather remains 2.0.12.
+
+## v1.2.48 - 2026-07-22
+
+### Multiple Weather warning rotation
+
+- Preserved active Environment Canada warning descriptions in the order supplied by the source JSON.
+- Displayed the complete normalized `description.en` value instead of locally rewriting or severity-ranking the title.
+- Added ordered OLED footer rotation for multiple active warnings, with a 12-second minimum and a complete marquee cycle for long descriptions.
+- Skipped ended, expired, and duplicate warning records.
+- Added `warning_count` and `warnings` to status output while retaining the first description in `warning_type` for compatibility.
+- Limited warning chimes to genuinely new descriptions, avoiding replay on warning removal or source reordering.
+- Increased HTTP API to 1.41, private IPC to 25, and Native Weather to 2.0.12.
+
+## v1.2.47 - 2026-07-22
+
+### Weather source switching and transport reliability
+
+- Forced Environment Canada GeoMet requests to HTTP/1.1.
+- Added one fresh IPv4 retry for empty responses, receive errors, connection failures, and timeouts.
+- Cleared previous-city display data and sprites when the source URL changes.
+- Made last-good cache restoration source-aware so data from a former city cannot be restored for a new source.
+- Increased Native Weather to 2.0.11; HTTP API remains 1.40 and private IPC remains 24.
+
+## v1.2.46 - 2026-07-22
+
+### Diagnostic build-warning cleanup
+
+- Removed the two `-Wformat-truncation` warnings in `mk-piclock-api.c`.
+- Replaced diagnostic inventory-ID formatting with explicit bounded copies.
+- Rejects a resolved sysfs block-device name when it cannot fit in the destination buffer instead of truncating it.
+- Added diagnostic regression checks for both bounded formatting paths.
+- HTTP API remains 1.40 and private IPC remains 24.
+
+## v1.2.45 - 2026-07-22
+
+### ROOM panel polish
+
+- Replaced the framed ROOM sensor art with a more pictorial room-scene image.
+- Kept distinct ROOM states for normal, waiting, stale, and error conditions.
+- Moved ROOM humidity onto its own lower line beneath ROOM temperature.
+- Matched the lower humidity line placement to the compact second line used for forecast dates.
+- HTTP API remains 1.40 and private IPC remains 24.
+
+## v1.2.44 - 2026-07-22
+
+### Adult-specific backup and restore
+
+- Added downloadable ZIP backups for settings, alarms, uploaded fonts, Weather source, and Weather panel choices.
+- Added staged restore with strict path and file allowlists, CRC validation, size limits, and rollback.
+- Added private IPC configuration export and import; increased private IPC to 24.
+- Added `GET /api/v1/backup/download` and `POST /api/v1/backup/restore`; increased HTTP API to 1.40.
+- Kept music, logs, Weather caches, generated files, and runtime sensor state outside backups.
+
+## v1.2.43 - 2026-07-22
+
+### Expanded diagnostics
+
+- Added Raspberry Pi model, serial, inventory ID, board revision, OS, kernel, architecture, and API compile time.
+- Added CPU temperature, root and boot filesystem details, storage use, SD-card identity, and asset usage.
+- Added core, OLED, touch, AHT10 room-sensor, Weather source, Weather result, and Weather version details.
+- Added a downloadable plain-text diagnostic report.
+- Increased HTTP API to 1.39; private IPC remains 23.
+
+## v1.2.42 - 2026-07-22
+
+### Alarm reliability and time health
+
+- Alarm audio now repeats until dismissed or the 30-minute safety limit is reached.
+- Records the last alarm whose audio device and decoder opened successfully.
+- Exposes the next scheduled alarm, next alarm ID, exact epoch, and friendly description.
+- Adds prominent dashboard and System warnings when NTP or system time is not valid.
+- Keeps the existing touch and web dismissal controls.
+- Increased HTTP API to 1.38; private IPC remains 23.
+
 # Changelog
+
+## mk-clock-adult-1.2.41
+
+- Ported the kid-clock automatic font-selection policy.
+- Preserved valid saved font choices and explicit built-in selections.
+- Preferred uploaded fonts, then detected DejaVu Sans Mono, then the built-in renderer.
+- Added an Automatic font detection choice to the Display GUI and API schema.
+- Made font uploads active immediately and active-font deletion select the next valid default.
+- Added migration and font-catalog regression coverage.
+- Preserved HTTP API 1.37, private IPC 23, Native Weather 2.0.10, AHT10 behavior, panel logic, and existing assets.
 
 ## mk-clock-adult-1.2.40
 

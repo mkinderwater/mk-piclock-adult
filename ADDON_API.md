@@ -54,7 +54,7 @@ GET  /api/v1/config/weather-frames
 POST /api/v1/config/weather-frames
 ```
 
-Each of the three panel modes is `room`, `outside`, or `offset`. `room` uses AHT10 data, `outside` uses current ECCC conditions with field-level nearest-hour fallback, and `offset` selects an hourly forecast 1 through 48 hours ahead. Panels may repeat a source.
+Each of the three panel modes is `room`, `outside`, `today`, `offset`, or `time`. `room` uses AHT10 data, `outside` uses current ECCC conditions with field-level nearest-hour fallback, `today` shows the current local day low and high with their occurrence hours plus the maximum daily precipitation probability, `offset` selects an hourly forecast 1 through 48 hours ahead, and `time` selects the next occurrence of a specific local forecast hour. POST requests provide `slotN_time` as `HH:00`. Panels may repeat a source.
 
 ## Weather
 
@@ -63,7 +63,7 @@ POST /api/v1/weather
 GET  /api/v1/weather/activity
 ```
 
-The weather service posts the ECCC location name and normalized GeoMet data to `/api/v1/weather`. The location and current weather state are included in `/api/v1/status`. Future forecast slots may include `date_label`, such as `JULY 23`, when the selected forecast falls on a later local date. Each status slot includes `kind` and `temperature_available`. Missing panel temperatures remain unavailable and render as `--°`, while ROOM panels are rendered from the separate native AHT10 `room_sensor` object.
+The weather service posts the ECCC location name and normalized GeoMet data to `/api/v1/weather`. The location and current weather state are included in `/api/v1/status`. Future forecast slots may include `date_label`, such as `JULY 23`, when the selected forecast falls on a later local date. Each status slot includes `kind` and `temperature_available`. TODAY slots also include `low_temperature_c`, `low_temperature_available`, `low_hour`, `high_temperature_c`, `high_temperature_available`, and `high_hour`. Missing outdoor temperatures remain unavailable and render as `--°`. INSIDE panels are rendered from the separate native AHT10 `room_sensor` object with one decimal place and relative humidity.
 
 ## Activity
 
@@ -75,8 +75,8 @@ POST /api/v1/logs/clear
 ## Compatibility
 
 ```text
-HTTP API:    1.37
-Private IPC: 23
+HTTP API:    1.44
+Private IPC: 27
 ```
 
 ## Network diagnostics

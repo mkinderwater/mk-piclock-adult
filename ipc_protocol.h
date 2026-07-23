@@ -6,7 +6,7 @@
 /* Private same-host protocol. Integer fields use native byte order because both
  * endpoints run on the same Linux device and are built from this header. */
 #define MP_IPC_MAGIC 0x4D4B5043u /* MKPC */
-#define MP_IPC_VERSION 23u
+#define MP_IPC_VERSION 27u
 #define MP_IPC_MAX_PAYLOAD (128u * 1024u)
 
 struct mp_ipc_request_header {
@@ -48,7 +48,9 @@ enum mp_ipc_opcode {
     MP_IPC_OP_PING = 15,
     MP_IPC_OP_DISPLAY_PREVIEW = 16,
     MP_IPC_OP_BRIGHTNESS_PREVIEW = 17,
-    MP_IPC_OP_WEATHER_UPDATE = 19
+    MP_IPC_OP_WEATHER_UPDATE = 19,
+    MP_IPC_OP_CONFIG_EXPORT = 20,
+    MP_IPC_OP_CONFIG_IMPORT = 21
 };
 
 enum mp_ipc_display_action_code {
@@ -121,7 +123,8 @@ enum mp_ipc_display_field {
     MP_IPC_DISPLAY_BEDTIME_END = 1u << 7,
     MP_IPC_DISPLAY_OLED_COLOR = 1u << 8,
     MP_IPC_DISPLAY_WARNING_CHIME_ENABLED = 1u << 9,
-    MP_IPC_DISPLAY_WARNING_CHIME_BEDTIME = 1u << 10
+    MP_IPC_DISPLAY_WARNING_CHIME_BEDTIME = 1u << 10,
+    MP_IPC_DISPLAY_INSIDE_FONT_FILE = 1u << 11
 };
 
 enum mp_oled_color {
@@ -145,6 +148,7 @@ struct mp_ipc_display_config {
     uint8_t weather_warning_chime_enabled;
     uint8_t weather_warning_chime_during_bedtime;
     char oled_font_file[128];
+    char inside_font_file[128];
 };
 
 
@@ -161,22 +165,27 @@ enum mp_weather_icon {
 };
 
 #define MP_WEATHER_FORECAST_SLOTS 3
+#define MP_WEATHER_WARNING_SLOTS 8
+#define MP_WEATHER_WARNING_TEXT_MAX 256
 
 enum mp_weather_slot_kind {
     MP_WEATHER_SLOT_ROOM = 1,
     MP_WEATHER_SLOT_OUTSIDE = 2,
-    MP_WEATHER_SLOT_FORECAST = 3
+    MP_WEATHER_SLOT_FORECAST = 3,
+    MP_WEATHER_SLOT_TODAY = 4
 };
 
 static inline const char *mp_weather_slot_kind_name(int kind) {
     if (kind == MP_WEATHER_SLOT_ROOM) return "room";
     if (kind == MP_WEATHER_SLOT_OUTSIDE) return "outside";
+    if (kind == MP_WEATHER_SLOT_TODAY) return "today";
     return "forecast";
 }
 
 static inline const char *mp_weather_slot_default_label(int kind) {
-    if (kind == MP_WEATHER_SLOT_ROOM) return "ROOM";
+    if (kind == MP_WEATHER_SLOT_ROOM) return "INSIDE";
     if (kind == MP_WEATHER_SLOT_OUTSIDE) return "OUTSIDE";
+    if (kind == MP_WEATHER_SLOT_TODAY) return "TODAY";
     return "LATER";
 }
 
@@ -188,11 +197,19 @@ struct mp_ipc_weather_slot {
     uint8_t temperature_available;
     char label[8];
     char date_label[16];
+    int16_t low_temperature_c;
+    int16_t high_temperature_c;
+    uint8_t low_temperature_available;
+    uint8_t high_temperature_available;
+    uint8_t low_hour;
+    uint8_t high_hour;
 };
 
 struct mp_ipc_weather_update {
     char location[64];
-    char warning_type[128];
+    uint8_t warning_count;
+    uint8_t warning_reserved[7];
+    char warning_descriptions[MP_WEATHER_WARNING_SLOTS][MP_WEATHER_WARNING_TEXT_MAX];
     int16_t current_temperature_c;
     uint8_t current_temperature_available;
     uint8_t current_temperature_is_forecast;
@@ -202,6 +219,13 @@ struct mp_ipc_weather_update {
     uint8_t uv_index;
     uint64_t observed_at;
     struct mp_ipc_weather_slot slots[MP_WEATHER_FORECAST_SLOTS];
+};
+
+#define MP_IPC_CONFIG_MAX_BYTES 32768u
+
+struct mp_ipc_config_blob {
+    uint32_t length;
+    char data[MP_IPC_CONFIG_MAX_BYTES];
 };
 
 struct mp_ipc_asset_event {
