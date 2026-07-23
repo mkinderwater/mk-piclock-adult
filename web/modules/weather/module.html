@@ -2,10 +2,9 @@
     <div class="card">
         <div class="card-heading-row">
             <div>
-                <h2>Room Sensor</h2>
-                <p class="page-intro">Any panel configured as ROOM uses the local AHT10 temperature and humidity sensor. ROOM is independent from the ECCC weather source.</p>
+                <h2>Inside Sensor</h2>
+                <p class="page-intro">Any panel configured as INSIDE uses the local AHT10 temperature and humidity sensor. INSIDE is independent from the ECCC weather source.</p>
             </div>
-            <img id="room-sensor-icon" class="room-sensor-icon" src="/assets/icons/room-sensor-waiting.png?v=mk-clock-adult-1.2.40" alt="AHT10 room sensor">
         </div>
         <table class="info-table">
             <tbody>
@@ -57,7 +56,7 @@
         <div class="card-heading-row">
             <div>
                 <h2>Weather Panels</h2>
-                <p class="page-intro">Choose the source for each of the three OLED weather panels. ROOM uses the local AHT10 sensor, OUTSIDE uses current ECCC conditions, and Hours ahead selects an hourly forecast.</p>
+                <p class="page-intro">Choose the source for each of the three OLED weather panels. INSIDE uses the local AHT10 sensor, OUTSIDE uses current ECCC conditions, Today low / high shows today’s forecast extremes, Hours ahead uses a relative forecast, and Specific time uses the next occurrence of a selected forecast hour.</p>
             </div>
         </div>
 
@@ -67,43 +66,55 @@
                     <legend>First panel</legend>
                     <label for="weather-frame-1-mode">Source</label>
                     <select id="weather-frame-1-mode" name="slot1_mode">
-                        <option value="room">Room sensor</option>
+                        <option value="room">Inside sensor</option>
                         <option value="outside">Outside now</option>
+                        <option value="today">Today low / high</option>
                         <option value="offset">Hours ahead</option>
+                        <option value="time">Specific time</option>
                     </select>
                     <label for="weather-frame-1-offset">Hours ahead</label>
                     <input id="weather-frame-1-offset" name="slot1_offset_hours" type="number" min="1" max="48" step="1" value="1">
+                    <label for="weather-frame-1-time">Specific time</label>
+                    <input id="weather-frame-1-time" name="slot1_time" type="time" step="3600" value="07:00">
                 </fieldset>
 
                 <fieldset>
                     <legend>Second panel</legend>
                     <label for="weather-frame-2-mode">Source</label>
                     <select id="weather-frame-2-mode" name="slot2_mode">
-                        <option value="room">Room sensor</option>
+                        <option value="room">Inside sensor</option>
                         <option value="outside">Outside now</option>
+                        <option value="today">Today low / high</option>
                         <option value="offset">Hours ahead</option>
+                        <option value="time">Specific time</option>
                     </select>
                     <label for="weather-frame-2-offset">Hours ahead</label>
                     <input id="weather-frame-2-offset" name="slot2_offset_hours" type="number" min="1" max="48" step="1" value="3">
+                    <label for="weather-frame-2-time">Specific time</label>
+                    <input id="weather-frame-2-time" name="slot2_time" type="time" step="3600" value="12:00">
                 </fieldset>
 
                 <fieldset>
                     <legend>Third panel</legend>
                     <label for="weather-frame-3-mode">Source</label>
                     <select id="weather-frame-3-mode" name="slot3_mode">
-                        <option value="room">Room sensor</option>
+                        <option value="room">Inside sensor</option>
                         <option value="outside">Outside now</option>
+                        <option value="today">Today low / high</option>
                         <option value="offset">Hours ahead</option>
+                        <option value="time">Specific time</option>
                     </select>
                     <label for="weather-frame-3-offset">Hours ahead</label>
                     <input id="weather-frame-3-offset" name="slot3_offset_hours" type="number" min="1" max="48" step="1" value="6">
+                    <label for="weather-frame-3-time">Specific time</label>
+                    <input id="weather-frame-3-time" name="slot3_time" type="time" step="3600" value="18:00">
                 </fieldset>
             </div>
 
-            <p class="small">Panels may repeat a source. Hours ahead is measured from the current time and accepts 1 through 48 hours.</p>
+            <p class="small">Panels may repeat a source. Today low / high uses the current local day’s available hourly forecast, includes the current reading, and shows the highest precipitation probability for the day. Hours ahead accepts 1 through 48 hours. Specific time selects the next matching hour in the configured Weather timezone, rolling into tomorrow after that hour has passed.</p>
             <div class="button-row">
                 <button class="btn" id="weather-frames-save" type="submit">Save Panels &amp; Refresh</button>
-                <button class="btn alt" id="weather-frames-defaults" type="button">Use ROOM, +3h, +6h</button>
+                <button class="btn alt" id="weather-frames-defaults" type="button">Use INSIDE, +3h, +6h</button>
             </div>
         </form>
         <p id="weather-frames-status" class="small no-margin" role="status" aria-live="polite">Loading.</p>

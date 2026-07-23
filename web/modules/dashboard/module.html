@@ -1,4 +1,8 @@
 <section class="panel dashboard-module">
+    <div id="ntp-warning" class="card hidden" role="alert">
+        <h2 class="warn-text">Clock time is not synchronized</h2>
+        <p class="no-margin">Alarms may run at the wrong time. Check the network and NTP status on the System page.</p>
+    </div>
     <div class="card oled-preview-card">
         <div class="card-title-row">
             <div>
@@ -16,9 +20,10 @@
         <h2>At a glance</h2>
         <div class="status-summary">
             <div class="status-tile"><strong>Clock</strong><span id="summary-clock">Loading...</span></div>
-            <div class="status-tile"><strong>Sound</strong><span id="summary-sound">Loading...</span></div>
+            <div class="status-tile"><strong>Audio</strong><span id="summary-sound">Loading...</span></div>
+            <div class="status-tile"><strong>Next alarm</strong><span id="summary-next-alarm">Loading...</span></div>
             <div class="status-tile"><strong>Bedtime</strong><span id="summary-bedtime">Loading...</span></div>
-            <div class="status-tile"><strong>Room</strong><span id="summary-room">Loading...</span></div>
+            <div class="status-tile"><strong>Inside</strong><span id="summary-room">Loading...</span></div>
             <div class="status-tile"><strong>Weather</strong><span id="summary-weather">Loading...</span></div>
         </div>
     </div>
@@ -29,7 +34,7 @@
             <button class="btn ok" type="button" data-clock-action="clock">Return to Clock</button>
             <button class="btn" type="button" id="play-first-song">Play Music</button>
             <button class="btn alt" type="button" data-clock-action="clear">Turn Screen Off</button>
-            <button class="btn danger" type="button" data-clock-action="stop">Stop Music or Alarm</button>
+            <button class="btn danger" type="button" data-clock-action="stop">Stop Music / Dismiss Alarm</button>
         </div>
     </div>
 
@@ -49,8 +54,10 @@
                 <tr><th>Screen colour</th><td id="status-oled-color">Loading...</td></tr>
                 <tr><th>Touch button</th><td id="status-touch">Loading...</td></tr>
                 <tr><th>Clock font</th><td id="status-font">Loading...</td></tr>
+                <tr><th>Next alarm</th><td id="status-next-alarm">Loading...</td></tr>
+                <tr><th>Last successful alarm</th><td id="status-last-alarm">Loading...</td></tr>
                 <tr><th>Bedtime schedule</th><td id="status-bedtime">Loading...</td></tr>
-                <tr><th>Room sensor</th><td id="status-room-sensor">Loading...</td></tr>
+                <tr><th>Inside sensor</th><td id="status-room-sensor">Loading...</td></tr>
                 <tr><th>Current weather</th><td id="status-weather-current">Loading...</td></tr>
                 <tr><th>Forecast periods</th><td id="status-weather-forecast">Loading...</td></tr>
             </tbody>

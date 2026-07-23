@@ -11,7 +11,6 @@ export async function mount(ctx) {
     const calgary = ctx.$('#weather-source-calgary');
     const revert = ctx.$('#weather-source-revert');
     const status = ctx.$('#weather-source-status');
-    const roomSensorIcon = ctx.$('#room-sensor-icon');
     const roomSensorStatus = ctx.$('#room-sensor-status');
     const roomSensorTemperature = ctx.$('#room-sensor-temperature');
     const roomSensorHumidity = ctx.$('#room-sensor-humidity');
@@ -30,7 +29,8 @@ export async function mount(ctx) {
     const warningChimeStatus = ctx.$('#weather-warning-chime-status');
     const frameControls = [1, 2, 3].map(index => ({
         mode: ctx.$(`#weather-frame-${index}-mode`),
-        offset: ctx.$(`#weather-frame-${index}-offset`)
+        offset: ctx.$(`#weather-frame-${index}-offset`),
+        time: ctx.$(`#weather-frame-${index}-time`)
     }));
     let savedUrl = '';
     let dirty = false;
@@ -84,6 +84,7 @@ export async function mount(ctx) {
         const controls = frameControls[index];
         const mode = controls.mode.value;
         controls.offset.disabled = mode !== 'offset' || framesSave.disabled;
+        controls.time.disabled = mode !== 'time' || framesSave.disabled;
     };
 
     const setFramesBusy = busy => {
@@ -97,15 +98,20 @@ export async function mount(ctx) {
 
     const applyFrames = data => {
         const defaults = [
-            {mode: 'room', offset_hours: 1},
-            {mode: 'offset', offset_hours: 3},
-            {mode: 'offset', offset_hours: 6}
+            {mode: 'room', offset_hours: 1, time: '07:00'},
+            {mode: 'offset', offset_hours: 3, time: '12:00'},
+            {mode: 'offset', offset_hours: 6, time: '18:00'}
         ];
         [data.slot1 || {}, data.slot2 || {}, data.slot3 || {}].forEach((slot, index) => {
             const controls = frameControls[index];
             const fallback = defaults[index];
-            controls.mode.value = ['room', 'outside'].includes(slot.mode) ? slot.mode : 'offset';
+            controls.mode.value = ['room', 'outside', 'today', 'offset', 'time'].includes(slot.mode)
+                ? slot.mode
+                : fallback.mode;
             controls.offset.value = String(slot.offset_hours ?? fallback.offset_hours);
+            controls.time.value = /^\d{2}:00$/.test(String(slot.time || ''))
+                ? String(slot.time)
+                : fallback.time;
             updateFrameControls(index);
         });
     };
@@ -155,13 +161,6 @@ export async function mount(ctx) {
             : 'No successful reading';
         roomSensorError.textContent = room.error || '';
         roomSensorError.className = `small no-margin ${room.error ? 'warn-text' : ''}`.trim();
-        roomSensorIcon.src = state === 'active'
-            ? '/assets/icons/room-sensor-normal.png?v=mk-clock-adult-1.2.40'
-            : state === 'stale'
-                ? '/assets/icons/room-sensor-stale.png?v=mk-clock-adult-1.2.40'
-                : state === 'error' || state === 'disabled'
-                    ? '/assets/icons/room-sensor-error.png?v=mk-clock-adult-1.2.40'
-                    : '/assets/icons/room-sensor-waiting.png?v=mk-clock-adult-1.2.40';
     };
 
     const loadRoomSensor = async () => {
@@ -176,9 +175,8 @@ export async function mount(ctx) {
         } catch (error) {
             if (!ctx.signal.aborted) {
                 roomSensorStatus.textContent = 'Unavailable';
-                roomSensorError.textContent = error.message || 'Room sensor status could not be loaded.';
+                roomSensorError.textContent = error.message || 'Inside sensor status could not be loaded.';
                 roomSensorError.className = 'small no-margin warn-text';
-                roomSensorIcon.src = '/assets/icons/room-sensor-error.png?v=mk-clock-adult-1.2.40';
             }
         }
     };
@@ -323,11 +321,11 @@ export async function mount(ctx) {
 
     ctx.on('click', '#weather-frames-defaults', () => {
         applyFrames({
-            slot1: {mode: 'room', offset_hours: 1},
-            slot2: {mode: 'offset', offset_hours: 3},
-            slot3: {mode: 'offset', offset_hours: 6}
+            slot1: {mode: 'room', offset_hours: 1, time: '07:00'},
+            slot2: {mode: 'offset', offset_hours: 3, time: '12:00'},
+            slot3: {mode: 'offset', offset_hours: 6, time: '18:00'}
         });
-        setFramesStatus('ROOM, +3h and +6h selected. Press Save Panels & Refresh to apply them.');
+        setFramesStatus('INSIDE, +3h and +6h selected. Press Save Panels & Refresh to apply them.');
     });
 
     ctx.on('submit', '#weather-frames-form', async (event, form) => {
@@ -340,7 +338,8 @@ export async function mount(ctx) {
             const controls = frameControls[index];
             const mode = controls.mode.value;
             const offset = Number.parseInt(controls.offset.value, 10);
-            if (!['room', 'outside', 'offset'].includes(mode)) {
+            const specificTime = controls.time.value;
+            if (!['room', 'outside', 'today', 'offset', 'time'].includes(mode)) {
                 setFramesStatus(`Panel ${slot} has an invalid source.`, 'warn-text');
                 return;
             }
@@ -348,9 +347,17 @@ export async function mount(ctx) {
                 setFramesStatus(`Panel ${slot} hours ahead must be between 1 and 48.`, 'warn-text');
                 return;
             }
+            if (mode === 'time' && !/^([01]\d|2[0-3]):00$/.test(specificTime)) {
+                setFramesStatus(`Panel ${slot} specific time must be on the hour.`, 'warn-text');
+                return;
+            }
             const fallbackOffsets = [1, 3, 6];
+            const fallbackTimes = ['07:00', '12:00', '18:00'];
             body.set(`slot${slot}_mode`, mode);
             body.set(`slot${slot}_offset_hours`, String(Number.isInteger(offset) ? offset : fallbackOffsets[index]));
+            body.set(`slot${slot}_time`, /^([01]\d|2[0-3]):00$/.test(specificTime)
+                ? specificTime
+                : fallbackTimes[index]);
         }
 
         setFramesBusy(true);

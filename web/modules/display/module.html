@@ -45,17 +45,18 @@
 
     <div class="card">
         <h2>Clock display</h2>
-        <p class="page-intro">Choose the time format and clock font in one place.</p>
+        <p class="page-intro">Choose the time format, clock font, and INSIDE temperature font.</p>
         <form method="POST" action="/api/v1/config/display" id="font-form" data-busy-text="Saving clock display..." data-success-text="Clock display saved" data-error-text="Clock display could not be saved">
             <input type="hidden" id="oled-font-file" name="oled_font_file">
             <input type="hidden" id="oled-font" name="oled_font">
+            <input type="hidden" id="inside-font-file" name="inside_font_file">
             <label for="clock-24h-mode">Time format</label>
             <select id="clock-24h-mode" name="clock_24h_mode"><option value="0">12-hour, such as 7:30 PM</option><option value="1">24-hour, such as 19:30</option></select>
             <div class="field-row">
                 <div>
                     <label for="clock-font">Clock font</label>
                     <select id="clock-font" aria-describedby="clock-font-help"><option>Loading fonts...</option></select>
-                    <p class="small no-margin" id="clock-font-help">Choose a built-in OLED font, an installed Linux font, or an uploaded font. The list is rebuilt each time this page loads.</p>
+                    <p class="small no-margin" id="clock-font-help">Automatic detection prefers an uploaded font, then DejaVu Sans Mono, then the built-in fallback. Linux fonts are rescanned each time this page loads.</p>
                 </div>
                 <div>
                     <label for="oled-font-size">Font size</label>
@@ -63,6 +64,9 @@
                 </div>
             </div>
             <div id="selected-font-preview" class="font-preview-area"><div class="small muted">Loading font preview...</div></div>
+            <label for="inside-font">INSIDE temperature font</label>
+            <select id="inside-font" aria-describedby="inside-font-help"><option>Loading fonts...</option></select>
+            <p class="small no-margin" id="inside-font-help">Use the clock font or select a separate Linux or uploaded font for the large INSIDE temperature.</p>
             <button class="btn" type="submit">Save clock display</button>
         </form>
     </div>

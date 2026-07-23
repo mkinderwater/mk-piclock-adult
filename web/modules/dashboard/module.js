@@ -35,6 +35,19 @@ export async function mount(ctx) {
         8: 'Fog'
     })[Number(value)] || 'Unknown';
 
+    const formatAlarmTime = value => {
+        const epoch = Number(value || 0);
+        return epoch > 0 ? new Date(epoch * 1000).toLocaleString() : 'Never';
+    };
+
+    const refreshTimeHealth = async () => {
+        try {
+            const diagnostics = await ctx.json('/api/v1/diagnostics', {signal: ctx.signal});
+            const warning = ctx.$('#ntp-warning');
+            if (warning) warning.classList.toggle('hidden', Boolean(diagnostics.ntp_synchronized && diagnostics.system_time_valid));
+        } catch (_) {}
+    };
+
     const render = status => {
         if (!status) return;
         preview.setColour(status.oled_color);
@@ -56,13 +69,16 @@ export async function mount(ctx) {
             ? (status.touch_pressed ? `Pressed on GPIO ${status.touch_gpio}` : `Ready on GPIO ${status.touch_gpio}`)
             : `Unavailable on GPIO ${status.touch_gpio ?? 20}`);
         ctx.setText('#status-font', status.oled_font_name);
+        ctx.setText('#status-next-alarm', status.next_alarm_text || 'No alarm scheduled');
+        ctx.setText('#status-last-alarm', formatAlarmTime(status.last_successful_alarm));
         ctx.setText('#status-bedtime', status.bedtime_enabled
             ? `${ctx.timeValue(status.bedtime_start_hour, status.bedtime_start_min)} to ${ctx.timeValue(status.bedtime_end_hour, status.bedtime_end_min)}, ${status.bedtime_dim_percent}%, ${status.clock_24h_mode ? '24-hour' : '12-hour'}`
             : 'Off');
         ctx.setText('#summary-clock', status.oled_ok ? `Working · ${status.time || ''}` : 'Screen unavailable');
         ctx.setText('#summary-sound', status.alarm_active
             ? `Alarm playing · ${status.alarm_volume_percent || 0}%`
-            : (status.audio_playing ? `Playing ${track || 'music'}` : 'Quiet'));
+            : (status.audio_playing ? `Playing ${track || 'music'}` : 'Stopped'));
+        ctx.setText('#summary-next-alarm', status.next_alarm_text || 'None scheduled');
         ctx.setText('#summary-bedtime', status.bedtime_enabled
             ? `${ctx.timeValue(status.bedtime_start_hour, status.bedtime_start_min)} to ${ctx.timeValue(status.bedtime_end_hour, status.bedtime_end_min)}`
             : 'Not scheduled');
@@ -106,6 +122,23 @@ export async function mount(ctx) {
         const weatherPanels = slots.filter(slot => String(slot.kind || '') !== 'room');
         ctx.setText('#status-weather-forecast', weatherPanels.length
             ? weatherPanels.map(slot => {
+                if (String(slot.kind || '') === 'today') {
+                    const formatHour = value => {
+                        const hour = Math.max(0, Math.min(23, Number(value) || 0));
+                        if (status.clock_24h_mode) return `${String(hour).padStart(2, '0')}:00`;
+                        const displayHour = hour % 12 || 12;
+                        return `${displayHour} ${hour < 12 ? 'AM' : 'PM'}`;
+                    };
+                    const low = slot.low_temperature_available
+                        ? `${Math.round(Number(slot.low_temperature_c))}°C at ${formatHour(slot.low_hour)}`
+                        : 'unavailable';
+                    const high = slot.high_temperature_available
+                        ? `${Math.round(Number(slot.high_temperature_c))}°C at ${formatHour(slot.high_hour)}`
+                        : 'unavailable';
+                    const precipitation = Math.max(0, Math.min(100,
+                        Math.round(Number(slot.precipitation_probability_percent) || 0)));
+                    return `TODAY Low ${low}, high ${high}, ${precipitation}% precipitation`;
+                }
                 const temperature = Number(slot.temperature_c);
                 const available = slot.temperature_available === undefined
                     ? Number.isFinite(temperature)
@@ -151,10 +184,11 @@ export async function mount(ctx) {
         } catch (_) {}
     });
 
-    await Promise.allSettled([ctx.status.refresh(), refreshPreview()]);
+    await Promise.allSettled([ctx.status.refresh(), refreshPreview(), refreshTimeHealth()]);
 
     const statusTimer = window.setInterval(() => {
         ctx.status.refresh().catch(() => {});
+        refreshTimeHealth().catch(() => {});
     }, 5000);
     const schedulePreview = () => {
         if (ctx.signal.aborted) return;

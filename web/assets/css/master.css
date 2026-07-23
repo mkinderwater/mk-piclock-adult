@@ -419,12 +419,3 @@ details.card > summary::marker,
     .media-library-actions { justify-content: flex-start; }
 }
 
-.room-sensor-icon {
-    width: 64px;
-    height: 64px;
-    image-rendering: pixelated;
-    object-fit: contain;
-    background: #000;
-    border: 1px solid var(--oled-color-border);
-    border-radius: 6px;
-}

@@ -3,10 +3,6 @@ export async function mount(ctx) {
     const previewFonts = new Map();
     const fontChoices = new Map();
     const fontBlobUrls = new Set();
-    ctx.signal.addEventListener('abort', () => {
-        fontBlobUrls.forEach(url => URL.revokeObjectURL(url));
-        fontBlobUrls.clear();
-    }, {once: true});
     let brightnessTimer = 0;
     let brightnessPending = null;
     let brightnessSending = false;
@@ -43,7 +39,8 @@ export async function mount(ctx) {
             '#oled-color': status.oled_color || 'green',
             '#oled-font-file': status.oled_font_file,
             '#oled-font': status.oled_font ?? 0,
-            '#oled-font-size': status.oled_font_size ?? 48
+            '#oled-font-size': status.oled_font_size ?? 48,
+            '#inside-font-file': status.inside_font_file || ''
         };
         Object.entries(values).forEach(([selector, value]) => ctx.setValue(selector, value));
         setBrightnessValue(status.bedtime_dim_percent ?? 35);
@@ -97,7 +94,15 @@ export async function mount(ctx) {
                 document.fonts.add(font);
                 return font.load();
             })
-            .catch(() => {});
+            .catch(() => {
+                const entry = previewFonts.get(value);
+                if (entry?.font) document.fonts.delete(entry.font);
+                if (entry?.blobUrl) {
+                    URL.revokeObjectURL(entry.blobUrl);
+                    fontBlobUrls.delete(entry.blobUrl);
+                }
+                previewFonts.delete(value);
+            });
         return family;
     };
     const sample = value => `<div class="font-sample-box" style="font-family:'${ctx.html(registerFont(value))}',sans-serif"><div>ABCDEFGHIJKLMNOPQRSTUVWXYZ</div><div>1234567890</div></div>`;
@@ -117,6 +122,13 @@ export async function mount(ctx) {
         }
     };
 
+    const setInsideFontChoice = value => {
+        const choice = String(value || 'clock');
+        if (choice.startsWith('system:')) ctx.setValue('#inside-font-file', choice);
+        else if (choice.startsWith('upload:')) ctx.setValue('#inside-font-file', choice.slice(7));
+        else ctx.setValue('#inside-font-file', '');
+    };
+
     const updatePreview = () => {
         if (!fonts) return;
         const value = ctx.$('#clock-font')?.value || `builtin:${fonts.builtin ?? 0}`;
@@ -126,7 +138,10 @@ export async function mount(ctx) {
             return;
         }
         if (choice.kind === 'builtin') {
-            ctx.$('#selected-font-preview').innerHTML = `<div class="font-preview-card"><div class="font-name">${ctx.html(choice.name)}</div><div class="font-sample-box mono"><div>ABCDEFGHIJKLMNOPQRSTUVWXYZ</div><div>1234567890</div></div><div class="small muted">Built-in OLED font preview is approximated in the browser.</div></div>`;
+            const builtinNote = choice.id === 4
+                ? 'Select this to detect the preferred font automatically.'
+                : 'Built-in OLED font preview is approximated in the browser.';
+            ctx.$('#selected-font-preview').innerHTML = `<div class="font-preview-card"><div class="font-name">${ctx.html(choice.name)}</div><div class="font-sample-box mono"><div>ABCDEFGHIJKLMNOPQRSTUVWXYZ</div><div>1234567890</div></div><div class="small muted">${builtinNote}</div></div>`;
             return;
         }
         const note = choice.kind === 'system'
@@ -195,6 +210,20 @@ export async function mount(ctx) {
         ctx.setValue('#oled-font-size', fonts.font_size ?? 48);
         setFontChoice(selectedChoice);
 
+        const savedInsideFont = String(ctx.$('#inside-font-file')?.value || '');
+        let selectedInsideChoice = 'clock';
+        if (savedInsideFont.startsWith('system:')) selectedInsideChoice = savedInsideFont;
+        else if (savedInsideFont) selectedInsideChoice = `upload:${savedInsideFont}`;
+        const insideMissing = selectedInsideChoice !== 'clock' && !fontChoices.has(selectedInsideChoice);
+        ctx.$('#inside-font').innerHTML = [
+            '<option value="clock">Same as clock font</option>',
+            systemOptions ? `<optgroup label="Linux system fonts">${systemOptions}</optgroup>` : '',
+            uploadedOptions ? `<optgroup label="Uploaded fonts">${uploadedOptions}</optgroup>` : '',
+            insideMissing ? `<optgroup label="Unavailable"><option value="${ctx.html(selectedInsideChoice)}">Unavailable saved font</option></optgroup>` : ''
+        ].join('');
+        ctx.setValue('#inside-font', selectedInsideChoice);
+        setInsideFontChoice(selectedInsideChoice);
+
         ctx.$('#delete-fonts').innerHTML = uploadedFonts.length
             ? uploadedFonts.map(file => `
                 <div class="mini-card font-delete-row">
@@ -214,6 +243,7 @@ export async function mount(ctx) {
             await loadFonts();
         } catch (_) {
             ctx.$('#clock-font').innerHTML = '<option>Could not load fonts</option>';
+            ctx.$('#inside-font').innerHTML = '<option>Could not load fonts</option>';
         }
     };
 
@@ -244,6 +274,7 @@ export async function mount(ctx) {
         setFontChoice(select.value);
         updatePreview();
     });
+    ctx.on('change', '#inside-font', (_, select) => setInsideFontChoice(select.value));
     ctx.on('click', '[data-delete-font]', async (_, button) => {
         const name = button.dataset.deleteFont;
         if (!confirm(`Delete ${name}?`)) return;
@@ -262,8 +293,12 @@ export async function mount(ctx) {
 
     ctx.signal.addEventListener('abort', () => {
         window.clearTimeout(brightnessTimer);
-        previewFonts.forEach(font => document.fonts.delete(font));
+        previewFonts.forEach(entry => {
+            if (entry.font) document.fonts.delete(entry.font);
+        });
         previewFonts.clear();
+        fontBlobUrls.forEach(url => URL.revokeObjectURL(url));
+        fontBlobUrls.clear();
     }, {once: true});
 
     await refresh();

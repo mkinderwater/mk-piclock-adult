@@ -12,8 +12,8 @@ let status = null;
 let appBooted = false;
 let noticeTimer = null;
 const statusListeners = new Set();
-const GUI_VERSION = 'mk-clock-adult-1.2.40';
-const REQUIRED_API_VERSION = '1.37';
+const GUI_VERSION = 'mk-clock-adult-1.2.62';
+const REQUIRED_API_VERSION = '1.44';
 const oledPreviewIntensity = Array.from({length: 16}, (_, level) =>
     level === 0 ? 0 : Math.pow(level / 15, 0.48));
 const oledPreviewColours = Object.freeze({
