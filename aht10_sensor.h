@@ -5,8 +5,10 @@
 #include <stdint.h>
 #include <time.h>
 
-#define MP_AHT10_DEFAULT_DEVICE "/dev/i2c-1"
-#define MP_AHT10_DEFAULT_ADDRESS 0x38
+#include "hardware_profile.h"
+
+#define MP_AHT10_DEFAULT_DEVICE MP_AHT10_I2C_DEVICE
+#define MP_AHT10_DEFAULT_ADDRESS MP_AHT10_I2C_ADDRESS
 
 struct mp_aht10_sample {
     double temperature_c;

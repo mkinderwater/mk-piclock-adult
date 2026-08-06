@@ -5,6 +5,22 @@
     </div>
     <div class="card">
         <div class="card-title-row">
+            <div><h2>Web password</h2><p class="small no-margin">Optional protection for the clock controls.</p></div>
+            <span id="password-state" class="badge">Loading</span>
+        </div>
+        <form id="password-form" method="POST" action="/api/v1/auth/password" data-module-handles-submit="true">
+            <label for="new-web-password">New password</label>
+            <input id="new-web-password" name="password" type="password" maxlength="64" autocomplete="new-password" placeholder="Enter a simple password">
+            <div class="button-grid">
+                <button class="btn" type="submit">Save password</button>
+                <button id="remove-password" class="btn alt" type="button">Remove password</button>
+            </div>
+        </form>
+        <p class="small no-margin">No password means no prompt. The password is stored as plain text on this clock.</p>
+    </div>
+
+    <div class="card">
+        <div class="card-title-row">
             <div>
                 <h2>System</h2>
                 <p class="page-intro">Clock software, service health, and runtime information.</p>
@@ -60,7 +76,8 @@
         <h2>Device identity</h2>
         <table class="info-table"><tbody>
             <tr><th>Inventory ID</th><td id="diag-inventory-id">Loading...</td></tr>
-            <tr><th>Raspberry Pi serial</th><td id="diag-pi-serial" class="technical-value">Loading...</td></tr>
+            <tr><th>Platform</th><td id="diag-platform-profile">Loading...</td></tr>
+            <tr><th>Board serial</th><td id="diag-board-serial" class="technical-value">Loading...</td></tr>
             <tr><th>Board revision</th><td id="diag-board-revision">Loading...</td></tr>
             <tr><th>OS machine ID</th><td id="diag-machine-id" class="technical-value">Loading...</td></tr>
             <tr><th>CPU signature</th><td id="diag-cpu-signature" class="technical-value">Loading...</td></tr>

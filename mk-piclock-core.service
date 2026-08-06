@@ -6,10 +6,10 @@ After=network.target sound.target
 Type=simple
 User=mk-piclock-core
 Group=mk-piclock
-SupplementaryGroups=audio gpio spi i2c
+SupplementaryGroups=audio spi gpio i2c
 Environment=MK_PICLOCK_API_USER=mk-piclock-api
 Environment=MK_AHT10_ENABLED=1
-Environment=MK_AHT10_DEVICE=/dev/i2c-1
+Environment=MK_AHT10_DEVICE=/dev/i2c-0
 Environment=MK_AHT10_ADDRESS=0x38
 Environment=MK_AHT10_POLL_SECONDS=10
 Environment=MK_AHT10_STALE_SECONDS=120
@@ -36,7 +36,7 @@ CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET
 ReadWritePaths=/opt/mk-piclock/config /run/mk-piclock
 
-# The core owns the OLED, GPIO touch input, audio and persistent clock state.
+# The core owns the BPI-M2 Zero OLED, GPIO touch input, AHT10, audio and persistent clock state.
 # Its private SOCK_SEQPACKET socket is /run/mk-piclock/core.sock.
 
 [Install]

@@ -8,6 +8,18 @@ http://<clock-ip>:8080/api/v1
 
 Use it only on a trusted local network.
 
+## Optional authentication
+
+`GET /api/v1` and the two login-state routes remain public:
+
+```http
+GET  /api/v1/auth/status
+POST /api/v1/auth/login
+```
+
+When a web password is configured, every other `/api/v1` route requires the `mkpiclock_auth` session cookie returned by login. Add-ons that do not manage cookies should leave the optional password disabled. The password can be set or removed with `POST /api/v1/auth/password`; changing it requires the current authenticated session.
+
+
 ## Discovery And Status
 
 ```http
@@ -75,7 +87,7 @@ POST /api/v1/logs/clear
 ## Compatibility
 
 ```text
-HTTP API:    1.44
+HTTP API:    1.46
 Private IPC: 27
 ```
 

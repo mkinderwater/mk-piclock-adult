@@ -1,4 +1,39 @@
-## v1.2.62 - 2026-07-23
+## v1.2.65 BPI-M2 Zero R1 - 2026-08-04
+
+- Moved the maintained adult-clock target from Raspberry Pi to Banana Pi M2 Zero.
+- Ported OLED, touch, MAX98357A, ALSA selection, forced-stereo playback, permissions, and services to the proven BPI hardware profile.
+- Moved the AHT10 to Armbian TWI0 at `/dev/i2c-0` on physical pins 3 and 5.
+- Added BPI-only boot, overlay, wiring, install, and diagnostic documentation.
+- Preserved all adult 1.2.64 application behaviour and user configuration.
+- Removed the unused GUI `$$` helper.
+- Increased HTTP API to 1.46. Private IPC remains 27 and Native Weather remains 2.0.14.
+- Declared Raspberry Pi adult 1.2.64 the final Raspberry Pi release.
+
+## v1.2.64 - 2026-07-24
+
+- Added the kid clock's optional lightweight web password protection.
+- Added a full-screen password gate before clock controls load.
+- Added System controls to set, change, or remove the password.
+- Added authenticated API sessions using an HttpOnly SameSite cookie.
+- Protected all non-public `/api/v1` routes when a password is configured.
+- Stored the optional password in `/opt/mk-piclock/config/web-password.txt`, matching the kid clock's deliberately basic trusted-LAN design.
+- Added SSH recovery instructions for a lost password.
+- Increased HTTP API to 1.45. Private IPC remains 27 and Native Weather remains 2.0.14.
+
+## v1.2.63 - 2026-07-24
+
+### Persistent alarm replay protection and isolated second updates
+
+- Stores each alarm occurrence as a local `YYYYMMDD` value before audio starts.
+- Prevents an interrupted alarm from firing again after a restart or power loss on the same date.
+- Migrates the existing `last_successful_alarm` timestamp once so upgraded clocks retain protection immediately.
+- Preserves the replay guard when volume, music, or enabled state changes, and resets it when the schedule changes.
+- Flushes and syncs the atomic configuration rename before alarm playback begins.
+- Replaces once-per-second full dashboard composition with cached colon layers and a seconds-line-only update.
+- Splits OLED dirty transfers into independent overlapping row bands and synchronizes direct footer writes with the comparison framebuffer.
+- HTTP API remains 1.44, private IPC remains 27, and Native Weather remains 2.0.14.
+
+## v1.2.63 - 2026-07-23
 
 ### Atomic Weather warning marquee
 

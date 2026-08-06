@@ -1,36 +1,31 @@
-# mk-clock-adult 1.2.62
+# mk-clock-adult 1.2.65 BPI-M2 Zero R1
 
-Native Raspberry Pi alarm clock software for the SSD1322 OLED, TTP223B touch input, MAX98357A I2S audio, ECCC Weather, and an AHT10 inside temperature and humidity sensor.
+Native Banana Pi M2 Zero alarm clock software for the SSD1322 OLED, TTP223B touch input, MAX98357A I2S audio, ECCC Weather, and an AHT10 inside temperature and humidity sensor.
 
-## What changed
+This is now the maintained adult-clock platform. The Raspberry Pi adult branch ends at 1.2.64 and receives no further updates.
 
-- Aligns all TODAY values to one right-hand pixel column while keeping `L`, `H`, and `POP` on a fixed left edge.
-- Simplifies INSIDE humidity from `37% RH` to `37%`.
-- Retains the shared lower-row baseline across TODAY, INSIDE, OUTSIDE, and forecast panels.
-- Retains font-independent clock centring, Today low / high data, the INSIDE font selector, and the corrected Weather installer.
+## BPI port
 
-## Today low / high data
+- Allwinner GPIO mapping through `/dev/gpiochip0`.
+- SSD1322 on `/dev/spidev0.0`.
+- AHT10 on `/dev/i2c-0` using header pins 3 and 5.
+- MAX98357A card discovery with optional `MK_PICLOCK_ALSA_DEVICE` override.
+- Forced stereo MP3 decoding for correct H2+/H3 I2S framing.
+- Custom MAX98357A Device Tree overlay with 256x master clock and codec-controlled PA1 shutdown.
+- No MAX98357A startup/stop click observed on this platform; see `pinouts.md` for why.
+- BPI-only installer, permissions, wiring, diagnostics, and documentation.
+- Removed the unused GUI `$$` helper.
 
-The daily panel evaluates ECCC hourly entries that fall on the current date in `MK_WEATHER_TIMEZONE`. The current observed temperature is also considered. Precipitation is the highest hourly probability available for the current day.
+All 1.2.64 Weather, alarm, web password, backup, font, OLED partial-update, and AHT10 functions are retained.
 
-If ECCC does not provide an earlier hourly value, an earlier low or high that already occurred cannot be reconstructed. The panel reports the best current-day data available to the service.
-
-## Compatibility
+## Versions
 
 ```text
-Product:     mk-clock-adult-1.2.62
-HTTP API:    1.44
+Product:     mk-clock-adult-1.2.65-bpi-m2-zero-r1
+HTTP API:    1.46
 Private IPC: 27
 Weather:     Native C 2.0.14
-Inside sensor: Native AHT10
+Platform:    BPI-M2 Zero
 ```
 
-Existing Weather panel configuration remains compatible. The new stored panel mode is `today`. The INSIDE source mode remains `room` for compatibility.
-
-## Build and install
-
-See `install.md` for dependencies, boot configuration, wiring, build, installation, verification, and troubleshooting.
-
-## Hardware
-
-See `pinouts.md` for the complete Raspberry Pi GPIO and peripheral wiring map.
+See `install.md` and `pinouts.md`.

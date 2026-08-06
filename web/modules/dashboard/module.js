@@ -90,7 +90,7 @@ export async function mount(ctx) {
             : (room.status === 'disabled' ? 'Disabled' : room.status === 'waiting' ? 'Starting' : 'Unavailable');
         ctx.setText('#summary-room', roomReading);
         ctx.setText('#status-room-sensor', roomHasReading
-            ? `${roomReading}${room.status === 'stale' ? ' · stale' : ''} · AHT10 on ${room.device || '/dev/i2c-1'}`
+            ? `${roomReading}${room.status === 'stale' ? ' · stale' : ''} · AHT10 on ${room.device || '/dev/i2c-0'}`
             : `${roomReading}${room.error ? ` · ${room.error}` : ''}`);
 
         const weather = status.weather || {};

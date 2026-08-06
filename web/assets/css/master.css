@@ -64,6 +64,7 @@ p { line-height: 1.45; }
 .brand-block, .header-copy { min-width: 0; }
 .brand-mark { display: block; width: 36px; height: 36px; flex: 0 0 auto; }
 .brand-mark img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.auth-brand { width: 48px; height: 48px; }
 .header-copy h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .admin-header .small { color: rgba(255, 255, 255, .74); }
 #clock-name-heading { overflow-wrap: anywhere; }
@@ -419,3 +420,24 @@ details.card > summary::marker,
     .media-library-actions { justify-content: flex-start; }
 }
 
+
+/* Authentication */
+.auth-gate {
+    position: fixed;
+    inset: 0;
+    z-index: 500;
+    display: grid;
+    place-items: center;
+    padding: 18px;
+    background: rgba(17, 28, 42, .78);
+    backdrop-filter: blur(3px);
+}
+.auth-card {
+    width: min(380px, 100%);
+    padding: 22px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--panel);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, .34);
+}
+.auth-card h1 { margin: 8px 0 4px; }

@@ -41,6 +41,7 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 
+#include "hardware_profile.h"
 #include "asset_store.h"
 #include "font_catalog.h"
 #include "ipc_protocol.h"
@@ -53,14 +54,18 @@
 #include "weather_frames.h"
 #include "weather_version.h"
 #define API_NAME "mk-clock-adult-api"
-#define API_VERSION "1.44"
-#define PRODUCT_VERSION "mk-clock-adult-1.2.62"
+#define API_VERSION "1.46"
+#define PRODUCT_VERSION MP_PRODUCT_VERSION
 #define BUILD_TIMESTAMP __DATE__ " " __TIME__
 #define DEFAULT_PUBLIC_BIND "0.0.0.0"
 #define DEFAULT_PUBLIC_PORT 8080
 #define CORE_SOCKET_PATH "/run/mk-piclock/core.sock"
 #define WEB_DIR "/opt/mk-piclock/web"
 #define API_DOC_DIR "/opt/mk-piclock/api"
+#define WEB_PASSWORD_FILE "/opt/mk-piclock/config/web-password.txt"
+#define WEB_PASSWORD_TEMP "/opt/mk-piclock/config/.web-password.tmp"
+#define WEB_PASSWORD_MAX 64
+#define AUTH_COOKIE_NAME "mkpiclock_auth"
 #define MAX_REQUEST_BODY (128U * 1024U * 1024U)
 #define MAX_STATIC_FILE (64U * 1024U * 1024U)
 #define MAX_API_JSON_RESPONSE (1024U * 1024U)
@@ -85,6 +90,9 @@ static uint64_t g_disk_reserve_bytes = DISK_RESERVE_BYTES;
 
 
 enum route_id {
+    ROUTE_AUTH_STATUS,
+    ROUTE_AUTH_LOGIN,
+    ROUTE_AUTH_PASSWORD,
     ROUTE_STATUS,
     ROUTE_HEALTH,
     ROUTE_DIAGNOSTICS,
@@ -125,6 +133,9 @@ struct api_route {
 };
 
 static const struct api_route g_routes[] = {
+    {"GET",  "/api/v1/auth/status",                    ROUTE_AUTH_STATUS},
+    {"POST", "/api/v1/auth/login",                     ROUTE_AUTH_LOGIN},
+    {"POST", "/api/v1/auth/password",                  ROUTE_AUTH_PASSWORD},
     {"GET",  "/api/v1/status",                         ROUTE_STATUS},
     {"GET",  "/api/v1/health",                         ROUTE_HEALTH},
     {"GET",  "/api/v1/diagnostics",                    ROUTE_DIAGNOSTICS},
@@ -442,7 +453,7 @@ struct adult_diagnostic_info {
     char kernel_release[128];
     char architecture[64];
     char hardware_model[256];
-    char pi_serial[64];
+    char board_serial[64];
     char board_revision[64];
     char machine_id[64];
     char inventory_id[32];
@@ -747,14 +758,14 @@ static void diag_read_platform(struct adult_diagnostic_info *info) {
     }
     if (diag_read_file("/proc/device-tree/model", info->hardware_model, sizeof(info->hardware_model)))
         (void)diag_read_file("/sys/firmware/devicetree/base/model", info->hardware_model, sizeof(info->hardware_model));
-    if (diag_read_file("/sys/firmware/devicetree/base/serial-number", info->pi_serial, sizeof(info->pi_serial)) &&
-        diag_read_file("/proc/device-tree/serial-number", info->pi_serial, sizeof(info->pi_serial)))
-        (void)diag_cpuinfo_value("Serial", info->pi_serial, sizeof(info->pi_serial));
-    if (!strncmp(info->pi_serial, "0x", 2) || !strncmp(info->pi_serial, "0X", 2))
-        memmove(info->pi_serial, info->pi_serial + 2, strlen(info->pi_serial + 2) + 1);
+    if (diag_read_file("/sys/firmware/devicetree/base/serial-number", info->board_serial, sizeof(info->board_serial)) &&
+        diag_read_file("/proc/device-tree/serial-number", info->board_serial, sizeof(info->board_serial)))
+        (void)diag_cpuinfo_value("Serial", info->board_serial, sizeof(info->board_serial));
+    if (!strncmp(info->board_serial, "0x", 2) || !strncmp(info->board_serial, "0X", 2))
+        memmove(info->board_serial, info->board_serial + 2, strlen(info->board_serial + 2) + 1);
     (void)diag_cpuinfo_value("Revision", info->board_revision, sizeof(info->board_revision));
     (void)diag_read_file("/etc/machine-id", info->machine_id, sizeof(info->machine_id));
-    diag_inventory_id(info->pi_serial, info->inventory_id, sizeof(info->inventory_id));
+    diag_inventory_id(info->board_serial, info->inventory_id, sizeof(info->inventory_id));
     char impl[32]="", arch[32]="", variant[32]="", part[32]="", revision[32]="";
     (void)diag_cpuinfo_value("CPU implementer", impl, sizeof(impl));
     (void)diag_cpuinfo_value("CPU architecture", arch, sizeof(arch));
@@ -971,6 +982,159 @@ static enum MHD_Result queue_json(struct MHD_Connection *connection, unsigned in
     const char *body = json ? json : "{}";
     return queue_buffer(connection, status, "application/json; charset=utf-8",
                         (void *)body, strlen(body), MHD_RESPMEM_MUST_COPY, 1);
+}
+
+static enum MHD_Result queue_json_with_cookie(struct MHD_Connection *connection,
+                                              unsigned int status, const char *json,
+                                              const char *cookie) {
+    const char *body = json ? json : "{}";
+    struct MHD_Response *response = MHD_create_response_from_buffer(
+        strlen(body), (void *)body, MHD_RESPMEM_MUST_COPY);
+    if (!response) return MHD_NO;
+    (void)add_header(response, MHD_HTTP_HEADER_CONTENT_TYPE, "application/json; charset=utf-8");
+    if (cookie && *cookie) (void)add_header(response, "Set-Cookie", cookie);
+    add_api_headers(connection, response);
+    enum MHD_Result result = MHD_queue_response(connection, status, response);
+    MHD_destroy_response(response);
+    return result;
+}
+
+static int read_web_password(char *out, size_t out_len) {
+    if (!out || out_len == 0) return 0;
+    out[0] = '\0';
+    int fd = open(WEB_PASSWORD_FILE, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return 0;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 1 ||
+        st.st_size > WEB_PASSWORD_MAX + 2) {
+        close(fd);
+        return 0;
+    }
+    ssize_t received = read(fd, out, out_len - 1);
+    close(fd);
+    if (received <= 0) {
+        out[0] = '\0';
+        return 0;
+    }
+    out[received] = '\0';
+    out[strcspn(out, "\r\n")] = '\0';
+    return out[0] != '\0';
+}
+
+static int valid_web_password(const char *password) {
+    if (!password) return 0;
+    size_t length = strlen(password);
+    if (length > WEB_PASSWORD_MAX) return 0;
+    for (size_t i = 0; i < length; i++) {
+        unsigned char c = (unsigned char)password[i];
+        if (c < 0x20 || c == 0x7f) return 0;
+    }
+    return 1;
+}
+
+static int password_equal(const char *left, const char *right) {
+    size_t left_len = left ? strlen(left) : 0;
+    size_t right_len = right ? strlen(right) : 0;
+    size_t length = left_len > right_len ? left_len : right_len;
+    unsigned int difference = (unsigned int)(left_len ^ right_len);
+    for (size_t i = 0; i < length; i++) {
+        unsigned char a = i < left_len ? (unsigned char)left[i] : 0;
+        unsigned char b = i < right_len ? (unsigned char)right[i] : 0;
+        difference |= (unsigned int)(a ^ b);
+    }
+    return difference == 0;
+}
+
+static void password_hex_encode(const char *password, char *out, size_t out_len) {
+    static const char digits[] = "0123456789abcdef";
+    if (!out || out_len == 0) return;
+    out[0] = '\0';
+    size_t length = password ? strlen(password) : 0;
+    if (length * 2 + 1 > out_len) return;
+    for (size_t i = 0; i < length; i++) {
+        unsigned char c = (unsigned char)password[i];
+        out[i * 2] = digits[c >> 4];
+        out[i * 2 + 1] = digits[c & 0x0f];
+    }
+    out[length * 2] = '\0';
+}
+
+static int hex_digit_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    c = (char)tolower((unsigned char)c);
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+
+static int password_hex_decode(const char *encoded, size_t encoded_len,
+                               char *out, size_t out_len) {
+    if (!encoded || !out || encoded_len == 0 || (encoded_len & 1u) != 0 ||
+        encoded_len / 2 + 1 > out_len) return -1;
+    for (size_t i = 0; i < encoded_len; i += 2) {
+        int high = hex_digit_value(encoded[i]);
+        int low = hex_digit_value(encoded[i + 1]);
+        if (high < 0 || low < 0) return -1;
+        out[i / 2] = (char)((high << 4) | low);
+    }
+    out[encoded_len / 2] = '\0';
+    return 0;
+}
+
+static int auth_cookie_matches(struct MHD_Connection *connection, const char *expected) {
+    const char *cookies = MHD_lookup_connection_value(
+        connection, MHD_HEADER_KIND, MHD_HTTP_HEADER_COOKIE);
+    if (!cookies || !expected || !*expected) return 0;
+    const size_t name_len = strlen(AUTH_COOKIE_NAME);
+    const char *cursor = cookies;
+    while (*cursor) {
+        while (*cursor == ' ' || *cursor == ';') cursor++;
+        const char *segment_end = strchr(cursor, ';');
+        if (!segment_end) segment_end = cursor + strlen(cursor);
+        const char *equals = memchr(cursor, '=', (size_t)(segment_end - cursor));
+        if (equals && (size_t)(equals - cursor) == name_len &&
+            strncmp(cursor, AUTH_COOKIE_NAME, name_len) == 0) {
+            const char *value = equals + 1;
+            size_t value_len = (size_t)(segment_end - value);
+            while (value_len > 0 && value[value_len - 1] == ' ') value_len--;
+            char decoded[WEB_PASSWORD_MAX + 1];
+            if (password_hex_decode(value, value_len, decoded, sizeof(decoded)) == 0)
+                return password_equal(decoded, expected);
+            return 0;
+        }
+        cursor = *segment_end ? segment_end + 1 : segment_end;
+    }
+    return 0;
+}
+
+static void build_auth_cookie(const char *password, char *out, size_t out_len) {
+    char encoded[WEB_PASSWORD_MAX * 2 + 1];
+    password_hex_encode(password, encoded, sizeof(encoded));
+    snprintf(out, out_len, AUTH_COOKIE_NAME "=%s; Path=/; HttpOnly; SameSite=Strict", encoded);
+}
+
+static const char *clear_auth_cookie(void) {
+    return AUTH_COOKIE_NAME "=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict";
+}
+
+static int write_web_password(const char *password) {
+    if (!password || !*password) {
+        if (unlink(WEB_PASSWORD_FILE) != 0 && errno != ENOENT) return -1;
+        (void)unlink(WEB_PASSWORD_TEMP);
+        return 0;
+    }
+    int fd = open(WEB_PASSWORD_TEMP,
+                  O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
+                  0640);
+    if (fd < 0) return -1;
+    size_t length = strlen(password);
+    int ok = mp_write_full(fd, password, length) == 0 &&
+             mp_write_full(fd, "\n", 1) == 0 && fsync(fd) == 0;
+    if (close(fd) != 0) ok = 0;
+    if (!ok || rename(WEB_PASSWORD_TEMP, WEB_PASSWORD_FILE) != 0) {
+        (void)unlink(WEB_PASSWORD_TEMP);
+        return -1;
+    }
+    return 0;
 }
 
 static enum MHD_Result queue_json_builder(struct MHD_Connection *connection, unsigned int status,
@@ -2044,6 +2208,57 @@ static uint64_t form_u64(const struct request_context *context, const char *key,
     return (uint64_t)parsed;
 }
 
+static enum MHD_Result serve_auth_status(struct MHD_Connection *connection) {
+    char password[WEB_PASSWORD_MAX + 1];
+    int required = read_web_password(password, sizeof(password));
+    int authenticated = !required || auth_cookie_matches(connection, password);
+    char json[160];
+    snprintf(json, sizeof(json),
+             "{\"ok\":true,\"password_required\":%s,\"authenticated\":%s,"
+             "\"storage\":\"plaintext\"}",
+             required ? "true" : "false", authenticated ? "true" : "false");
+    return queue_json(connection, 200, json);
+}
+
+static enum MHD_Result serve_auth_login(struct MHD_Connection *connection,
+                                        const struct request_context *context) {
+    char expected[WEB_PASSWORD_MAX + 1];
+    if (!read_web_password(expected, sizeof(expected)))
+        return queue_json_with_cookie(connection, 200,
+            "{\"ok\":true,\"password_required\":false}", clear_auth_cookie());
+
+    const char *password = form_value(context, "password");
+    if (!password || !password_equal(password, expected))
+        return queue_json(connection, MHD_HTTP_UNAUTHORIZED,
+            "{\"ok\":false,\"error\":\"Password is incorrect\"}");
+
+    char cookie[WEB_PASSWORD_MAX * 2 + 96];
+    build_auth_cookie(expected, cookie, sizeof(cookie));
+    return queue_json_with_cookie(connection, 200,
+        "{\"ok\":true,\"authenticated\":true}", cookie);
+}
+
+static enum MHD_Result configure_web_password(struct MHD_Connection *connection,
+                                              const struct request_context *context) {
+    const char *password = form_value(context, "password");
+    if (!password) password = "";
+    if (!valid_web_password(password))
+        return queue_json(connection, 400,
+            "{\"ok\":false,\"error\":\"Password must be 64 characters or fewer and cannot contain line breaks\"}");
+    if (write_web_password(password) != 0)
+        return queue_json(connection, 500,
+            "{\"ok\":false,\"error\":\"Password could not be saved\"}");
+
+    if (!password[0])
+        return queue_json_with_cookie(connection, 200,
+            "{\"ok\":true,\"password_required\":false}", clear_auth_cookie());
+
+    char cookie[WEB_PASSWORD_MAX * 2 + 96];
+    build_auth_cookie(password, cookie, sizeof(cookie));
+    return queue_json_with_cookie(connection, 200,
+        "{\"ok\":true,\"password_required\":true}", cookie);
+}
+
 static int parse_weather_slot_kind(const char *value, int fallback) {
     if (!value || !*value) return fallback;
     if (strcasecmp(value, "room") == 0) return MP_WEATHER_SLOT_ROOM;
@@ -2723,6 +2938,7 @@ static enum MHD_Result serve_network_diagnostics(struct MHD_Connection *connecti
         return queue_json(connection, 500, "{\"ok\":false,\"error\":\"allocation failed\"}");
     mp_buffer_append(&body, "{\"ok\":true");
     diag_append_json_string(&body, "product_version", PRODUCT_VERSION);
+    diag_append_json_string(&body, "platform_profile", MP_PLATFORM_PROFILE);
     diag_append_json_string(&body, "api_version", API_VERSION);
     diag_append_json_string(&body, "weather_version", MP_WEATHER_VERSION);
     diag_append_json_string(&body, "compiled_at", BUILD_TIMESTAMP);
@@ -2768,7 +2984,8 @@ static enum MHD_Result serve_network_diagnostics(struct MHD_Connection *connecti
     diag_append_json_string(&body, "kernel_release", info.kernel_release);
     diag_append_json_string(&body, "architecture", info.architecture);
     diag_append_json_string(&body, "hardware_model", info.hardware_model);
-    diag_append_json_string(&body, "pi_serial", info.pi_serial);
+    diag_append_json_string(&body, "board_serial", info.board_serial);
+    diag_append_json_string(&body, "pi_serial", info.board_serial); /* compatibility */
     diag_append_json_string(&body, "board_revision", info.board_revision);
     diag_append_json_string(&body, "machine_id", info.machine_id);
     diag_append_json_string(&body, "inventory_id", info.inventory_id);
@@ -2824,7 +3041,7 @@ static enum MHD_Result serve_diagnostic_report(struct MHD_Connection *connection
     mp_buffer_appendf(&report,
         "mk-clock-adult Diagnostic Report\nGenerated: %s\nProduct: %s\nAPI: %s\nWeather: %s\nCompiled: %s\n\n"
         "Platform\nHardware: %s\nOperating system: %s\nOS version: %s\nOS codename: %s\nKernel: %s\nArchitecture: %s\nUptime: %llu seconds\n\n"
-        "Device identity\nInventory ID: %s\nRaspberry Pi serial: %s\nBoard revision: %s\nOS machine ID: %s\nCPU signature: %s\n\n"
+        "Device identity\nInventory ID: %s\nBoard serial: %s\nBoard revision: %s\nOS machine ID: %s\nCPU signature: %s\n\n"
         "Network and time\nHostname: %s\nInterface: %s\nIP address: %s\nSSID: %s\nWi-Fi signal: %s\nNTP synchronized: %s\nSystem time valid: %s\n\n"
         "Storage\nSystem drive: %s\nRoot partition: %s\nRoot filesystem: %s\nRoot state: %s\nUsed: %llu bytes\nAvailable: %llu bytes\nTotal: %llu bytes\n"
         "Music: %llu bytes in %llu files\nFonts: %llu bytes in %llu files\nConfiguration: %llu bytes in %llu files\n"
@@ -2838,7 +3055,7 @@ static enum MHD_Result serve_diagnostic_report(struct MHD_Connection *connection
         info.os_version_id[0]?info.os_version_id:"Unavailable", info.os_codename[0]?info.os_codename:"Unavailable",
         info.kernel_release[0]?info.kernel_release:"Unavailable", info.architecture[0]?info.architecture:"Unavailable",
         (unsigned long long)info.uptime_seconds, info.inventory_id[0]?info.inventory_id:"Unavailable",
-        info.pi_serial[0]?info.pi_serial:"Unavailable", info.board_revision[0]?info.board_revision:"Unavailable",
+        info.board_serial[0]?info.board_serial:"Unavailable", info.board_revision[0]?info.board_revision:"Unavailable",
         info.machine_id[0]?info.machine_id:"Unavailable", info.cpu_signature[0]?info.cpu_signature:"Unavailable",
         info.network.hostname, info.network.interface_name[0]?info.network.interface_name:"Unavailable",
         info.network.ip_address[0]?info.network.ip_address:"Unavailable", info.network.ssid[0]?info.network.ssid:"Unavailable",
@@ -2874,6 +3091,12 @@ static enum MHD_Result serve_diagnostic_report(struct MHD_Connection *connection
 static enum MHD_Result dispatch_route(struct MHD_Connection *connection,
                                       struct request_context *context) {
     switch (context->route->id) {
+        case ROUTE_AUTH_STATUS:
+            return serve_auth_status(connection);
+        case ROUTE_AUTH_LOGIN:
+            return serve_auth_login(connection, context);
+        case ROUTE_AUTH_PASSWORD:
+            return configure_web_password(connection, context);
         case ROUTE_STATUS:
         case ROUTE_HEALTH:
             return call_core(connection, MP_IPC_OP_STATUS, NULL, 0);
@@ -3208,7 +3431,8 @@ static enum MHD_Result serve_local_api(struct MHD_Connection *connection, const 
             "{\"name\":\"mk-clock-adult API\",\"api_version\":\"" API_VERSION "\","
             "\"product_version\":\"%s\",\"http_engine\":\"libmicrohttpd\","
             "\"core_protocol\":\"binary-ipc-v%u\","
-            "\"status\":\"/api/v1/status\",\"capabilities\":\"/api/v1/capabilities\","
+            "\"status\":\"/api/v1/status\",\"auth\":\"/api/v1/auth/status\","
+            "\"capabilities\":\"/api/v1/capabilities\","
             "\"diagnostics\":\"/api/v1/diagnostics\",\"weather\":\"/api/v1/weather\","
             "\"openapi\":\"/api/v1/openapi.json\"}",
             PRODUCT_VERSION, (unsigned int)MP_IPC_VERSION);
@@ -3223,7 +3447,8 @@ static enum MHD_Result serve_local_api(struct MHD_Connection *connection, const 
             "\"audio.metadata\",\"audio.optimize\",\"audio.processing-status\",\"audio.queue-clear\","
             "\"touch.input\","
             "\"assets.read\",\"assets.upload\",\"assets.delete\",\"display.color\","
-            "\"network.open-controls\",\"logs.read\",\"backup.download\",\"backup.restore\"]}");
+            "\"network.open-controls\",\"logs.read\",\"backup.download\",\"backup.restore\","
+            "\"auth.optional-plaintext\"]}");
     }
     return MHD_YES;
 }
@@ -3282,6 +3507,17 @@ static enum MHD_Result request_handler(void *cls, struct MHD_Connection *connect
         return queue_json(connection, MHD_HTTP_BAD_REQUEST,
                           "{\"ok\":false,\"error\":\"request body could not be parsed\"}");
     if (strcmp(method, MHD_HTTP_METHOD_OPTIONS) == 0) return queue_options(connection);
+
+    int public_api = strcmp(url, "/api/v1") == 0 || strcmp(url, "/api/v1/") == 0 ||
+                     strcmp(url, "/api/v1/auth/status") == 0 ||
+                     strcmp(url, "/api/v1/auth/login") == 0;
+    if (!public_api && strncmp(url, "/api/v1", 7) == 0) {
+        char password[WEB_PASSWORD_MAX + 1];
+        if (read_web_password(password, sizeof(password)) &&
+            !auth_cookie_matches(connection, password))
+            return queue_json(connection, MHD_HTTP_UNAUTHORIZED,
+                "{\"ok\":false,\"password_required\":true,\"error\":\"Password required\"}");
+    }
 
     int handled = 0;
     enum MHD_Result result = serve_local_api(connection, method, url, &handled);

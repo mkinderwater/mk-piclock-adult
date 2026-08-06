@@ -1,36 +1,29 @@
-# mk-clock-adult 1.2.62 Release Notes
+# mk-clock-adult 1.2.65 BPI-M2 Zero R1 Release Notes
 
-## Stable Weather warning scrolling
+## Platform transition
 
-Weather warnings now behave as an atomic OLED animation. Once a warning starts, its text and scroll origin remain fixed until that warning reaches a natural boundary.
+The adult clock is now maintained only for the Banana Pi M2 Zero. Raspberry Pi adult development ends at 1.2.64.
 
-For a long warning such as:
+## Ported hardware
 
-```text
-YELLOW WARNING - AIR QUALITY
-```
+- SSD1322 SPI: `/dev/spidev0.0`.
+- OLED D/C: PA2, line 2, physical pin 22.
+- OLED reset: PA0, line 0, physical pin 13.
+- Touch: PA21, line 21, physical pin 38.
+- AHT10: TWI0 on physical pins 3 and 5, exposed as `/dev/i2c-0`.
+- MAX98357A: PA18/PA19/PA20 I2S with PA1 codec shutdown.
+- MAX98357A ALSA discovery and mono-to-stereo decoding are retained from the proven BPI kid-clock branch.
 
-the marquee completes one full pixel-accurate cycle before the clock considers a refreshed warning list, advances to another warning, repeats the same warning, or restores the date.
+## Retained application functions
 
-## Visual behaviour
-
-- Long warnings begin at the footer's left edge.
-- A scrolling warning runs for exactly one complete marquee cycle.
-- The next warning is selected only after that cycle completes.
-- Weather refreshes cannot replace or restart the active text midway through the scroll.
-- The existing 24-pixel gap is retained for seamless repeated scrolling.
-- Short warnings remain centred for at least 12 seconds.
-- Music metadata still has priority over Weather warnings.
-
-## Compatibility
-
-No API, IPC, Weather configuration, or dashboard format changed.
+All adult 1.2.64 Weather, alarm, password, backup, restore, font, music, diagnostics, and OLED update behaviour is retained. The unused shared `$$` query helper was removed without changing GUI behaviour.
 
 ## Versions
 
 ```text
-Product:     mk-clock-adult-1.2.62
-HTTP API:    1.44
+Product:     mk-clock-adult-1.2.65-bpi-m2-zero-r1
+HTTP API:    1.46
 Private IPC: 27
-Weather:     Native C 2.0.14
+Weather:     2.0.14
+Platform:    BPI-M2 Zero
 ```

@@ -5,15 +5,22 @@ const noticeNode = document.querySelector('#action-notice');
 const oledPill = document.querySelector('#oled-pill');
 const clockNameHeading = document.querySelector('#clock-name-heading');
 const menus = [document.querySelector('#mobile-menu'), document.querySelector('#sidebar-menu')];
+const authGate = document.querySelector('#auth-gate');
+const authForm = document.querySelector('#auth-form');
+const authInput = document.querySelector('#auth-password');
+const authError = document.querySelector('#auth-error');
+const authSubmit = document.querySelector('#auth-submit');
 
 let modules = [];
 let current = null;
 let status = null;
 let appBooted = false;
+let authPromise = null;
+let authResolve = null;
 let noticeTimer = null;
 const statusListeners = new Set();
-const GUI_VERSION = 'mk-clock-adult-1.2.62';
-const REQUIRED_API_VERSION = '1.44';
+const GUI_VERSION = 'mk-clock-adult-1.2.65-bpi-m2-zero-r1';
+const REQUIRED_API_VERSION = '1.46';
 const oledPreviewIntensity = Array.from({length: 16}, (_, level) =>
     level === 0 ? 0 : Math.pow(level / 15, 0.48));
 const oledPreviewColours = Object.freeze({
@@ -112,16 +119,62 @@ function escapeHtml(value) {
         .replace(/'/g, '&#39;');
 }
 
-async function request(url, options = {}) {
-    const response = await fetch(url, {...options, cache: 'no-store'});
-    if (response.ok) return response;
-
+async function responseError(response) {
     let message = await response.text();
     try {
         const parsed = JSON.parse(message);
         message = parsed.error || parsed.message || message;
     } catch (_) {}
-    throw new Error(message || `HTTP ${response.status}`);
+    return new Error(message || `HTTP ${response.status}`);
+}
+
+function setAuthError(text = '') {
+    authError.textContent = text;
+    authError.classList.toggle('hidden', !text);
+}
+
+function closeAuthGate() {
+    authGate.classList.add('hidden');
+    authInput.value = '';
+    setAuthError();
+}
+
+function openAuthGate() {
+    authGate.classList.remove('hidden');
+    window.setTimeout(() => authInput.focus(), 0);
+    if (!authPromise) {
+        authPromise = new Promise(resolve => { authResolve = resolve; });
+    }
+    return authPromise;
+}
+
+async function ensureAuthenticated() {
+    const response = await fetch('/api/v1/auth/status', {
+        cache: 'no-store', credentials: 'same-origin', headers: {'Accept': 'application/json'}
+    });
+    if (!response.ok) throw await responseError(response);
+    const state = await response.json();
+    if (!state.password_required || state.authenticated) {
+        closeAuthGate();
+        return true;
+    }
+    return openAuthGate();
+}
+
+async function request(url, options = {}) {
+    const {authRetry = true, ...fetchOptions} = options;
+    const response = await fetch(url, {
+        ...fetchOptions,
+        cache: 'no-store',
+        credentials: 'same-origin'
+    });
+    if (response.ok) return response;
+    if (response.status === 401 && authRetry &&
+        url !== '/api/v1/auth/login' && url !== '/api/v1/auth/status') {
+        await openAuthGate();
+        return request(url, {...fetchOptions, authRetry: false});
+    }
+    throw await responseError(response);
 }
 
 async function json(url, options) {
@@ -313,7 +366,6 @@ function setActiveMenu(id) {
 
 function moduleContext(controller) {
     const $ = selector => host.querySelector(selector);
-    const $$ = selector => [...host.querySelectorAll(selector)];
     const set = (selector, property, value) => {
         const node = $(selector);
         if (node) node[property] = value == null ? '' : String(value);
@@ -329,7 +381,6 @@ function moduleContext(controller) {
         root: host,
         signal: controller.signal,
         $,
-        $$,
         on,
         html: escapeHtml,
         setText: (selector, value) => set(selector, 'textContent', value),
@@ -415,8 +466,34 @@ host.addEventListener('submit', async event => {
 });
 
 
+authForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    const password = authInput.value;
+    busy(authSubmit, true, 'Checking...');
+    setAuthError();
+    try {
+        await request('/api/v1/auth/login', {
+            method: 'POST',
+            body: new URLSearchParams({password}),
+            headers: {'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json'},
+            authRetry: false
+        });
+        closeAuthGate();
+        const resolve = authResolve;
+        authPromise = null;
+        authResolve = null;
+        resolve?.(true);
+    } catch (error) {
+        setAuthError(error.message || 'Password is incorrect');
+        authInput.select();
+    } finally {
+        busy(authSubmit, false);
+    }
+});
+
 async function start() {
     try {
+        await ensureAuthenticated();
         await refreshApiState();
         await openControlPanel();
     } catch (error) {

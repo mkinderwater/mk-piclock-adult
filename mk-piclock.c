@@ -1,7 +1,7 @@
 /*
   mk-piclock.c
 
-  Private Raspberry Pi alarm clock core daemon.
+  Banana Pi M2 Zero adult alarm clock core daemon.
 
   Features:
     - SSD1322 256x64 OLED over /dev/spidev0.0
@@ -48,6 +48,7 @@
 
 #include <gpiod.h>
 
+#include "hardware_profile.h"
 #include "aht10_sensor.h"
 #include "compiler_attrs.h"
 #include "font_catalog.h"
@@ -57,7 +58,7 @@
 #define safe_str mp_safe_str
 
 #define APP_NAME "mk-clock-adult-core"
-#define APP_VERSION "mk-clock-adult-1.2.62"
+#define APP_VERSION MP_PRODUCT_VERSION
 #define DEFAULT_CLOCK_NAME "Adult Clock"
 #define APP_ROOT "/opt/mk-piclock"
 #define MUSIC_DIR APP_ROOT "/assets/music"
@@ -80,7 +81,7 @@
 #define ROOM_SENSOR_STALE_SECONDS_DEFAULT 120
 
 
-#define OLED_SPI_DEV "/dev/spidev0.0"
+#define OLED_SPI_DEV MP_OLED_SPI_DEV
 #define OLED_W 256
 #define OLED_H 64
 #define OLED_ROW_BYTES (OLED_W / 2)
@@ -90,10 +91,10 @@
 
 
 
-#define GPIO_CHIP "/dev/gpiochip0"
-#define GPIO_DC 25
-#define GPIO_RST 27
-#define GPIO_TOUCH 20
+#define GPIO_CHIP MP_GPIO_CHIP
+#define GPIO_DC MP_GPIO_OLED_DC
+#define GPIO_RST MP_GPIO_OLED_RST
+#define GPIO_TOUCH MP_GPIO_TOUCH
 #define TOUCH_POLL_MS 20u
 #define TOUCH_DEBOUNCE_MS 50u
 #define TOUCH_LONG_PRESS_MS 3000u
@@ -122,7 +123,7 @@ struct alarm_slot {
     int weekdays;          /* bit 0 Sunday through bit 6 Saturday */
     int start_volume;      /* 0..100 */
     int end_volume;        /* 0..100 */
-    int fired_yday;
+    int last_fired_date;   /* local YYYYMMDD, persisted before playback starts */
     char music_file[MUSIC_FILE_MAX]; /* empty = random uploaded MP3 */
 };
 
@@ -153,6 +154,7 @@ struct app_state {
     int alarm_active;             /* 1 only while an alarm MP3 is currently playing */
     int alarm_volume_percent;     /* current alarm ramp volume, 0..100 */
     long long last_successful_alarm; /* epoch when alarm audio last opened successfully */
+    int alarm_replay_guard_migrated; /* one-time migration from last_successful_alarm */
     struct alarm_slot alarms[MAX_ALARMS];
     int oled_ok;
     char clock_name[64];
@@ -193,6 +195,7 @@ static struct app_state g_state = {
     .alarm_active = 0,
     .alarm_volume_percent = 0,
     .last_successful_alarm = 0,
+    .alarm_replay_guard_migrated = 0,
     .oled_ok = 0,
     .clock_name = DEFAULT_CLOCK_NAME,
     .oled_font = SYSTEM_DEFAULT_FONT_ID,
@@ -413,6 +416,14 @@ static _Thread_local uint8_t *g_oled_render_fb = NULL;
 static uint8_t *oled_draw_fb(void) {
     return g_oled_render_fb ? g_oled_render_fb : g_oled.fb;
 }
+
+struct dashboard_tick_cache {
+    uint8_t colon_off_fb[OLED_FB_BYTES];
+    uint8_t colon_on_fb[OLED_FB_BYTES];
+    int valid;
+};
+
+static struct dashboard_tick_cache g_dashboard_tick_cache = { .valid = 0 };
 
 struct touch_dev {
     struct gpiod_chip *chip;
@@ -780,6 +791,15 @@ static int clamp_int(int v, int lo, int hi) {
     return v;
 }
 
+static int local_date_key(const struct tm *tmv) {
+    if (!tmv || tmv->tm_year < 70 || tmv->tm_year > 8099 ||
+        tmv->tm_mon < 0 || tmv->tm_mon > 11 ||
+        tmv->tm_mday < 1 || tmv->tm_mday > 31)
+        return 0;
+    return (tmv->tm_year + 1900) * 10000 +
+           (tmv->tm_mon + 1) * 100 + tmv->tm_mday;
+}
+
 static int has_mp3_ext(const char *name) {
     if (!name) return 0;
     const char *dot = strrchr(name, '.');
@@ -879,7 +899,7 @@ static void init_alarm_defaults(void) {
         g_state.alarms[i].weekdays = 0x7F;
         g_state.alarms[i].start_volume = 20;
         g_state.alarms[i].end_volume = 80;
-        g_state.alarms[i].fired_yday = -1;
+        g_state.alarms[i].last_fired_date = 0;
         g_state.alarms[i].music_file[0] = '\0';
     }
 }
@@ -899,6 +919,7 @@ static void reset_persistent_state_locked(void) {
     g_state.weather_warning_chime_enabled = 1;
     g_state.weather_warning_chime_during_bedtime = 0;
     g_state.last_successful_alarm = 0;
+    g_state.alarm_replay_guard_migrated = 1;
     safe_str(g_state.clock_name, sizeof(g_state.clock_name), DEFAULT_CLOCK_NAME);
     g_state.oled_font = SYSTEM_DEFAULT_FONT_ID;
     g_state.oled_font_file[0] = '\0';
@@ -925,7 +946,8 @@ static void reset_persistent_state_locked(void) {
     X("oled_font_size", g_state.oled_font_size, "%d") \
     X("font_policy_version", g_state.font_policy_version, "%d") \
     X("clock_24h_mode", g_state.clock_24h_mode, "%d") \
-    X("oled_color", g_state.oled_color, "%d")
+    X("oled_color", g_state.oled_color, "%d") \
+    X("alarm_replay_guard_migrated", g_state.alarm_replay_guard_migrated, "%d")
 
 #define CONFIG_STRING_FIELDS(X) \
     X("clock_name", g_state.clock_name, sizeof(g_state.clock_name)) \
@@ -940,6 +962,7 @@ static void reset_persistent_state_locked(void) {
         X(i, "weekdays", g_state.alarms[i].weekdays, "%d", atoi(val) & 0x7F) \
         X(i, "start_volume", g_state.alarms[i].start_volume, "%d", atoi(val)) \
         X(i, "end_volume", g_state.alarms[i].end_volume, "%d", atoi(val)) \
+        X(i, "last_fired_date", g_state.alarms[i].last_fired_date, "%d", atoi(val)) \
     }
 
 #define CONFIG_ALARM_STRING_FIELDS(X) \
@@ -989,7 +1012,16 @@ fprintf(f, "last_successful_alarm=%lld\n", g_state.last_successful_alarm);
     if (fclose(f) != 0) ok = 0;
 
     if (ok) {
-        if (rename(tmp_path, CONFIG_FILE) != 0) unlink(tmp_path);
+        if (rename(tmp_path, CONFIG_FILE) != 0) {
+            unlink(tmp_path);
+        } else {
+            /* Make the atomic rename durable before alarm audio starts. */
+            int dir_fd = open(CONFIG_DIR, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            if (dir_fd >= 0) {
+                (void)fsync(dir_fd);
+                close(dir_fd);
+            }
+        }
     } else {
         unlink(tmp_path);
     }
@@ -1079,6 +1111,7 @@ static void load_config(void) {
     g_state.clock_24h_mode = g_state.clock_24h_mode ? 1 : 0;
     g_state.oled_color = clamp_int(g_state.oled_color, MP_OLED_COLOR_YELLOW, MP_OLED_COLOR_WHITE);
     if (g_state.last_successful_alarm < 0) g_state.last_successful_alarm = 0;
+    g_state.alarm_replay_guard_migrated = g_state.alarm_replay_guard_migrated ? 1 : 0;
 
     for (int i = 0; i < MAX_ALARMS; i++) {
         struct alarm_slot *a = &g_state.alarms[i];
@@ -1089,7 +1122,8 @@ static void load_config(void) {
         if (a->weekdays == 0) a->weekdays = 0x7F;
         a->start_volume = clamp_int(a->start_volume, 0, 100);
         a->end_volume = clamp_int(a->end_volume, 0, 100);
-        a->fired_yday = -1;
+        if (a->last_fired_date < 19700101 || a->last_fired_date > 99991231)
+            a->last_fired_date = 0;
         if (a->music_file[0] && (!safe_asset_filename(a->music_file) || !has_mp3_ext(a->music_file))) {
             a->music_file[0] = '\0';
         }
@@ -1109,6 +1143,32 @@ static void load_config(void) {
         make_font_path(g_state.inside_font_file, path, sizeof(path));
         if (!path[0] || access(path, R_OK) != 0) g_state.inside_font_file[0] = '\0';
     }
+}
+
+
+static int migrate_alarm_last_fired_dates(void) {
+    if (g_state.alarm_replay_guard_migrated) return 0;
+
+    g_state.alarm_replay_guard_migrated = 1;
+    if (g_state.last_successful_alarm <= 0) return 1;
+
+    time_t last_alarm = (time_t)g_state.last_successful_alarm;
+    struct tm alarm_tm;
+    if (!localtime_r(&last_alarm, &alarm_tm)) return 1;
+
+    int date_key = local_date_key(&alarm_tm);
+    if (date_key == 0) return 1;
+
+    pthread_mutex_lock(&g_state.lock);
+    for (int i = 0; i < MAX_ALARMS; i++) {
+        struct alarm_slot *a = &g_state.alarms[i];
+        int weekday_ok = (a->weekdays & (1 << alarm_tm.tm_wday)) != 0;
+        if (a->last_fired_date == 0 && weekday_ok &&
+            a->hour == alarm_tm.tm_hour && a->min == alarm_tm.tm_min)
+            a->last_fired_date = date_key;
+    }
+    pthread_mutex_unlock(&g_state.lock);
+    return 1;
 }
 
 /* ---------------- OLED low level ---------------- */
@@ -1371,6 +1431,15 @@ static int oled_flush_region_bytes(int byte_start, int byte_end, int row_start, 
                    (size_t)width_bytes);
         }
         pthread_mutex_unlock(&g_oled.preview_lock);
+
+        /* Keep direct partial writes synchronized with dirty comparison. */
+        if (g_oled.prev_valid) {
+            for (int y = 0; y < height; y++) {
+                memcpy(g_oled.prev_fb + ((size_t)(row_start + y) * OLED_ROW_BYTES) + byte_start,
+                       g_oled.fb + ((size_t)(row_start + y) * OLED_ROW_BYTES) + byte_start,
+                       (size_t)width_bytes);
+            }
+        }
     }
 
     return rc;
@@ -1389,29 +1458,47 @@ static int oled_flush(void) {
     if (g_oled.spi_fd < 0) return -1;
     if (!g_oled.prev_valid) return oled_flush_full();
 
-    int min_row = OLED_H;
-    int max_row = -1;
-    int min_byte = OLED_ROW_BYTES;
-    int max_byte = -1;
-
+    int row_min[OLED_H];
+    int row_max[OLED_H];
     for (int y = 0; y < OLED_H; y++) {
+        row_min[y] = OLED_ROW_BYTES;
+        row_max[y] = -1;
         const uint8_t *cur = g_oled.fb + ((size_t)y * OLED_ROW_BYTES);
         const uint8_t *old = g_oled.prev_fb + ((size_t)y * OLED_ROW_BYTES);
         for (int bx = 0; bx < OLED_ROW_BYTES; bx++) {
-            if (cur[bx] != old[bx]) {
-                if (y < min_row) min_row = y;
-                if (y > max_row) max_row = y;
-                if (bx < min_byte) min_byte = bx;
-                if (bx > max_byte) max_byte = bx;
-            }
+            if (cur[bx] == old[bx]) continue;
+            if (bx < row_min[y]) row_min[y] = bx;
+            if (bx > row_max[y]) row_max[y] = bx;
         }
     }
 
-    if (max_row < min_row || max_byte < min_byte) return 0;
+    int y = 0;
+    while (y < OLED_H) {
+        while (y < OLED_H && row_max[y] < row_min[y]) y++;
+        if (y >= OLED_H) break;
 
-    int rc = oled_flush_region_bytes(min_byte, max_byte, min_row, max_row);
-    if (rc == 0) memcpy(g_oled.prev_fb, g_oled.fb, sizeof(g_oled.fb));
-    return rc;
+        int band_start = y;
+        int band_end = y;
+        int band_min = row_min[y];
+        int band_max = row_max[y];
+        while (band_end + 1 < OLED_H &&
+               row_max[band_end + 1] >= row_min[band_end + 1]) {
+            int next_min = row_min[band_end + 1];
+            int next_max = row_max[band_end + 1];
+            if (next_min > band_max + 1 || next_max + 1 < band_min) break;
+            band_end++;
+            if (next_min < band_min) band_min = next_min;
+            if (next_max > band_max) band_max = next_max;
+        }
+
+        if (oled_flush_region_bytes(band_min, band_max,
+                                    band_start, band_end) != 0)
+            return -1;
+        y = band_end + 1;
+    }
+
+    memcpy(g_oled.prev_fb, g_oled.fb, sizeof(g_oled.fb));
+    return 0;
 }
 
 static int oled_init(void) {
@@ -2981,6 +3068,70 @@ static int dashboard_center_rendered_clock_x(int x0, int y0, int x1, int y1) {
     return shift_x;
 }
 
+
+static int draw_dashboard_time_layer(int hour, int minute, int clock_24h_mode,
+                                     const char *font_file, int upper_font_size,
+                                     uint8_t colon_level) {
+    char time_text[32];
+    if (clock_24h_mode)
+        snprintf(time_text, sizeof(time_text), "%02d:%02d", hour, minute);
+    else
+        snprintf(time_text, sizeof(time_text), "%d:%02d", hour, minute);
+
+    int used_ttf = 0;
+    if (font_file && font_file[0]) {
+        used_ttf = draw_dashboard_time_ttf_binary(
+            font_file, upper_font_size, time_text,
+            WEATHER_LEFT_X0 + 2, DASHBOARD_CLOCK_TIME_Y0,
+            WEATHER_LEFT_X1 - 2, DASHBOARD_CLOCK_TIME_Y1,
+            clock_24h_mode, colon_level) == 0;
+    }
+    if (!used_ttf)
+        draw_dashboard_time_pixel_fallback(hour, minute, clock_24h_mode,
+                                           colon_level);
+
+    (void)dashboard_center_rendered_clock_x(
+        DASHBOARD_CLOCK_CONTENT_X0, DASHBOARD_CLOCK_TIME_Y0,
+        DASHBOARD_CLOCK_CONTENT_X1, DASHBOARD_CLOCK_TIME_Y1);
+    return 0;
+}
+
+static void build_dashboard_tick_cache(int hour, int minute, int clock_24h_mode,
+                                       const char *font_file,
+                                       int upper_font_size) {
+    uint8_t *previous_target = g_oled_render_fb;
+
+    memset(g_dashboard_tick_cache.colon_off_fb, 0,
+           sizeof(g_dashboard_tick_cache.colon_off_fb));
+    g_oled_render_fb = g_dashboard_tick_cache.colon_off_fb;
+    (void)draw_dashboard_time_layer(hour, minute, clock_24h_mode,
+                                    font_file, upper_font_size, 0);
+
+    memset(g_dashboard_tick_cache.colon_on_fb, 0,
+           sizeof(g_dashboard_tick_cache.colon_on_fb));
+    g_oled_render_fb = g_dashboard_tick_cache.colon_on_fb;
+    (void)draw_dashboard_time_layer(hour, minute, clock_24h_mode,
+                                    font_file, upper_font_size, 15);
+
+    g_oled_render_fb = previous_target;
+    g_dashboard_tick_cache.valid = 1;
+}
+
+static int update_dashboard_second_tick(int second, int colon_phase) {
+    if (!g_dashboard_tick_cache.valid) return -1;
+
+    const uint8_t *source = colon_phase
+        ? g_dashboard_tick_cache.colon_on_fb
+        : g_dashboard_tick_cache.colon_off_fb;
+    for (size_t i = 0; i < OLED_FB_BYTES; i++) {
+        if (g_dashboard_tick_cache.colon_off_fb[i] !=
+            g_dashboard_tick_cache.colon_on_fb[i])
+            g_oled.fb[i] = source[i];
+    }
+    draw_dashboard_seconds_position_line(second);
+    return 0;
+}
+
 static void dashboard_audio_display(char *out, size_t out_len,
                                     const char *title, const char *artist,
                                     const char *file) {
@@ -3177,6 +3328,7 @@ static int collect_music_files(char files[][ASSET_LIST_NAME_MAX], int max_files)
 
 static void draw_weather_dashboard_screen(void) {
     time_t now = time(NULL);
+    g_dashboard_tick_cache.valid = 0;
     struct tm tmv;
     localtime_r(&now, &tmv);
 
@@ -3212,10 +3364,6 @@ static void draw_weather_dashboard_screen(void) {
         else if (hour > 12) hour -= 12;
     }
 
-    char time_text[32];
-    if (clock_24h_mode) snprintf(time_text, sizeof(time_text), "%02d:%02d", hour, tmv.tm_min);
-    else snprintf(time_text, sizeof(time_text), "%d:%02d", hour, tmv.tm_min);
-
     oled_clear_fb(0);
 
     for (size_t i = 0; i < sizeof(weather_separators) / sizeof(weather_separators[0]); i++)
@@ -3225,28 +3373,10 @@ static void draw_weather_dashboard_screen(void) {
     make_weather_header_label(weather.location, alarm_on, header_label, sizeof(header_label));
 
     uint8_t colon_level = clock_colon_blink_level();
-    int used_ttf = 0;
-    if (font_file[0]) {
-        used_ttf = draw_dashboard_time_ttf_binary(
-            font_file,
-            upper_font_size,
-            time_text,
-            WEATHER_LEFT_X0 + 2,
-            DASHBOARD_CLOCK_TIME_Y0,
-            WEATHER_LEFT_X1 - 2,
-            DASHBOARD_CLOCK_TIME_Y1,
-            clock_24h_mode,
-            colon_level
-        ) == 0;
-    }
-    if (!used_ttf)
-        draw_dashboard_time_pixel_fallback(hour, tmv.tm_min, clock_24h_mode, colon_level);
-
-    (void)dashboard_center_rendered_clock_x(
-        DASHBOARD_CLOCK_CONTENT_X0,
-        DASHBOARD_CLOCK_TIME_Y0,
-        DASHBOARD_CLOCK_CONTENT_X1,
-        DASHBOARD_CLOCK_TIME_Y1);
+    (void)draw_dashboard_time_layer(hour, tmv.tm_min, clock_24h_mode,
+                                    font_file, upper_font_size, colon_level);
+    build_dashboard_tick_cache(hour, tmv.tm_min, clock_24h_mode,
+                               font_file, upper_font_size);
 
     if (header_label[0]) {
         int header_x = weather_compact_text_optical_x(
@@ -3310,7 +3440,7 @@ static void draw_weather_dashboard_screen(void) {
     }
 
 
-    oled_flush_full();
+    (void)oled_flush();
 }
 
 
@@ -3409,6 +3539,58 @@ static int audio_write_pcm(snd_pcm_t *pcm, unsigned char *buf, size_t bytes, int
 
 static void clear_audio_metadata_locked(void);
 
+static int open_audio_pcm(snd_pcm_t **pcm, char *device_name, size_t device_name_len) {
+    if (!pcm || !device_name || device_name_len == 0) return -EINVAL;
+    *pcm = NULL;
+    device_name[0] = '\0';
+
+    const char *configured = getenv("MK_PICLOCK_ALSA_DEVICE");
+    if (configured && configured[0]) {
+        int rc = snd_pcm_open(pcm, configured, SND_PCM_STREAM_PLAYBACK, 0);
+        if (rc >= 0) {
+            safe_str(device_name, device_name_len, configured);
+            return 0;
+        }
+        app_log("audio", "Configured ALSA device %s failed: %s; searching for %s",
+                configured, snd_strerror(rc), MP_ALSA_CARD_MATCH);
+    }
+
+    int card = -1;
+    while (snd_card_next(&card) >= 0 && card >= 0) {
+        char control_name[32];
+        snprintf(control_name, sizeof(control_name), "hw:%d", card);
+        snd_ctl_t *control = NULL;
+        if (snd_ctl_open(&control, control_name, 0) < 0) continue;
+
+        snd_ctl_card_info_t *card_info;
+        snd_ctl_card_info_alloca(&card_info);
+        int matched = 0;
+        if (snd_ctl_card_info(control, card_info) >= 0) {
+            const char *id = snd_ctl_card_info_get_id(card_info);
+            const char *name = snd_ctl_card_info_get_name(card_info);
+            const char *longname = snd_ctl_card_info_get_longname(card_info);
+            matched = (id && strcasestr(id, MP_ALSA_CARD_MATCH)) ||
+                      (name && strcasestr(name, MP_ALSA_CARD_MATCH)) ||
+                      (longname && strcasestr(longname, MP_ALSA_CARD_MATCH));
+        }
+        snd_ctl_close(control);
+
+        if (matched) {
+            char candidate[32];
+            snprintf(candidate, sizeof(candidate), "plughw:%d,0", card);
+            int rc = snd_pcm_open(pcm, candidate, SND_PCM_STREAM_PLAYBACK, 0);
+            if (rc >= 0) {
+                safe_str(device_name, device_name_len, candidate);
+                return 0;
+            }
+        }
+    }
+
+    int rc = snd_pcm_open(pcm, "default", SND_PCM_STREAM_PLAYBACK, 0);
+    if (rc >= 0) safe_str(device_name, device_name_len, "default");
+    return rc;
+}
+
 static void *audio_thread_main(void *arg) {
     struct audio_play_request *req = (struct audio_play_request *)arg;
     mpg123_handle *mh = NULL;
@@ -3427,7 +3609,12 @@ static void *audio_thread_main(void *arg) {
     mh = mpg123_new(NULL, &err);
     if (!mh) goto done;
 
-    mpg123_param(mh, MPG123_ADD_FLAGS, MPG123_QUIET, 0.0);
+    long decoder_flags = MPG123_QUIET;
+#if MP_AUDIO_FORCE_STEREO
+    /* The H2+/H3 I2S path requires a standard two-slot frame. */
+    decoder_flags |= MPG123_FORCE_STEREO;
+#endif
+    mpg123_param(mh, MPG123_ADD_FLAGS, decoder_flags, 0.0);
 
     if (mpg123_open(mh, req->path) != MPG123_OK) goto done;
     if (mpg123_getformat(mh, &rate, &channels, &enc) != MPG123_OK) goto done;
@@ -3466,7 +3653,13 @@ static void *audio_thread_main(void *arg) {
         if (total_samples < 0) total_samples = 0;
     }
 
-    if (snd_pcm_open(&pcm, "default", SND_PCM_STREAM_PLAYBACK, 0) < 0) goto done;
+    char pcm_device[64];
+    int pcm_rc = open_audio_pcm(&pcm, pcm_device, sizeof(pcm_device));
+    if (pcm_rc < 0) {
+        app_log("audio", "Unable to open an ALSA playback device: %s", snd_strerror(pcm_rc));
+        goto done;
+    }
+    app_log("audio", "Using ALSA playback device %s", pcm_device);
     if (snd_pcm_set_params(pcm,
                            SND_PCM_FORMAT_S16_LE,
                            SND_PCM_ACCESS_RW_INTERLEAVED,
@@ -4614,7 +4807,7 @@ static int ipc_config_alarm(int client, const struct mp_ipc_alarm_config *reques
         .weekdays = request->weekdays ? request->weekdays : 0x7f,
         .start_volume = clamp_int(request->start_volume, 0, 100),
         .end_volume = clamp_int(request->end_volume, 0, 100),
-        .fired_yday = -1,
+        .last_fired_date = 0,
         .music_file = ""
     };
     if (safe_asset_filename(request->music_file) && has_mp3_ext(request->music_file)) {
@@ -4623,6 +4816,10 @@ static int ipc_config_alarm(int client, const struct mp_ipc_alarm_config *reques
         if (access(path, R_OK) == 0) mp_safe_str(alarm.music_file, sizeof(alarm.music_file), request->music_file);
     }
     pthread_mutex_lock(&g_state.lock);
+    const struct alarm_slot *previous = &g_state.alarms[id - 1];
+    if (previous->hour == alarm.hour && previous->min == alarm.min &&
+        previous->weekdays == alarm.weekdays)
+        alarm.last_fired_date = previous->last_fired_date;
     g_state.alarms[id - 1] = alarm;
     pthread_mutex_unlock(&g_state.lock);
     save_config();
@@ -5348,18 +5545,23 @@ static void check_alarm(void) {
     time_t now = time(NULL);
     struct tm tmv;
     localtime_r(&now, &tmv);
+    int today = local_date_key(&tmv);
 
     struct alarm_slot fire_alarm;
     int fire = 0;
+    int fire_id = 0;
 
     pthread_mutex_lock(&g_state.lock);
     for (int i = 0; i < MAX_ALARMS; i++) {
         struct alarm_slot *a = &g_state.alarms[i];
         int weekday_ok = (a->weekdays & (1 << tmv.tm_wday)) != 0;
-        if (a->enabled && weekday_ok && tmv.tm_hour == a->hour && tmv.tm_min == a->min && a->fired_yday != tmv.tm_yday) {
-            a->fired_yday = tmv.tm_yday;
+        if (today != 0 && a->enabled && weekday_ok &&
+            tmv.tm_hour == a->hour && tmv.tm_min == a->min &&
+            a->last_fired_date != today) {
+            a->last_fired_date = today;
             fire_alarm = *a;
             fire = 1;
+            fire_id = i + 1;
             break;
         }
     }
@@ -5367,8 +5569,13 @@ static void check_alarm(void) {
     pthread_mutex_unlock(&g_state.lock);
 
     if (fire) {
-        app_log("alarm", "Alarm fired at %02d:%02d", fire_alarm.hour, fire_alarm.min);
-        if (audio_play_music_file(fire_alarm.music_file, fire_alarm.start_volume, fire_alarm.end_volume, 1) != 0)
+        /* Commit the occurrence before opening audio so a power loss cannot
+           make this alarm eligible again after restart on the same date. */
+        save_config();
+        app_log("alarm", "Alarm %d fired at %02d:%02d", fire_id,
+                fire_alarm.hour, fire_alarm.min);
+        if (audio_play_music_file(fire_alarm.music_file, fire_alarm.start_volume,
+                                  fire_alarm.end_volume, 1) != 0)
             app_log("alarm", "Alarm could not start because no playable audio was available");
     }
 }
@@ -5391,12 +5598,16 @@ int main(void) {
     ensure_dir(CONFIG_DIR);
     init_alarm_defaults();
     load_config();
-    if (apply_default_font_selection())
+    int alarm_history_migrated = migrate_alarm_last_fired_dates();
+    int default_font_applied = apply_default_font_selection();
+    if (default_font_applied)
         app_log("display", "Applied automatic clock font selection");
     pthread_mutex_lock(&g_state.lock);
     g_state.font_policy_version = FONT_POLICY_VERSION;
     pthread_mutex_unlock(&g_state.lock);
-    save_config(); /* normalize the file and discard retired configuration keys */
+    save_config(); /* normalize, persist migration, and discard retired keys */
+    if (alarm_history_migrated)
+        app_log("alarm", "Migrated the last alarm occurrence into persistent replay protection");
     app_log("system", "mk-clock-adult %s starting", APP_VERSION);
     room_sensor_configure();
 
@@ -5456,6 +5667,7 @@ int main(void) {
     }
 
     int last_min = -1;
+    int last_sec = -1;
     int last_mode = -1;
     int last_colon_phase = -1;
     uint64_t last_diagnostic_refresh_ms = 0;
@@ -5499,12 +5711,25 @@ int main(void) {
                 localtime_r(&now, &tmv);
                 int colon_phase = clock_colon_blink_phase();
                 footer_refresh_active = dashboard_footer_refresh_active();
-                if (dirty || mode != last_mode || tmv.tm_min != last_min || colon_phase != last_colon_phase) {
+                int full_dashboard_redraw = dirty || mode != last_mode ||
+                                            tmv.tm_min != last_min;
+                int second_tick = tmv.tm_sec != last_sec ||
+                                  colon_phase != last_colon_phase;
+                if (full_dashboard_redraw) {
                     last_min = tmv.tm_min;
+                    last_sec = tmv.tm_sec;
                     last_colon_phase = colon_phase;
                     draw_weather_dashboard_screen();
-                } else if (footer_refresh_active) {
-                    refresh_dashboard_footer();
+                } else {
+                    if (second_tick) {
+                        last_sec = tmv.tm_sec;
+                        last_colon_phase = colon_phase;
+                        if (update_dashboard_second_tick(tmv.tm_sec, colon_phase) == 0)
+                            (void)oled_flush();
+                        else
+                            draw_weather_dashboard_screen();
+                    }
+                    if (footer_refresh_active) refresh_dashboard_footer();
                 }
             } else if (mode == 1) {
                 if (dirty || mode != last_mode) {

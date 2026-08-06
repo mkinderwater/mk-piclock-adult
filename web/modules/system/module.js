@@ -24,19 +24,28 @@ export async function mount(ctx) {
         return epoch > 0 ? new Date(epoch * 1000).toLocaleString() : 'Waiting for data';
     };
 
+    const renderPassword = data => {
+        const node = ctx.$('#password-state');
+        if (!node) return;
+        node.textContent = data.password_required ? 'Enabled' : 'Not set';
+        node.className = `badge ${data.password_required ? 'ok' : ''}`.trim();
+    };
+
     const refresh = async () => {
         const button = ctx.$('#system-refresh');
         if (button) ctx.busy(button, true, 'Refreshing...');
         try {
-            const [discovery, status, capabilities, source, activity, diagnostics] = await Promise.all([
+            const [discovery, status, capabilities, source, activity, diagnostics, auth] = await Promise.all([
                 ctx.json('/api/v1', {signal: ctx.signal}),
                 ctx.json('/api/v1/status', {signal: ctx.signal}),
                 ctx.json('/api/v1/capabilities', {signal: ctx.signal}),
                 ctx.json('/api/v1/config/weather-source', {signal: ctx.signal}),
                 ctx.json('/api/v1/weather/activity', {signal: ctx.signal}),
-                ctx.json('/api/v1/diagnostics', {signal: ctx.signal})
+                ctx.json('/api/v1/diagnostics', {signal: ctx.signal}),
+                ctx.json('/api/v1/auth/status', {signal: ctx.signal})
             ]);
 
+            renderPassword(auth);
             ctx.setText('#system-product', available(discovery.name || 'mk-clock-adult'));
             ctx.setText('#system-version', available(discovery.product_version || status.app_version));
             ctx.setText('#system-api-version', available(discovery.api_version || capabilities.api_version));
@@ -64,7 +73,8 @@ export async function mount(ctx) {
             ctx.setText('#diag-architecture', available(diagnostics.architecture));
             ctx.setText('#diag-temperature', Number(diagnostics.cpu_temperature_c) ? `${Number(diagnostics.cpu_temperature_c).toFixed(1)} °C` : 'Unavailable');
             ctx.setText('#diag-inventory-id', available(diagnostics.inventory_id));
-            ctx.setText('#diag-pi-serial', available(diagnostics.pi_serial));
+            ctx.setText('#diag-platform-profile', available(diagnostics.platform_profile));
+            ctx.setText('#diag-board-serial', available(diagnostics.board_serial || diagnostics.pi_serial));
             ctx.setText('#diag-board-revision', available(diagnostics.board_revision));
             ctx.setText('#diag-machine-id', available(diagnostics.machine_id));
             ctx.setText('#diag-cpu-signature', available(diagnostics.cpu_signature));
@@ -143,6 +153,45 @@ export async function mount(ctx) {
         }
     };
 
+
+    ctx.on('submit', '#password-form', async (event, form) => {
+        event.preventDefault();
+        const password = form.elements.password.value;
+        if (!password) {
+            ctx.notice('Enter a password, or use Remove Password.', 'warn', 3000);
+            return;
+        }
+        const button = event.submitter || form.querySelector('[type="submit"]');
+        try {
+            await ctx.update(form.action, {
+                method: 'POST',
+                body: new URLSearchParams({password}),
+                button,
+                busyText: 'Saving password...',
+                done: 'Password saved',
+                errorText: 'Password could not be saved',
+                refreshStatus: false
+            });
+            form.reset();
+            await refresh();
+        } catch (_) {}
+    });
+
+    ctx.on('click', '#remove-password', async (_event, button) => {
+        try {
+            await ctx.update('/api/v1/auth/password', {
+                method: 'POST',
+                body: new URLSearchParams({password: ''}),
+                button,
+                busyText: 'Removing password...',
+                done: 'Password removed',
+                errorText: 'Password could not be removed',
+                refreshStatus: false
+            });
+            ctx.$('#password-form')?.reset();
+            await refresh();
+        } catch (_) {}
+    });
 
     ctx.on('submit', '#restore-form', async (event, form) => {
         event.preventDefault();

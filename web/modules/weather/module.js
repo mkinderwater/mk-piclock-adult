@@ -155,7 +155,7 @@ export async function mount(ctx) {
         roomSensorHumidity.textContent = hasReading
             ? `${Number(room.humidity_percent).toFixed(1)}% RH`
             : 'Unavailable';
-        roomSensorDevice.textContent = `${room.device || '/dev/i2c-1'} at ${room.address || '0x38'}`;
+        roomSensorDevice.textContent = `${room.device || '/dev/i2c-0'} at ${room.address || '0x38'}`;
         roomSensorMeasured.textContent = room.measured_at
             ? new Date(Number(room.measured_at) * 1000).toLocaleString()
             : 'No successful reading';
