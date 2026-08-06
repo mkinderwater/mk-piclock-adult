@@ -14,7 +14,7 @@ const baseStatus = {
     time: '9:04 AM',
     date: 'July 22, 2026',
     clock_name: 'Adult Clock',
-    app_version: 'mk-clock-adult-1.2.62',
+    app_version: 'mk-clock-adult-1.2.65-bpi-m2-zero-r1',
     uptime_seconds: 1,
     oled_ok: true,
     oled_color: 'green',

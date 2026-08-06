@@ -14,12 +14,18 @@ assert "const int ink_center2 = ink_x0 + ink_x1;" in source
 assert "shift_x = clamp_int(shift_x, x0 - ink_x0, x1 - ink_x1);" in source
 assert "oled_set_px(destination_x, y, row[i]);" in source
 
+layer_start = source.index("static int draw_dashboard_time_layer(")
+layer_end = source.index("static void build_dashboard_tick_cache(", layer_start)
+layer = source[layer_start:layer_end]
+fallback_call = layer.index("draw_dashboard_time_pixel_fallback(")
+clock_call = layer.index("dashboard_center_rendered_clock_x(")
+assert fallback_call < clock_call
+
 render_start = source.index("static void draw_weather_dashboard_screen(void)")
 render = source[render_start:]
-clock_call = render.index("dashboard_center_rendered_clock_x(")
+time_call = render.index("draw_dashboard_time_layer(")
 header_call = render.index("weather_compact_text_optical_x(")
-fallback_call = render.index("draw_dashboard_time_pixel_fallback(")
-assert fallback_call < clock_call < header_call
+assert time_call < header_call
 
 # The function centres the visible bounds, independent of the nominal font grid.
 def centred_shift(x0: int, x1: int, ink_x0: int, ink_x1: int) -> int:

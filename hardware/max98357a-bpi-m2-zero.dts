@@ -1,0 +1,65 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "sinovoip,bpi-m2-zero",
+                 "allwinner,sun8i-h2-plus",
+                 "allwinner,sun8i-h3";
+
+    /*
+     * I2S0 uses PA18, PA19 and PA20. PA1 controls MAX98357A SD/EN.
+     * PA21 remains a GPIO for the TTP223B touch input on pin 38.
+     */
+    fragment@0 {
+        target = <&pio>;
+
+        __overlay__ {
+            mk_i2s0_pins: mk-i2s0-pins {
+                pins = "PA18", "PA19", "PA20";
+                function = "i2s0";
+            };
+        };
+    };
+
+    fragment@1 {
+        target = <&i2s0>;
+
+        __overlay__ {
+            pinctrl-names = "default";
+            pinctrl-0 = <&mk_i2s0_pins>;
+            status = "okay";
+        };
+    };
+
+    fragment@2 {
+        target-path = "/";
+
+        __overlay__ {
+            mk_max98357a: max98357a {
+                compatible = "maxim,max98357a";
+                #sound-dai-cells = <0>;
+                sdmode-gpios = <&pio 0 1 0>; /* PA1, physical pin 11 */
+                sdmode-delay = <5>;
+                status = "okay";
+            };
+
+            mk_max98357a_sound: sound-max98357a {
+                compatible = "simple-audio-card";
+                simple-audio-card,name = "MAX98357A";
+                simple-audio-card,format = "i2s";
+                simple-audio-card,mclk-fs = <256>;
+                simple-audio-card,bitclock-master = <&mk_max98357a_cpu>;
+                simple-audio-card,frame-master = <&mk_max98357a_cpu>;
+                status = "okay";
+
+                mk_max98357a_cpu: simple-audio-card,cpu {
+                    sound-dai = <&i2s0>;
+                };
+
+                simple-audio-card,codec {
+                    sound-dai = <&mk_max98357a>;
+                };
+            };
+        };
+    };
+};

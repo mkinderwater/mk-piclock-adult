@@ -1,0 +1,4 @@
+# mk-piclock BPI-M2 Zero hardware access
+SUBSYSTEM=="spidev", KERNEL=="spidev0.0", GROUP="spi", MODE="0660"
+SUBSYSTEM=="gpio", KERNEL=="gpiochip0", GROUP="gpio", MODE="0660"
+SUBSYSTEM=="i2c-dev", KERNEL=="i2c-0", GROUP="i2c", MODE="0660"

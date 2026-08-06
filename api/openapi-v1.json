@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "mk-clock-adult API",
-    "version": "1.44",
-    "description": "Local HTTP API for mk-clock-adult 1.2.62. Includes independently selectable INSIDE temperature fonts, aligned INSIDE humidity, fixed-time and today low / high Weather panel selection, visible-pixel OLED clock centring, alarm-state OLED labelling, ordered multi-warning rotation, backup and restore, and expanded diagnostics."
+    "version": "1.46",
+    "description": "Local HTTP API for mk-clock-adult-1.2.65-bpi-m2-zero-r1. Banana Pi M2 Zero adult clock with optional password protection, persistent alarm replay protection, partial OLED updates, Weather controls, backup and restore, and expanded diagnostics."
   },
   "servers": [
     {
@@ -99,6 +99,93 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/status": {
+      "get": {
+        "summary": "Check whether a web password is configured and whether this browser is authenticated",
+        "tags": [
+          "System"
+        ],
+        "responses": {
+          "200": {
+            "description": "Authentication state"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "summary": "Authenticate with the optional web password",
+        "tags": [
+          "System"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "password": {
+                    "type": "string",
+                    "maxLength": 64
+                  }
+                },
+                "required": [
+                  "password"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authenticated or no password is configured"
+          },
+          "401": {
+            "description": "Incorrect password"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/password": {
+      "post": {
+        "summary": "Set or remove the optional plaintext web password",
+        "tags": [
+          "System"
+        ],
+        "description": "Send an empty password to remove password protection. Authentication is required when a password already exists.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "password": {
+                    "type": "string",
+                    "maxLength": 64
+                  }
+                },
+                "required": [
+                  "password"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Password setting updated"
+          },
+          "400": {
+            "description": "Invalid password"
+          },
+          "401": {
+            "description": "Authentication required when a password already exists"
           }
         }
       }
@@ -1404,7 +1491,7 @@
     "/api/v1/weather": {
       "post": {
         "summary": "Update weather dashboard data",
-        "description": "Pushes the ECCC location, ordered active warning descriptions, resolved current conditions, and three independently configured panel slots to the C core. Warning descriptions remain in source-array order. Each slot explicitly states whether its temperature is available, so missing data is never represented as 0°C.",
+        "description": "Pushes the ECCC location, ordered active warning descriptions, resolved current conditions, and three independently configured panel slots to the C core. Warning descriptions remain in source-array order. Each slot explicitly states whether its temperature is available, so missing data is never represented as 0\u00b0C.",
         "tags": [
           "Weather"
         ],
@@ -1496,7 +1583,7 @@
                       0,
                       1
                     ],
-                    "description": "1 when slotN_temperature_c is valid. A missing temperature is displayed as --° rather than 0°C."
+                    "description": "1 when slotN_temperature_c is valid. A missing temperature is displayed as --\u00b0 rather than 0\u00b0C."
                   },
                   "slot0_temperature_c": {
                     "type": "integer",
@@ -1551,7 +1638,7 @@
                       0,
                       1
                     ],
-                    "description": "1 when slotN_temperature_c is valid. A missing temperature is displayed as --° rather than 0°C."
+                    "description": "1 when slotN_temperature_c is valid. A missing temperature is displayed as --\u00b0 rather than 0\u00b0C."
                   },
                   "slot1_temperature_c": {
                     "type": "integer",
@@ -1606,7 +1693,7 @@
                       0,
                       1
                     ],
-                    "description": "1 when slotN_temperature_c is valid. A missing temperature is displayed as --° rather than 0°C."
+                    "description": "1 when slotN_temperature_c is valid. A missing temperature is displayed as --\u00b0 rather than 0\u00b0C."
                   },
                   "slot2_temperature_c": {
                     "type": "integer",
@@ -1929,7 +2016,7 @@
                             "offset",
                             "time"
                           ],
-                          "description": "room = local INSIDE AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback; today = current local day low and high with their forecast hours and the day’s maximum precipitation probability; offset = hourly forecast a fixed number of hours ahead; time = next occurrence of a selected local forecast hour"
+                          "description": "room = local INSIDE AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback; today = current local day low and high with their forecast hours and the day\u2019s maximum precipitation probability; offset = hourly forecast a fixed number of hours ahead; time = next occurrence of a selected local forecast hour"
                         },
                         "offset_hours": {
                           "type": "integer",
@@ -1960,7 +2047,7 @@
                             "offset",
                             "time"
                           ],
-                          "description": "room = local INSIDE AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback; today = current local day low and high with their forecast hours and the day’s maximum precipitation probability; offset = hourly forecast a fixed number of hours ahead; time = next occurrence of a selected local forecast hour"
+                          "description": "room = local INSIDE AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback; today = current local day low and high with their forecast hours and the day\u2019s maximum precipitation probability; offset = hourly forecast a fixed number of hours ahead; time = next occurrence of a selected local forecast hour"
                         },
                         "offset_hours": {
                           "type": "integer",
@@ -1991,7 +2078,7 @@
                             "offset",
                             "time"
                           ],
-                          "description": "room = local INSIDE AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback; today = current local day low and high with their forecast hours and the day’s maximum precipitation probability; offset = hourly forecast a fixed number of hours ahead; time = next occurrence of a selected local forecast hour"
+                          "description": "room = local INSIDE AHT10 temperature and humidity; outside = current ECCC conditions with nearest-hour fallback; today = current local day low and high with their forecast hours and the day\u2019s maximum precipitation probability; offset = hourly forecast a fixed number of hours ahead; time = next occurrence of a selected local forecast hour"
                         },
                         "offset_hours": {
                           "type": "integer",

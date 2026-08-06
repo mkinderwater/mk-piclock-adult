@@ -5,7 +5,7 @@ root = Path(__file__).resolve().parents[1]
 api = (root / "mk-piclock-api.c").read_text(encoding="utf-8")
 ui = (root / "web/modules/system/module.js").read_text(encoding="utf-8")
 spec = json.loads((root / "api/openapi-v1.json").read_text(encoding="utf-8"))
-for token in ["hardware_model", "inventory_id", "storage_used_bytes", "sd_capacity_bytes", "room_sensor_status", "weather_source_url", "MP_WEATHER_VERSION"]:
+for token in ["hardware_model", "inventory_id", "storage_used_bytes", "sd_capacity_bytes", "room_sensor_status", "weather_source_url", "MP_WEATHER_VERSION", "MP_PLATFORM_PROFILE", "board_serial"]:
     assert token in api, token
 assert "/api/v1/diagnostics/report" in api
 assert "diag-storage-used" in ui and "diag-room-status" in ui

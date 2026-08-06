@@ -1,0 +1,8 @@
+# mk-piclock service identities and hardware-access groups
+g mk-piclock -
+g audio -
+g spi -
+g gpio -
+g i2c -
+u mk-piclock-core -:mk-piclock "mk-piclock hardware core" /nonexistent /usr/sbin/nologin
+u mk-piclock-api -:mk-piclock "mk-piclock API and web service" /nonexistent /usr/sbin/nologin
