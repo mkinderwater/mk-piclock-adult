@@ -1,4 +1,4 @@
-# mk-clock-adult 1.2.65 BPI-M2 Zero R1 Release Notes
+# mk-clock-adult 2.1A BPI-M2 Zero R1 Release Notes
 
 ## Platform transition
 
@@ -18,10 +18,14 @@ The adult clock is now maintained only for the Banana Pi M2 Zero. Raspberry Pi a
 
 All adult 1.2.64 Weather, alarm, password, backup, restore, font, music, diagnostics, and OLED update behaviour is retained. The unused shared `$$` query helper was removed without changing GUI behaviour.
 
+## Bug fix ported from mk-piclock kid clock
+
+- `ipc_config_alarm()` now marks the OLED display dirty when an alarm is saved, matching the kid clock's v1.9.15 fix. Previously, changing an alarm's time or weekdays, or disabling the last enabled alarm, left the `ALARM` footer stale until an unrelated redraw or the next minute tick.
+
 ## Versions
 
 ```text
-Product:     mk-clock-adult-1.2.65-bpi-m2-zero-r1
+Product:     mk-clock-adult-2.1A-bpi-m2-zero-r1
 HTTP API:    1.46
 Private IPC: 27
 Weather:     2.0.14

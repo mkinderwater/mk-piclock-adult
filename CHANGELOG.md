@@ -1,3 +1,10 @@
+## v2.1A BPI-M2 Zero R1 - 2026-08-08
+
+- Ported the kid clock's v1.9.15 fix: `ipc_config_alarm()` now marks the OLED display dirty when an alarm is saved, so the `ALARM`/`ALARM OFF` footer refreshes immediately instead of waiting for the next unrelated redraw or minute tick.
+- Removed the redundant `overlay_prefix=sun8i-h3` line from the `armbianEnv.txt` snippet in `install.md`; Armbian already sets this by default.
+- Documented the board's USB-C power input (VBUS/GND) in `pinouts.md`, clarifying it is separate from the CON2 5 V/GND peripheral-power pins.
+- Added the missing `unzip` package to the `install.md` package list; the same doc's build steps already assumed it was installed.
+
 ## v1.2.65 BPI-M2 Zero R1 - 2026-08-04
 
 - Moved the maintained adult-clock target from Raspberry Pi to Banana Pi M2 Zero.

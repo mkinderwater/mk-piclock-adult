@@ -1,4 +1,4 @@
-# mk-clock-adult 1.2.65 BPI-M2 Zero R1 Pinouts
+# mk-clock-adult 2.1A BPI-M2 Zero R1 Pinouts
 
 The application uses `/dev/gpiochip0` Allwinner line offsets rather than BCM numbering. Physical pins refer to the Banana Pi M2 Zero CON2 header.
 
@@ -10,6 +10,8 @@ This release has no RGB LED hardware or driver code, so unlike the sibling mk-pi
 
 | Device | Signal | BPI signal | Line | Physical pin |
 |:--|:--|:--|--:|--:|
+| Board power | USB-C VBUS (+) | 5 V | - | USB-C connector, pin A4/A9/B4/B9 |
+| Board power | USB-C GND (-) | Ground | - | USB-C connector, pin A1/A12/B1/B12 |
 | SSD1322 | VCC_IN | 3.3 V | - | 1 |
 | SSD1322 | VSS | Ground | - | 6 |
 | SSD1322 | D1 / DIN | PC0 / SPI0 MOSI | 64, SPI-owned | 19 |
@@ -57,6 +59,8 @@ MAX98357A BCLK <- PA19       (27) (28) PA18          -> MAX98357A LRC
                              (37) (38) PA21          -> TTP223B OUT
 TTP223B GND    <- GND        (39) (40) PA20          -> MAX98357A DIN
 ```
+
+The board itself is powered separately through its onboard USB-C connector, not through the GPIO header: USB-C pins A4/A9/B4/B9 carry VBUS (+) and pins A1/A12/B1/B12 carry GND (-). The 5 V and GND pins on CON2 above are outputs from that supply used to power the peripherals, not a board power input.
 
 The AHT10 uses `/dev/i2c-0` at address `0x38`. The OLED uses `/dev/spidev0.0`. The speaker output is differential and must connect only between `SPK+` and `SPK-`.
 

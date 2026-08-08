@@ -1,4 +1,4 @@
-# mk-clock-adult 1.2.65 BPI-M2 Zero R1
+# mk-clock-adult 2.1A BPI-M2 Zero R1
 
 Native Banana Pi M2 Zero alarm clock software for the SSD1322 OLED, TTP223B touch input, MAX98357A I2S audio, ECCC Weather, and an AHT10 inside temperature and humidity sensor.
 
@@ -21,7 +21,7 @@ All 1.2.64 Weather, alarm, web password, backup, font, OLED partial-update, and 
 ## Versions
 
 ```text
-Product:     mk-clock-adult-1.2.65-bpi-m2-zero-r1
+Product:     mk-clock-adult-2.1A-bpi-m2-zero-r1
 HTTP API:    1.46
 Private IPC: 27
 Weather:     Native C 2.0.14

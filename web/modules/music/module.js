@@ -1,4 +1,4 @@
-import {audioTrackFacts, formatAudioBytes} from '/assets/js/audio-library.js?v=mk-clock-adult-1.2.65-bpi-m2-zero-r1';
+import {audioTrackFacts, formatAudioBytes} from '/assets/js/audio-library.js?v=mk-clock-adult-2.1A-bpi-m2-zero-r1';
 
 export async function mount(ctx) {
     const renderStatus = status => {

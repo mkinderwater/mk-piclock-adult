@@ -1,4 +1,4 @@
-# mk-clock-adult 1.2.65 BPI-M2 Zero R1 installation
+# mk-clock-adult 2.1A BPI-M2 Zero R1 installation
 
 This release supports the Banana Pi M2 Zero running Armbian. It does not install on Raspberry Pi OS and does not edit boot configuration automatically.
 
@@ -8,7 +8,7 @@ This release supports the Banana Pi M2 Zero running Armbian. It does not install
 sudo apt update
 sudo apt install -y \
   build-essential pkg-config ca-certificates tzdata \
-  device-tree-compiler i2c-tools alsa-utils \
+  device-tree-compiler i2c-tools alsa-utils unzip \
   libgpiod-dev libfreetype6-dev libasound2-dev libmpg123-dev \
   libmicrohttpd-dev libmp3lame-dev
 ```
@@ -18,7 +18,6 @@ sudo apt install -y \
 Edit `/boot/armbianEnv.txt`. Preserve existing values and ensure the active entries include:
 
 ```text
-overlay_prefix=sun8i-h3
 overlays=spi0 i2c0
 param_spidev_spi_bus=0
 user_overlays=max98357a-bpi-m2-zero
@@ -56,8 +55,8 @@ The AHT10 should appear at address `38`. The sound card should contain `MAX98357
 ## Build and install
 
 ```bash
-unzip mk-clock-adult-1.2.65-bpi-m2-zero-r1-release.zip
-cd mk-clock-adult-1.2.65-bpi-m2-zero-r1
+unzip mk-clock-adult-2.1A-bpi-m2-zero-r1-release.zip
+cd mk-clock-adult-2.1A-bpi-m2-zero-r1
 make test
 sudo make install
 ```
@@ -78,7 +77,7 @@ curl http://127.0.0.1:8080/api/v1/health
 Expected identity:
 
 ```text
-Product:     mk-clock-adult-1.2.65-bpi-m2-zero-r1
+Product:     mk-clock-adult-2.1A-bpi-m2-zero-r1
 HTTP API:    1.46
 Private IPC: 27
 Weather:     2.0.14

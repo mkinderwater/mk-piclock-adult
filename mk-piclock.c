@@ -4821,6 +4821,9 @@ static int ipc_config_alarm(int client, const struct mp_ipc_alarm_config *reques
         previous->weekdays == alarm.weekdays)
         alarm.last_fired_date = previous->last_fired_date;
     g_state.alarms[id - 1] = alarm;
+    /* The alarm footer is derived from this schedule. Force an immediate
+       clock redraw instead of leaving stale ALARM text until the next minute. */
+    g_state.display_dirty = 1;
     pthread_mutex_unlock(&g_state.lock);
     save_config();
     app_log("alarm", "Saved alarm %d", id);
