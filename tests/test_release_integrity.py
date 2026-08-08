@@ -4,7 +4,7 @@ import os
 import re
 
 project = Path(__file__).resolve().parents[1]
-product = "mk-clock-adult-1.2.65-bpi-m2-zero-r1"
+product = "mk-clock-adult-2.1A-bpi-m2-zero-r1"
 
 core = (project / "mk-piclock.c").read_text(encoding="utf-8")
 api = (project / "mk-piclock-api.c").read_text(encoding="utf-8")
