@@ -6,12 +6,23 @@ Every pin below has been verified against the official Banana Pi BPI-M2 Zero 40-
 
 This release has no RGB LED hardware or driver code, so unlike the sibling mk-piclock kid-clock release, physical pins 29, 31, and 33 are unused here.
 
+## Board power
+
+Power this release directly through the Banana Pi M2 Zero CON2 header:
+
+| Signal | Physical pin |
+|:--|--:|
+| +5 V input | 4 |
+| GND input | 6 |
+
+Physical pin 4 is reserved for the board's +5 V supply input. Physical pin 6 is the common ground input and is shared with the OLED ground connection shown below. Do not power the board from a second source at the same time.
+
 ## Complete wiring
 
 | Device | Signal | BPI signal | Line | Physical pin |
 |:--|:--|:--|--:|--:|
-| Board power | USB-C VBUS (+) | 5 V | - | USB-C connector, pin A4/A9/B4/B9 |
-| Board power | USB-C GND (-) | Ground | - | USB-C connector, pin A1/A12/B1/B12 |
+| Board power | +5 V input | 5 V | - | 4 |
+| Board power | GND input | Ground | - | 6 |
 | SSD1322 | VCC_IN | 3.3 V | - | 1 |
 | SSD1322 | VSS | Ground | - | 6 |
 | SSD1322 | D1 / DIN | PC0 / SPI0 MOSI | 64, SPI-owned | 19 |
@@ -39,8 +50,8 @@ This release has no RGB LED hardware or driver code, so unlike the sibling mk-pi
                               BPI-M2 Zero CON2
 
 OLED VCC       <- 3.3 V       (1)  (2)  5 V          -> MAX98357A VIN
-AHT10 SDA      <- PA12        (3)  (4)  5 V
-AHT10 SCL      <- PA11        (5)  (6)  GND          -> OLED GND
+AHT10 SDA      <- PA12        (3)  (4)  5 V          <- BOARD +5 V INPUT
+AHT10 SCL      <- PA11        (5)  (6)  GND          -> BOARD GND INPUT / OLED GND
                               (7)  (8)
 AHT10 GND      <- GND         (9) (10)
 MAX98357A EN   <- PA1        (11) (12)
@@ -59,8 +70,6 @@ MAX98357A BCLK <- PA19       (27) (28) PA18          -> MAX98357A LRC
                              (37) (38) PA21          -> TTP223B OUT
 TTP223B GND    <- GND        (39) (40) PA20          -> MAX98357A DIN
 ```
-
-The board itself is powered separately through its onboard USB-C connector, not through the GPIO header: USB-C pins A4/A9/B4/B9 carry VBUS (+) and pins A1/A12/B1/B12 carry GND (-). The 5 V and GND pins on CON2 above are outputs from that supply used to power the peripherals, not a board power input.
 
 The AHT10 uses `/dev/i2c-0` at address `0x38`. The OLED uses `/dev/spidev0.0`. The speaker output is differential and must connect only between `SPK+` and `SPK-`.
 

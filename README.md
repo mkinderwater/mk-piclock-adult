@@ -6,6 +6,7 @@ This is now the maintained adult-clock platform. The Raspberry Pi adult branch e
 
 ## BPI port
 
+- Board power is fed directly through CON2: +5 V on physical pin 4 and GND on physical pin 6.
 - Allwinner GPIO mapping through `/dev/gpiochip0`.
 - SSD1322 on `/dev/spidev0.0`.
 - AHT10 on `/dev/i2c-0` using header pins 3 and 5.

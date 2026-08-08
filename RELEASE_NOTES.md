@@ -6,6 +6,7 @@ The adult clock is now maintained only for the Banana Pi M2 Zero. Raspberry Pi a
 
 ## Ported hardware
 
+- Board power: regulated +5 V to CON2 physical pin 4, GND to physical pin 6.
 - SSD1322 SPI: `/dev/spidev0.0`.
 - OLED D/C: PA2, line 2, physical pin 22.
 - OLED reset: PA0, line 0, physical pin 13.

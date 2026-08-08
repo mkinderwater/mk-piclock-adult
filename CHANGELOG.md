@@ -2,8 +2,10 @@
 
 - Ported the kid clock's v1.9.15 fix: `ipc_config_alarm()` now marks the OLED display dirty when an alarm is saved, so the `ALARM`/`ALARM OFF` footer refreshes immediately instead of waiting for the next unrelated redraw or minute tick.
 - Removed the redundant `overlay_prefix=sun8i-h3` line from the `armbianEnv.txt` snippet in `install.md`; Armbian already sets this by default.
-- Documented the board's USB-C power input (VBUS/GND) in `pinouts.md`, clarifying it is separate from the CON2 5 V/GND peripheral-power pins.
+- Updated BPI board-power wiring: feed +5 V directly into CON2 physical pin 4 and ground into physical pin 6. Updated the wiring table and header map accordingly.
 - Added the missing `unzip` package to the `install.md` package list; the same doc's build steps already assumed it was installed.
+- Added `libcurl4-openssl-dev` and `libjson-c-dev` to the `install.md` package list. `weather/src/mk-piclock-weather.c` requires `curl/curl.h` and `json-c/json.h` to build, but neither dev package was previously listed, so `make` failed on the Weather binary with `pkg-config` returning empty `CURL_CFLAGS`/`JSON_CFLAGS`. This predates the BPI port — the kid clock has no Weather module and so never surfaced it.
+- Corrected the Armbian H3 SPI configuration in `install.md`: use `overlays=spi-spidev i2c0` with `param_spidev_spi_bus=0`. The separate `spi0` entry is not required by Armbian's H3 `spi-spidev` overlay.
 
 ## v1.2.65 BPI-M2 Zero R1 - 2026-08-04
 

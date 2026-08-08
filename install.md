@@ -2,6 +2,15 @@
 
 This release supports the Banana Pi M2 Zero running Armbian. It does not install on Raspberry Pi OS and does not edit boot configuration automatically.
 
+## Power wiring
+
+Feed the board directly from a regulated 5 V supply through CON2:
+
+- +5 V to physical pin 4.
+- GND to physical pin 6.
+
+Pin 6 is common ground and is also used by the OLED wiring in `pinouts.md`. Do not connect a second board-power source at the same time.
+
 ## Packages
 
 ```bash
@@ -10,7 +19,7 @@ sudo apt install -y \
   build-essential pkg-config ca-certificates tzdata \
   device-tree-compiler i2c-tools alsa-utils unzip \
   libgpiod-dev libfreetype6-dev libasound2-dev libmpg123-dev \
-  libmicrohttpd-dev libmp3lame-dev
+  libmicrohttpd-dev libmp3lame-dev libcurl4-openssl-dev libjson-c-dev
 ```
 
 ## Enable BPI interfaces
@@ -18,12 +27,14 @@ sudo apt install -y \
 Edit `/boot/armbianEnv.txt`. Preserve existing values and ensure the active entries include:
 
 ```text
-overlays=spi0 i2c0
+overlays=spi-spidev i2c0
 param_spidev_spi_bus=0
 user_overlays=max98357a-bpi-m2-zero
 ```
 
 There must be only one `overlays=` line and one `user_overlays=` line. Add other required overlays to those same lines rather than creating duplicates.
+
+`spi-spidev` enables the generic `spidev` device, and `param_spidev_spi_bus=0` selects SPI bus 0. A separate `spi0` overlay is not required for Armbian's H3 overlay implementation.
 
 ## Install the MAX98357A overlay
 

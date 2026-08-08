@@ -39,7 +39,7 @@ weather:
 	$(MAKE) -C weather clean all
 
 check-hardware:
-	@if [ ! -e /dev/spidev0.0 ]; then echo "ERROR: /dev/spidev0.0 is unavailable. Enable the Armbian spi0 overlay and reboot."; exit 1; fi
+	@if [ ! -e /dev/spidev0.0 ]; then echo "ERROR: /dev/spidev0.0 is unavailable. Enable the Armbian spi-spidev overlay for bus 0 and reboot."; exit 1; fi
 	@if [ ! -e /dev/gpiochip0 ]; then echo "ERROR: /dev/gpiochip0 is unavailable."; exit 1; fi
 	@if [ ! -e "$(I2C_DEVICE)" ]; then echo "ERROR: $(I2C_DEVICE) is unavailable. Enable the Armbian i2c0 overlay and reboot."; exit 1; fi
 	@echo "BPI hardware preflight passed."
