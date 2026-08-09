@@ -4,6 +4,12 @@
 
 The adult clock is now maintained only for the Banana Pi M2 Zero. Raspberry Pi adult development ends at 1.2.64.
 
+Reference OS image: `Armbian_community_26.8.0-trunk.413_Bananapim2zero_trixie_current_6.18.38_minimal`.
+
+- Documented the image-preparation workflow: Linux `e2fsprogs` prepares/validates ext4 compatibility and SharpExt4Explorer provides Windows read/write editing.
+- Added `/root/.not_logged_in_yet` examples for both hidden and broadcast Wi-Fi SSIDs.
+- Added `BOM.md` with the purchased hardware, supplier links, component roles, and selection rationale, including the selected external power cable and self-adhesive rubber feet, plus a short list of required build items not represented by the supplied purchase links.
+
 ## Ported hardware
 
 - Board power: regulated +5 V to CON2 physical pin 4, GND to physical pin 6.

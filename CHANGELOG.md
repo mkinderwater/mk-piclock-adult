@@ -1,5 +1,10 @@
+- Added the selected 6 ft USB-A-to-USB-C external power cable and FURNIMATE self-adhesive rubber feet to `BOM.md`, including their use and purchase rationale. The BOM explicitly preserves direct BPI power at physical pins 4 (+5 V) and 6 (GND).
+- Added `BOM.md` documenting the reference BPI-M2 Zero adult-clock hardware, exact purchase links, and the design logic behind the selected enclosure material, Wi-Fi antenna, wiring, MAX98357A amplifier, speaker, connectors, fasteners, OLED and SBC.
+- Documented `e2fsprogs` (`tune2fs`/`e2fsck`) as the Linux ext4 compatibility-preparation tools used before Windows editing with SharpExt4Explorer.
+- Added first-boot `/root/.not_logged_in_yet` examples for hidden and broadcast Wi-Fi SSIDs.
 ## v2.1A BPI-M2 Zero R1 - 2026-08-08
 
+- Documented `Armbian_community_26.8.0-trunk.413_Bananapim2zero_trixie_current_6.18.38_minimal` as the validated reference Armbian image for the BPI-M2 Zero adult clock.
 - Ported the kid clock's v1.9.15 fix: `ipc_config_alarm()` now marks the OLED display dirty when an alarm is saved, so the `ALARM`/`ALARM OFF` footer refreshes immediately instead of waiting for the next unrelated redraw or minute tick.
 - Removed the redundant `overlay_prefix=sun8i-h3` line from the `armbianEnv.txt` snippet in `install.md`; Armbian already sets this by default.
 - Updated BPI board-power wiring: feed +5 V directly into CON2 physical pin 4 and ground into physical pin 6. Updated the wiring table and header map accordingly.
