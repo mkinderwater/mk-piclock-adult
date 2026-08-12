@@ -1,80 +1,151 @@
-# mk-clock-adult 2.1A BPI-M2 Zero R1 Pinouts
+# PINOUT.MD — mk-clock-adult 2.3.24
 
-The application uses `/dev/gpiochip0` Allwinner line offsets rather than BCM numbering. Physical pins refer to the Banana Pi M2 Zero CON2 header.
+Production wiring reference for the **Banana Pi M2 Zero** adult clock running `bpi-zero-clock 1.0.3`.
 
-Every pin below has been verified against the official Banana Pi BPI-M2 Zero 40-pin GPIO reference, against the mk-piclock v1.9.17 BPI-M2 Zero R18 pinout reference, and against this release's own `hardware_profile.h` and `hardware/max98357a-bpi-m2-zero.dts`. `gpiochip0` line numbers follow the standard Allwinner sunxi scheme (`(port index) * 32 + pin`, with A=0, B=1, C=2), which both references and this file already use consistently for every port-A pin (for example PA19 is line 19).
+Physical pin numbers refer to the 40-pin Banana Pi header.
 
-This release has no RGB LED hardware or driver code, so unlike the sibling mk-piclock kid-clock release, physical pins 29, 31, and 33 are unused here.
+## SSD1322 OLED — SPI0
 
-## Board power
+| OLED pin | Function | BPI M2 Zero | Physical pin |
+|---|---|---|---:|
+| VSS / GND | Ground | GND | 6 |
+| VCC_IN | 3.3 V | 3.3 V | 1 |
+| D0 / CLK | SPI clock | SPI0-CLK / PC2 | 23 |
+| D1 / DIN | SPI MOSI | SPI0-MOSI / PC0 | 19 |
+| D/C | Data / Command | PA2 | 22 |
+| RES | Reset | PA0 | 13 |
+| CS | Chip Select | SPI0-CS / PC3 | 24 |
 
-Power this release directly through the Banana Pi M2 Zero CON2 header:
-
-| Signal | Physical pin |
-|:--|--:|
-| +5 V input | 4 |
-| GND input | 6 |
-
-Physical pin 4 is reserved for the board's +5 V supply input. Physical pin 6 is the common ground input and is shared with the OLED ground connection shown below. Do not power the board from a second source at the same time.
-
-## Complete wiring
-
-| Device | Signal | BPI signal | Line | Physical pin |
-|:--|:--|:--|--:|--:|
-| Board power | +5 V input | 5 V | - | 4 |
-| Board power | GND input | Ground | - | 6 |
-| SSD1322 | VCC_IN | 3.3 V | - | 1 |
-| SSD1322 | VSS | Ground | - | 6 |
-| SSD1322 | D1 / DIN | PC0 / SPI0 MOSI | 64, SPI-owned | 19 |
-| SSD1322 | D0 / CLK | PC2 / SPI0 SCLK | 66, SPI-owned | 23 |
-| SSD1322 | CS# | PC3 / SPI0 CS0 | 67, SPI-owned | 24 |
-| SSD1322 | D/C# | PA2 | 2 | 22 |
-| SSD1322 | RES# | PA0 | 0 | 13 |
-| AHT10 | VCC | 3.3 V | - | 17 |
-| AHT10 | GND | Ground | - | 9 |
-| AHT10 | SDA | PA12 / TWI0 SDA | 12, I2C-owned | 3 |
-| AHT10 | SCL | PA11 / TWI0 SCK | 11, I2C-owned | 5 |
-| MAX98357A | VIN | 5 V | - | 2 |
-| MAX98357A | GND | Ground | - | 14 |
-| MAX98357A | BCLK | PA19 / I2S0 BCLK | I2S-owned | 27 |
-| MAX98357A | LRC | PA18 / I2S0 LRCLK | I2S-owned | 28 |
-| MAX98357A | DIN | PA20 / I2S0 DOUT | I2S-owned | 40 |
-| MAX98357A | SD / EN | PA1 | codec-owned | 11 |
-| TTP223B | VCC | 3.3 V | - | 17 |
-| TTP223B | GND | Ground | - | 39 |
-| TTP223B | OUT | PA21 | 21 | 38 |
-
-## Header map
+Software device:
 
 ```text
-                              BPI-M2 Zero CON2
-
-OLED VCC       <- 3.3 V       (1)  (2)  5 V          -> MAX98357A VIN
-AHT10 SDA      <- PA12        (3)  (4)  5 V          <- BOARD +5 V INPUT
-AHT10 SCL      <- PA11        (5)  (6)  GND          -> BOARD GND INPUT / OLED GND
-                              (7)  (8)
-AHT10 GND      <- GND         (9) (10)
-MAX98357A EN   <- PA1        (11) (12)
-OLED RST       <- PA0        (13) (14) GND           -> MAX98357A GND
-                             (15) (16)
-AHT10/TTP VCC  <- 3.3 V      (17) (18)
-OLED MOSI      <- PC0        (19) (20) GND
-OLED MISO unused, PC1        (21) (22) PA2           -> OLED DC
-OLED SCLK      <- PC2        (23) (24) PC3           -> OLED CS
-                             (25) (26)
-MAX98357A BCLK <- PA19       (27) (28) PA18          -> MAX98357A LRC
-                             (29) (30)
-                             (31) (32)
-                             (33) (34)
-                             (35) (36)
-                             (37) (38) PA21          -> TTP223B OUT
-TTP223B GND    <- GND        (39) (40) PA20          -> MAX98357A DIN
+/dev/spidev0.0
 ```
 
-The AHT10 uses `/dev/i2c-0` at address `0x38`. The OLED uses `/dev/spidev0.0`. The speaker output is differential and must connect only between `SPK+` and `SPK-`.
+Application GPIO assignments:
 
-The custom audio overlay sets a 256x master-clock ratio and controls amplifier shutdown through PA1. The core forces mono MP3 files into two-channel PCM so the H2+/H3 I2S controller produces a standard two-slot frame.
+```text
+OLED RESET = PA0  / gpiochip0 offset 0  / physical pin 13
+OLED D/C   = PA2  / gpiochip0 offset 2  / physical pin 22
+```
 
-### No speaker pop on this platform
+## AHT10 inside temperature / humidity sensor — I2C0
 
-This BPI wiring has not shown a MAX98357A startup/stop click. The overlay's `sdmode-gpios` and `sdmode-delay = <5>` let the MAX98357A codec driver itself hold PA1 low while idle, sequence it high only after the I2S clocks are running, and drop it again before the clocks stop. The amplifier is therefore never listening during a clock start/stop transition.
+| AHT10 pin | Function | BPI M2 Zero | Physical pin |
+|---|---|---|---:|
+| VIN / VCC | 3.3 V | 3.3 V | 17 |
+| GND | Ground | GND | 9 |
+| SDA | I2C data | TWI0-SDA / PA12 | 3 |
+| SCL | I2C clock | TWI0-SCK / PA11 | 5 |
+
+Software:
+
+```text
+Device:  /dev/i2c-0
+Address: 0x38
+```
+
+## TTP223B touch sensor
+
+| TTP223B pin | Function | BPI M2 Zero | Physical pin |
+|---|---|---|---:|
+| VCC | 3.3 V | 3.3 V | 17 |
+| GND | Ground | GND | 39 |
+| OUT | Touch signal | PA21 | 38 |
+
+Application GPIO assignment:
+
+```text
+TOUCH = PA21 / gpiochip0 offset 21 / physical pin 38
+```
+
+## MAX98357A I2S amplifier
+
+The MAX98357A hardware path is owned by the `bpi-zero-clock 1.0.3` image and its validated Device Tree / codec driver.
+
+| MAX98357A pin | Function | BPI M2 Zero | Physical pin |
+|---|---|---|---:|
+| VIN | Amplifier power | 5 V | 2 |
+| GND | Ground | GND | 14 |
+| BCLK | I2S bit clock | PA19 | 27 |
+| LRC / WS | I2S word / frame clock | PA18 | 28 |
+| DIN | I2S audio data | PA20 | 40 |
+| SD / EN | Codec-driver shutdown / enable | PA1 | 11 |
+
+Audio device:
+
+```text
+hw:MAX98357A,0
+```
+
+Image-owned audio behavior:
+
+```text
+Codec driver:  snd-soc-max98357a
+Compatible:    maxim,max98357a
+SD / EN GPIO:  PA1
+SD delay:      5 ms
+MCLK-FS:       256
+```
+
+The application does **not** drive PA1 directly.
+
+Local MP3/alarm playback retains forced stereo output (`MPG123_FORCE_STEREO`) so mono material fills both I2S slots.
+
+## 40-pin header summary
+
+```text
+ 3.3V  (1) (2)  5V ---------------- MAX98357A VIN
+ SDA0  (3) (4)  5V
+ SCL0  (5) (6)  GND --------------- OLED GND
+       (7) (8)
+ GND   (9) (10)
+ PA1  (11) (12) -------------------- MAX98357A SD/EN
+ PA0  (13) (14) GND ---------------- MAX98357A GND
+      (15) (16)
+ 3.3V (17) (18) -------------------- AHT10 / touch VCC
+ MOSI (19) (20) GND ---------------- OLED D1
+ MISO (21) (22) PA2 ---------------- OLED D/C
+ SCLK (23) (24) CS0 ---------------- OLED D0 / CS
+ GND  (25) (26)
+ PA19 (27) (28) PA18 --------------- MAX98357A BCLK / LRC
+      (29) (30) GND
+      (31) (32)
+      (33) (34) GND
+      (35) (36)
+      (37) (38) PA21 --------------- TTP223B OUT
+ GND  (39) (40) PA20 --------------- Touch GND / MAX98357A DIN
+```
+
+## Application-owned vs. image-owned hardware
+
+### Application-owned
+
+- SSD1322 rendering and SPI transactions
+- OLED RESET on PA0
+- OLED D/C on PA2
+- TTP223B input on PA21
+- AHT10 reads on `/dev/i2c-0`
+- local MP3/alarm PCM playback
+
+### `bpi-zero-clock 1.0.3` image-owned
+
+- SPI0 / I2C0 / I2S0 hardware enablement
+- `/dev/spidev0.0` binding
+- MAX98357A kernel codec module
+- MAX98357A Device Tree definition
+- PA1 SD/EN codec-driver control
+- AP6212 Wi-Fi / Bluetooth kernel and firmware capability
+
+The 2.3.24 application does not remove or modify image-owned hardware capability.
+
+## Not present in mk-clock-adult 2.3.24
+
+- application Bluetooth GUI
+- Bluetooth API / IPC
+- BlueALSA
+- Bluetooth audio routing
+- Bluetooth stereo-to-mono matrix
+- Bluetooth metadata
+- LED control
+- Story Mode
