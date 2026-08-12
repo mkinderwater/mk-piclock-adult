@@ -68,8 +68,10 @@
 #define MESSAGE_CHIME_LABEL "Weather Warning Chime"
 #define MESSAGE_CHIME_VOLUME_MAX 55
 #define FONT_DIR APP_ROOT "/assets/fonts"
-#define SYSTEM_DEFAULT_FONT_ID 4
-#define FONT_POLICY_VERSION 1
+#define MAX_BUILTIN_FONT_ID 3
+#define LEGACY_AUTOMATIC_FONT_ID 4
+#define FONT_POLICY_VERSION 2
+#define DEJAVU_DEFAULT_FILENAME "DejaVuSansMono.ttf"
 #define CONFIG_DIR APP_ROOT "/config"
 #define CONFIG_FILE CONFIG_DIR "/clock.conf"
 #define LOG_FILE CONFIG_DIR "/event.log"
@@ -151,6 +153,12 @@ struct app_state {
     char audio_title[MP_ID3_TEXT_MAX];
     char audio_artist[MP_ID3_TEXT_MAX];
     uint64_t audio_scroll_started_ms;
+    int bluetooth_audio_playing;
+    char bluetooth_audio_title[MP_ID3_TEXT_MAX];
+    char bluetooth_audio_artist[MP_ID3_TEXT_MAX];
+    uint64_t bluetooth_audio_scroll_started_ms;
+    int bluetooth_pairing_passkey_active;
+    char bluetooth_pairing_passkey[MP_IPC_BLUETOOTH_PASSKEY_MAX];
     int alarm_active;             /* 1 only while an alarm MP3 is currently playing */
     int alarm_volume_percent;     /* current alarm ramp volume, 0..100 */
     long long last_successful_alarm; /* epoch when alarm audio last opened successfully */
@@ -158,7 +166,7 @@ struct app_state {
     struct alarm_slot alarms[MAX_ALARMS];
     int oled_ok;
     char clock_name[64];
-    int oled_font;         /* 0..3 built-in, 4 automatic font detection */
+    int oled_font;         /* 0..3 built-in; external fonts use oled_font_file */
     char oled_font_file[128]; /* uploaded filename or system font key, empty = built-in */
     char inside_font_file[128]; /* empty = follow clock font; otherwise system/uploaded font */
     int oled_font_size;    /* TrueType pixel size */
@@ -192,13 +200,19 @@ static struct app_state g_state = {
     .audio_title = "",
     .audio_artist = "",
     .audio_scroll_started_ms = 0,
+    .bluetooth_audio_playing = 0,
+    .bluetooth_audio_title = "",
+    .bluetooth_audio_artist = "",
+    .bluetooth_audio_scroll_started_ms = 0,
+    .bluetooth_pairing_passkey_active = 0,
+    .bluetooth_pairing_passkey = "",
     .alarm_active = 0,
     .alarm_volume_percent = 0,
     .last_successful_alarm = 0,
     .alarm_replay_guard_migrated = 0,
     .oled_ok = 0,
     .clock_name = DEFAULT_CLOCK_NAME,
-    .oled_font = SYSTEM_DEFAULT_FONT_ID,
+    .oled_font = 0,
     .oled_font_file = "",
     .inside_font_file = "",
     .oled_font_size = 48,
@@ -848,7 +862,7 @@ static int scan_asset_files(const char *dir, int kind, char files[][ASSET_LIST_N
     return count;
 }
 
-static int apply_default_font_selection(void) {
+static int select_dejavu_default_font(int force) {
     char current[sizeof(g_state.oled_font_file)];
     int builtin;
 
@@ -857,38 +871,60 @@ static int apply_default_font_selection(void) {
     builtin = g_state.oled_font;
     pthread_mutex_unlock(&g_state.lock);
 
-    int current_valid = 0;
-    if (current[0]) {
-        char path[MP_SYSTEM_FONT_PATH_MAX];
-        make_font_path(current, path, sizeof(path));
-        current_valid = path[0] && access(path, R_OK) == 0;
+    if (!force) {
+        if (current[0]) {
+            char current_path[MP_SYSTEM_FONT_PATH_MAX];
+            make_font_path(current, current_path, sizeof(current_path));
+            if (current_path[0] && access(current_path, R_OK) == 0) return 0;
+        } else if (builtin >= 0 && builtin <= MAX_BUILTIN_FONT_ID) {
+            return 0;
+        }
     }
-    if (current_valid || (!current[0] && builtin != SYSTEM_DEFAULT_FONT_ID)) return 0;
 
-    char candidate[sizeof(g_state.oled_font_file)] = "";
-    char files[ASSET_LIST_MAX_FILES][ASSET_LIST_NAME_MAX];
-    int uploaded_count = scan_asset_files(FONT_DIR, ASSET_LIST_FONT, files, ASSET_LIST_MAX_FILES);
-    if (uploaded_count > 0) {
-        safe_str(candidate, sizeof(candidate), files[0]);
-    } else {
-        char system_path[MP_SYSTEM_FONT_PATH_MAX];
-        (void)mp_system_font_find_filename("DejaVuSansMono.ttf", candidate, sizeof(candidate),
-                                           system_path, sizeof(system_path));
-    }
+    char dejavu_key[sizeof(g_state.oled_font_file)] = "";
+    char dejavu_path[MP_SYSTEM_FONT_PATH_MAX] = "";
+    int found = mp_system_font_find_filename(DEJAVU_DEFAULT_FILENAME,
+                                              dejavu_key, sizeof(dejavu_key),
+                                              dejavu_path, sizeof(dejavu_path)) == 0 &&
+                dejavu_key[0] && dejavu_path[0] && access(dejavu_path, R_OK) == 0;
 
     int changed = 0;
     pthread_mutex_lock(&g_state.lock);
     if (strcmp(g_state.oled_font_file, current) == 0 && g_state.oled_font == builtin) {
-        if (strcmp(g_state.oled_font_file, candidate) != 0 ||
-            g_state.oled_font != SYSTEM_DEFAULT_FONT_ID) {
-            safe_str(g_state.oled_font_file, sizeof(g_state.oled_font_file), candidate);
-            g_state.oled_font = SYSTEM_DEFAULT_FONT_ID;
+        const char *next_file = found ? dejavu_key : "";
+        if (strcmp(g_state.oled_font_file, next_file) != 0 || g_state.oled_font != 0) {
+            safe_str(g_state.oled_font_file, sizeof(g_state.oled_font_file), next_file);
+            g_state.oled_font = 0;
             g_state.display_dirty = 1;
             changed = 1;
         }
     }
     pthread_mutex_unlock(&g_state.lock);
+
+    if (!found)
+        app_log("display", "DejaVu Sans Mono is unavailable; using built-in Seven Segment fallback");
     return changed;
+}
+
+static int migrate_font_policy(void) {
+    int previous_policy;
+    int previous_builtin;
+    int had_file;
+
+    pthread_mutex_lock(&g_state.lock);
+    previous_policy = g_state.font_policy_version;
+    previous_builtin = g_state.oled_font;
+    had_file = g_state.oled_font_file[0] != '\0';
+    if (g_state.oled_font == LEGACY_AUTOMATIC_FONT_ID)
+        g_state.oled_font = 0;
+    if (g_state.oled_font < 0 || g_state.oled_font > MAX_BUILTIN_FONT_ID)
+        g_state.oled_font = 0;
+    g_state.font_policy_version = FONT_POLICY_VERSION;
+    pthread_mutex_unlock(&g_state.lock);
+
+    int fresh_default = previous_policy == 0 && !had_file && previous_builtin == 0;
+    int legacy_automatic_without_file = previous_builtin == LEGACY_AUTOMATIC_FONT_ID && !had_file;
+    return select_dejavu_default_font(fresh_default || legacy_automatic_without_file);
 }
 
 static void init_alarm_defaults(void) {
@@ -921,7 +957,7 @@ static void reset_persistent_state_locked(void) {
     g_state.last_successful_alarm = 0;
     g_state.alarm_replay_guard_migrated = 1;
     safe_str(g_state.clock_name, sizeof(g_state.clock_name), DEFAULT_CLOCK_NAME);
-    g_state.oled_font = SYSTEM_DEFAULT_FONT_ID;
+    g_state.oled_font = 0;
     g_state.oled_font_file[0] = '\0';
     g_state.inside_font_file[0] = '\0';
     g_state.oled_font_size = 48;
@@ -1130,13 +1166,8 @@ static void load_config(void) {
     }
 
     sanitize_clock_name(g_state.clock_name);
-    if (g_state.font_policy_version < FONT_POLICY_VERSION) {
-        if (!g_state.oled_font_file[0] && g_state.oled_font == 0)
-            g_state.oled_font = SYSTEM_DEFAULT_FONT_ID;
-        g_state.font_policy_version = FONT_POLICY_VERSION;
-    }
-    if (g_state.oled_font < 0 || g_state.oled_font > SYSTEM_DEFAULT_FONT_ID)
-        g_state.oled_font = SYSTEM_DEFAULT_FONT_ID;
+    if (g_state.oled_font < 0 || g_state.oled_font > LEGACY_AUTOMATIC_FONT_ID)
+        g_state.oled_font = 0;
     if (g_state.oled_font_size < 18 || g_state.oled_font_size > 54) g_state.oled_font_size = 48;
     if (g_state.inside_font_file[0]) {
         char path[MP_SYSTEM_FONT_PATH_MAX];
@@ -2385,6 +2416,28 @@ static uint32_t utf8_next_codepoint(const unsigned char **cursor) {
 }
 
 
+static uint32_t oled_fold_metadata_codepoint(uint32_t cp) {
+    switch (cp) {
+        case 0x00c0: case 0x00c1: case 0x00c2: case 0x00c3: case 0x00c4: case 0x00c5: return 'A';
+        case 0x00e0: case 0x00e1: case 0x00e2: case 0x00e3: case 0x00e4: case 0x00e5: return 'a';
+        case 0x00c7: return 'C';
+        case 0x00e7: return 'c';
+        case 0x00c8: case 0x00c9: case 0x00ca: case 0x00cb: return 'E';
+        case 0x00e8: case 0x00e9: case 0x00ea: case 0x00eb: return 'e';
+        case 0x00cc: case 0x00cd: case 0x00ce: case 0x00cf: return 'I';
+        case 0x00ec: case 0x00ed: case 0x00ee: case 0x00ef: return 'i';
+        case 0x00d1: return 'N';
+        case 0x00f1: return 'n';
+        case 0x00d2: case 0x00d3: case 0x00d4: case 0x00d5: case 0x00d6: case 0x00d8: return 'O';
+        case 0x00f2: case 0x00f3: case 0x00f4: case 0x00f5: case 0x00f6: case 0x00f8: return 'o';
+        case 0x00d9: case 0x00da: case 0x00db: case 0x00dc: return 'U';
+        case 0x00f9: case 0x00fa: case 0x00fb: case 0x00fc: return 'u';
+        case 0x00dd: case 0x0178: return 'Y';
+        case 0x00fd: case 0x00ff: return 'y';
+        default: return cp;
+    }
+}
+
 static void oled_filter_metadata_text(const char *input, char *output, size_t output_len) {
     if (!output || output_len == 0) return;
     output[0] = '\0';
@@ -2400,6 +2453,16 @@ static void oled_filter_metadata_text(const char *input, char *output, size_t ou
 
         /* Combining marks have no standalone OLED glyph. */
         if (cp >= 0x0300 && cp <= 0x036f) continue;
+
+        /* Metadata is display-safe ASCII for common Latin accents.  Keep the
+         * raw/internal UTF-8 intact; only the OLED presentation is folded. */
+        uint32_t display_cp = oled_fold_metadata_codepoint(cp);
+        if (display_cp != cp) {
+            if (used + 1 >= output_len) break;
+            output[used++] = (char)display_cp;
+            previous_was_space = 0;
+            continue;
+        }
 
         /* Malformed or unsupported code points would render as question marks. */
         if (font5x7_glyph(cp) == font5x7_unknown) continue;
@@ -3256,17 +3319,38 @@ static int dashboard_footer_state(char *text, size_t text_len,
     char audio_title[MP_ID3_TEXT_MAX];
     char audio_artist[MP_ID3_TEXT_MAX];
     uint64_t audio_started_ms;
+    int bluetooth_audio_playing;
+    char bluetooth_audio_title[MP_ID3_TEXT_MAX];
+    char bluetooth_audio_artist[MP_ID3_TEXT_MAX];
+    uint64_t bluetooth_audio_started_ms;
+    int bluetooth_pairing_passkey_active;
+    char bluetooth_pairing_passkey[MP_IPC_BLUETOOTH_PASSKEY_MAX];
     pthread_mutex_lock(&g_state.lock);
     audio_playing = g_state.audio_playing;
     safe_str(audio_file, sizeof(audio_file), g_state.audio_file);
     safe_str(audio_title, sizeof(audio_title), g_state.audio_title);
     safe_str(audio_artist, sizeof(audio_artist), g_state.audio_artist);
     audio_started_ms = g_state.audio_scroll_started_ms;
+    bluetooth_audio_playing = g_state.bluetooth_audio_playing;
+    safe_str(bluetooth_audio_title, sizeof(bluetooth_audio_title), g_state.bluetooth_audio_title);
+    safe_str(bluetooth_audio_artist, sizeof(bluetooth_audio_artist), g_state.bluetooth_audio_artist);
+    bluetooth_audio_started_ms = g_state.bluetooth_audio_scroll_started_ms;
+    bluetooth_pairing_passkey_active = g_state.bluetooth_pairing_passkey_active;
+    safe_str(bluetooth_pairing_passkey, sizeof(bluetooth_pairing_passkey),
+             g_state.bluetooth_pairing_passkey);
     pthread_mutex_unlock(&g_state.lock);
 
-    if (audio_playing) {
+    /* Pairing confirmation is time-sensitive and temporarily owns the footer. */
+    if (bluetooth_pairing_passkey_active && bluetooth_pairing_passkey[0]) {
+        snprintf(text, text_len, "PAIR %s", bluetooth_pairing_passkey);
+    } else if (audio_playing) {
         dashboard_audio_display(text, text_len, audio_title, audio_artist, audio_file);
         if (started_ms) *started_ms = audio_started_ms;
+    } else if (bluetooth_audio_playing) {
+        /* Use the exact local-MP3 title/artist formatter and marquee rules. */
+        dashboard_audio_display(text, text_len, bluetooth_audio_title,
+                                bluetooth_audio_artist, "");
+        if (started_ms) *started_ms = bluetooth_audio_started_ms;
     } else {
         struct weather_dashboard_snapshot weather;
         memset(&weather, 0, sizeof(weather));
@@ -3450,6 +3534,7 @@ struct audio_play_request {
     int start_volume;
     int end_volume;
     int use_ramp;
+    int follow_global_volume; /* normal music tracks follow live GUI/API volume changes */
 };
 
 static int choose_random_music_file(char *out, size_t out_len) {
@@ -3690,6 +3775,21 @@ static void *audio_thread_main(void *arg) {
             off_t frames = (off_t)(done_bytes / (size_t)frame_bytes);
             int volume = req->start_volume;
 
+            /*
+             * Normal music follows the current global volume for every decoded
+             * PCM buffer. Previously the volume was copied only when playback
+             * started, so saving a new GUI volume while a song was playing had
+             * no audible effect until the next track.
+             *
+             * Alarm ramps and notification chimes deliberately do not set this
+             * flag, preserving their independent volume behavior.
+             */
+            if (req->follow_global_volume) {
+                pthread_mutex_lock(&g_state.lock);
+                volume = clamp_int(g_state.global_volume, 0, 100);
+                pthread_mutex_unlock(&g_state.lock);
+            }
+
             if (req->use_ramp && ramp_seconds > 0.0) {
                 struct timespec now_ts;
                 clock_gettime(CLOCK_MONOTONIC, &now_ts);
@@ -3911,6 +4011,7 @@ static int audio_play_music_file(const char *music_file, int start_volume, int e
     req->start_volume = clamp_int(start_volume, 0, 100);
     req->end_volume = clamp_int(end_volume, 0, 100);
     req->use_ramp = use_ramp ? 1 : 0;
+    req->follow_global_volume = use_ramp ? 0 : 1;
 
     pthread_mutex_lock(&g_audio.lock);
     g_audio.running = 1;
@@ -3976,6 +4077,7 @@ static int audio_play_weather_warning_chime(void) {
     req->start_volume = volume;
     req->end_volume = volume;
     req->use_ramp = 0;
+    req->follow_global_volume = 0;
 
     pthread_mutex_lock(&g_audio.lock);
     if (g_audio.running) {
@@ -4370,7 +4472,6 @@ static const char *oled_font_name_for_id(int id) {
         case 1: return "Seven Thin";
         case 2: return "Pixel";
         case 3: return "Pixel Bold";
-        case SYSTEM_DEFAULT_FONT_ID: return "Automatic font detection";
         default: return "Seven Segment";
     }
 }
@@ -4558,6 +4659,11 @@ static int ipc_status(int client) {
     char audio_file[MUSIC_FILE_MAX];
     char audio_title[MP_ID3_TEXT_MAX];
     char audio_artist[MP_ID3_TEXT_MAX];
+    int bluetooth_audio_playing = g_state.bluetooth_audio_playing;
+    char bluetooth_audio_title[MP_ID3_TEXT_MAX];
+    char bluetooth_audio_artist[MP_ID3_TEXT_MAX];
+    int bluetooth_pairing_passkey_active = g_state.bluetooth_pairing_passkey_active;
+    char bluetooth_pairing_passkey[MP_IPC_BLUETOOTH_PASSKEY_MAX];
     struct alarm_slot alarms[MAX_ALARMS];
     mp_safe_str(font_file, sizeof(font_file), g_state.oled_font_file);
     mp_safe_str(inside_font_file, sizeof(inside_font_file), g_state.inside_font_file);
@@ -4565,6 +4671,10 @@ static int ipc_status(int client) {
     mp_safe_str(audio_file, sizeof(audio_file), g_state.audio_file);
     mp_safe_str(audio_title, sizeof(audio_title), g_state.audio_title);
     mp_safe_str(audio_artist, sizeof(audio_artist), g_state.audio_artist);
+    mp_safe_str(bluetooth_audio_title, sizeof(bluetooth_audio_title), g_state.bluetooth_audio_title);
+    mp_safe_str(bluetooth_audio_artist, sizeof(bluetooth_audio_artist), g_state.bluetooth_audio_artist);
+    mp_safe_str(bluetooth_pairing_passkey, sizeof(bluetooth_pairing_passkey),
+                g_state.bluetooth_pairing_passkey);
     memcpy(alarms, g_state.alarms, sizeof(alarms));
     pthread_mutex_unlock(&g_state.lock);
     touch_get_state(&touch_ok, &touch_pressed);
@@ -4584,6 +4694,8 @@ static int ipc_status(int client) {
 
     char e_time[128], e_date[192], e_clock_name[160], e_audio_file[512];
     char e_audio_title[384], e_audio_artist[384], e_weather_location[192];
+    char e_bluetooth_audio_title[384], e_bluetooth_audio_artist[384];
+    char e_bluetooth_pairing_passkey[64];
     char e_weather_warning[(MP_WEATHER_WARNING_TEXT_MAX * 6) + 1];
     char e_weather_warnings[MP_WEATHER_WARNING_SLOTS][(MP_WEATHER_WARNING_TEXT_MAX * 6) + 1];
     char e_font_file[256], e_font_name[256], e_inside_font_file[256];
@@ -4596,6 +4708,10 @@ static int ipc_status(int client) {
     mp_json_escape(e_audio_file, sizeof(e_audio_file), audio_file);
     mp_json_escape(e_audio_title, sizeof(e_audio_title), audio_title);
     mp_json_escape(e_audio_artist, sizeof(e_audio_artist), audio_artist);
+    mp_json_escape(e_bluetooth_audio_title, sizeof(e_bluetooth_audio_title), bluetooth_audio_title);
+    mp_json_escape(e_bluetooth_audio_artist, sizeof(e_bluetooth_audio_artist), bluetooth_audio_artist);
+    mp_json_escape(e_bluetooth_pairing_passkey, sizeof(e_bluetooth_pairing_passkey),
+                   bluetooth_pairing_passkey);
     mp_json_escape(e_weather_location, sizeof(e_weather_location), weather.location);
     const char *primary_weather_warning = weather.warning_count > 0
         ? weather.warning_descriptions[0] : "";
@@ -4618,6 +4734,8 @@ static int ipc_status(int client) {
     mp_buffer_appendf(&body,
         "{\"time\":\"%s\",\"date\":\"%s\",\"clock_name\":\"%s\",\"app_version\":\"%s\","
         "\"uptime_seconds\":%ld,\"audio_file\":\"%s\",\"audio_title\":\"%s\",\"audio_artist\":\"%s\","
+        "\"bluetooth_audio_playing\":%d,\"bluetooth_audio_title\":\"%s\",\"bluetooth_audio_artist\":\"%s\","
+        "\"bluetooth_pairing_passkey_active\":%d,\"bluetooth_pairing_passkey\":\"%s\","
         "\"global_volume\":%d,"
         "\"bedtime_enabled\":%d,"
         "\"bedtime_start_hour\":%d,\"bedtime_start_min\":%d,\"bedtime_end_hour\":%d,\"bedtime_end_min\":%d,"
@@ -4629,7 +4747,9 @@ static int ipc_status(int client) {
         "\"oled_font\":%d,\"oled_font_size\":%d,\"oled_font_file\":\"%s\",\"oled_font_name\":\"%s\","
         "\"inside_font_file\":\"%s\",\"weather\":{",
         e_time, e_date, e_clock_name, APP_VERSION, uptime_seconds, e_audio_file,
-        e_audio_title, e_audio_artist, global_volume,
+        e_audio_title, e_audio_artist, bluetooth_audio_playing,
+        e_bluetooth_audio_title, e_bluetooth_audio_artist,
+        bluetooth_pairing_passkey_active, e_bluetooth_pairing_passkey, global_volume,
         bedtime_enabled,
         bsh, bsm, beh, bem, bedtime_dim, weather_warning_chime_enabled,
         weather_warning_chime_during_bedtime, clock_24h_mode, oled_color_name_for_id(oled_color),
@@ -4913,7 +5033,7 @@ static int ipc_config_display(int client, const struct mp_ipc_display_config *re
     mp_safe_str(inside_font_file, sizeof(inside_font_file), g_state.inside_font_file);
     pthread_mutex_unlock(&g_state.lock);
 
-    if (request->present_mask & MP_IPC_DISPLAY_FONT) font = clamp_int(request->oled_font, 0, SYSTEM_DEFAULT_FONT_ID);
+    if (request->present_mask & MP_IPC_DISPLAY_FONT) font = clamp_int(request->oled_font, 0, MAX_BUILTIN_FONT_ID);
     if (request->present_mask & MP_IPC_DISPLAY_FONT_SIZE) font_size = clamp_int(request->oled_font_size, 18, 54);
     if (request->present_mask & MP_IPC_DISPLAY_BEDTIME_ENABLED) bedtime_enabled = request->bedtime_enabled ? 1 : 0;
     if (request->present_mask & MP_IPC_DISPLAY_BEDTIME_DIM) bedtime_dim = clamp_int(request->bedtime_dim_percent, 0, 100);
@@ -4979,8 +5099,7 @@ static int ipc_config_display(int client, const struct mp_ipc_display_config *re
     mp_safe_str(g_state.inside_font_file, sizeof(g_state.inside_font_file), inside_font_file);
     g_state.display_dirty = 1;
     pthread_mutex_unlock(&g_state.lock);
-    if (!font_file[0] && font == SYSTEM_DEFAULT_FONT_ID)
-        changed |= apply_default_font_selection();
+
     if (changed) font_cache_reset();
     save_config();
     app_log("display", "Saved display settings");
@@ -5142,7 +5261,7 @@ static int ipc_asset_event(int client, const struct mp_ipc_asset_event *event) {
     if (event->action == MP_IPC_ASSET_UPLOADED) {
         if (event->kind == MP_IPC_ASSET_FONT) {
             pthread_mutex_lock(&g_state.lock);
-            g_state.oled_font = SYSTEM_DEFAULT_FONT_ID;
+            g_state.oled_font = 0;
             mp_safe_str(g_state.oled_font_file, sizeof(g_state.oled_font_file), event->file);
             g_state.display_dirty = 1;
             pthread_mutex_unlock(&g_state.lock);
@@ -5175,16 +5294,19 @@ static int ipc_asset_event(int client, const struct mp_ipc_asset_event *event) {
             pthread_mutex_unlock(&g_state.lock);
             if (config_changed) save_config();
         } else if (event->kind == MP_IPC_ASSET_FONT) {
+            int clock_font_deleted = 0;
             pthread_mutex_lock(&g_state.lock);
             if (strcmp(g_state.oled_font_file, event->file) == 0) {
                 g_state.oled_font_file[0] = '\0';
-                g_state.oled_font = SYSTEM_DEFAULT_FONT_ID;
+                g_state.oled_font = 0;
+                clock_font_deleted = 1;
             }
             if (strcmp(g_state.inside_font_file, event->file) == 0)
                 g_state.inside_font_file[0] = '\0';
             g_state.display_dirty = 1;
             pthread_mutex_unlock(&g_state.lock);
-            (void)apply_default_font_selection();
+            if (clock_font_deleted)
+                (void)select_dejavu_default_font(1);
             font_cache_reset();
             save_config();
         } else {
@@ -5317,7 +5439,7 @@ static int ipc_config_import(int client, const struct mp_ipc_config_blob *blob) 
     reset_persistent_state_locked();
     pthread_mutex_unlock(&g_state.lock);
     load_config();
-    (void)apply_default_font_selection();
+    (void)migrate_font_policy();
     font_cache_reset();
     pthread_mutex_lock(&g_state.lock);
     g_state.display_mode = 0;
@@ -5325,6 +5447,73 @@ static int ipc_config_import(int client, const struct mp_ipc_config_blob *blob) 
     pthread_mutex_unlock(&g_state.lock);
     save_config();
     app_log("backup", "Configuration restored from backup");
+    return ipc_send_json(client, 200, "{\"ok\":true}");
+}
+
+static int ipc_bluetooth_state(int client, const struct mp_ipc_bluetooth_state *request) {
+    if (!request) return ipc_bad_payload(client);
+
+    char title[MP_ID3_TEXT_MAX];
+    char artist[MP_ID3_TEXT_MAX];
+    char passkey[MP_IPC_BLUETOOTH_PASSKEY_MAX];
+    size_t title_copy = sizeof(request->title) < sizeof(title) - 1
+        ? sizeof(request->title) : sizeof(title) - 1;
+    size_t artist_copy = sizeof(request->artist) < sizeof(artist) - 1
+        ? sizeof(request->artist) : sizeof(artist) - 1;
+    size_t passkey_copy = sizeof(request->pairing_passkey) < sizeof(passkey) - 1
+        ? sizeof(request->pairing_passkey) : sizeof(passkey) - 1;
+    memcpy(title, request->title, title_copy);
+    title[title_copy] = '\0';
+    memcpy(artist, request->artist, artist_copy);
+    artist[artist_copy] = '\0';
+    memcpy(passkey, request->pairing_passkey, passkey_copy);
+    passkey[passkey_copy] = '\0';
+
+    int pairing_active = request->pairing_passkey_active ? 1 : 0;
+    if (pairing_active) {
+        size_t len = strlen(passkey);
+        if (len != 6) pairing_active = 0;
+        for (size_t i = 0; pairing_active && i < len; i++)
+            if (!isdigit((unsigned char)passkey[i])) pairing_active = 0;
+    }
+    if (!pairing_active) passkey[0] = '\0';
+
+    int playing = request->playing ? 1 : 0;
+    int changed = 0;
+    pthread_mutex_lock(&g_state.lock);
+
+    if (playing != g_state.bluetooth_audio_playing ||
+        (playing && (strcmp(title, g_state.bluetooth_audio_title) != 0 ||
+                     strcmp(artist, g_state.bluetooth_audio_artist) != 0))) {
+        changed = 1;
+        if (playing)
+            g_state.bluetooth_audio_scroll_started_ms = monotonic_millis();
+    }
+    g_state.bluetooth_audio_playing = playing;
+    if (playing) {
+        safe_str(g_state.bluetooth_audio_title, sizeof(g_state.bluetooth_audio_title), title);
+        safe_str(g_state.bluetooth_audio_artist, sizeof(g_state.bluetooth_audio_artist), artist);
+    } else {
+        g_state.bluetooth_audio_title[0] = '\0';
+        g_state.bluetooth_audio_artist[0] = '\0';
+        g_state.bluetooth_audio_scroll_started_ms = 0;
+    }
+
+    if (pairing_active != g_state.bluetooth_pairing_passkey_active ||
+        strcmp(passkey, g_state.bluetooth_pairing_passkey) != 0) {
+        changed = 1;
+    }
+    g_state.bluetooth_pairing_passkey_active = pairing_active;
+    safe_str(g_state.bluetooth_pairing_passkey,
+             sizeof(g_state.bluetooth_pairing_passkey), passkey);
+
+    if (pairing_active) {
+        /* A numeric comparison request must always be visible on the OLED. */
+        g_state.display_mode = 0;
+    }
+    if (changed) g_state.display_dirty = 1;
+    pthread_mutex_unlock(&g_state.lock);
+
     return ipc_send_json(client, 200, "{\"ok\":true}");
 }
 
@@ -5379,6 +5568,9 @@ static int ipc_dispatch(int client, uint16_t opcode, const void *payload, size_t
         case MP_IPC_OP_CONFIG_IMPORT:
             EXPECT(struct mp_ipc_config_blob);
             return ipc_config_import(client, payload);
+        case MP_IPC_OP_BLUETOOTH_STATE:
+            EXPECT(struct mp_ipc_bluetooth_state);
+            return ipc_bluetooth_state(client, payload);
         default:
             return ipc_send_json(client, 404, "{\"ok\":false,\"error\":\"unknown IPC opcode\"}");
     }
@@ -5437,6 +5629,7 @@ static ssize_t ipc_expected_payload_size(uint16_t opcode) {
         case MP_IPC_OP_WEATHER_UPDATE: return sizeof(struct mp_ipc_weather_update);
         case MP_IPC_OP_ASSET_EVENT: return sizeof(struct mp_ipc_asset_event);
         case MP_IPC_OP_CONFIG_IMPORT: return sizeof(struct mp_ipc_config_blob);
+        case MP_IPC_OP_BLUETOOTH_STATE: return sizeof(struct mp_ipc_bluetooth_state);
         default: return -1;
     }
 }
@@ -5602,12 +5795,9 @@ int main(void) {
     init_alarm_defaults();
     load_config();
     int alarm_history_migrated = migrate_alarm_last_fired_dates();
-    int default_font_applied = apply_default_font_selection();
+    int default_font_applied = migrate_font_policy();
     if (default_font_applied)
-        app_log("display", "Applied automatic clock font selection");
-    pthread_mutex_lock(&g_state.lock);
-    g_state.font_policy_version = FONT_POLICY_VERSION;
-    pthread_mutex_unlock(&g_state.lock);
+        app_log("display", "Applied DejaVu Sans Mono default clock font");
     save_config(); /* normalize, persist migration, and discard retired keys */
     if (alarm_history_migrated)
         app_log("alarm", "Migrated the last alarm occurrence into persistent replay protection");

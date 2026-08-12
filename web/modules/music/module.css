@@ -9,4 +9,5 @@
 .music-module .music-job.failed .job-state, .music-module .job-error { color: #9e2f2f; }
 .music-module .music-job.processing .job-state { color: #245f92; }
 .music-module #music-selection-summary { margin-top: 6px; }
+.music-module .music-queue-actions { margin-bottom: var(--field-gap); }
 @media (max-width: 760px) { .music-module .music-settings-grid { grid-template-columns: 1fr; } }

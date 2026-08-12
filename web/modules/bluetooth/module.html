@@ -1,0 +1,32 @@
+<section class="panel bluetooth-module">
+    <div class="card">
+        <h2>Bluetooth speaker</h2>
+        <p class="page-intro">Pair a phone or tablet with <strong id="bt-local-name">this clock</strong> and play its audio through the clock speaker.</p>
+        <div class="status-summary">
+            <div class="status-tile"><strong>Adapter</strong><span id="bt-adapter">Loading...</span></div>
+            <div class="status-tile"><strong>Pairing</strong><span id="bt-pairing">Loading...</span></div>
+            <div class="status-tile"><strong>Connected</strong><span id="bt-connected">Loading...</span></div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Pair a device</h2>
+        <p class="small muted">Start pairing, then open Bluetooth settings on your phone or tablet and select <strong id="bt-pair-name">this clock</strong>. When numeric confirmation is requested, the same six-digit number is shown on the clock OLED so you can compare it with your phone. Discoverability automatically expires after 120 seconds.</p>
+        <div class="button-row">
+            <button class="btn ok" type="button" id="bt-pair-start">Start pairing</button>
+            <button class="btn alt" type="button" id="bt-pair-stop">Stop pairing</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Paired devices</h2>
+        <div id="bt-devices" class="cards compact-cards">
+            <div class="empty-state">Loading paired devices...</div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Audio behaviour</h2>
+        <p class="small no-margin">Bluetooth and clock audio share the MAX98357A output through a software mixer. This first Bluetooth release permits both sources to play at the same time so pairing and A2DP playback can be validated before source-priority rules are added.</p>
+    </div>
+</section>

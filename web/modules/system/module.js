@@ -35,10 +35,8 @@ export async function mount(ctx) {
         const button = ctx.$('#system-refresh');
         if (button) ctx.busy(button, true, 'Refreshing...');
         try {
-            const [discovery, status, capabilities, source, activity, diagnostics, auth] = await Promise.all([
-                ctx.json('/api/v1', {signal: ctx.signal}),
+            const [status, source, activity, diagnostics, auth] = await Promise.all([
                 ctx.json('/api/v1/status', {signal: ctx.signal}),
-                ctx.json('/api/v1/capabilities', {signal: ctx.signal}),
                 ctx.json('/api/v1/config/weather-source', {signal: ctx.signal}),
                 ctx.json('/api/v1/weather/activity', {signal: ctx.signal}),
                 ctx.json('/api/v1/diagnostics', {signal: ctx.signal}),
@@ -46,10 +44,9 @@ export async function mount(ctx) {
             ]);
 
             renderPassword(auth);
-            ctx.setText('#system-product', available(discovery.name || 'mk-clock-adult'));
-            ctx.setText('#system-version', available(discovery.product_version || status.app_version));
-            ctx.setText('#system-api-version', available(discovery.api_version || capabilities.api_version));
-            ctx.setText('#system-core-protocol', available(discovery.core_protocol));
+            ctx.setText('#system-product', 'mk-clock-adult');
+            ctx.setText('#system-version', available(status.app_version || diagnostics.product_version));
+            ctx.setText('#system-api-version', available(diagnostics.api_version));
             ctx.setText('#system-uptime', ctx.formatUptime(status.uptime_seconds));
             ctx.setText('#system-time', [status.time, status.date].filter(Boolean).join(' · ') || 'Unavailable');
 
@@ -89,9 +86,6 @@ export async function mount(ctx) {
             ctx.setText('#diag-music-size', directoryUsage(diagnostics.music_bytes, diagnostics.music_files));
             ctx.setText('#diag-fonts-size', directoryUsage(diagnostics.fonts_bytes, diagnostics.fonts_files));
             ctx.setText('#diag-config-size', directoryUsage(diagnostics.config_bytes, diagnostics.config_files));
-            ctx.setText('#diag-boot-device', available(diagnostics.boot_device));
-            ctx.setText('#diag-boot-filesystem', available(diagnostics.boot_filesystem));
-            ctx.setText('#diag-boot-mount', available(diagnostics.boot_mount_point));
             ctx.setText('#diag-sd-device', available(diagnostics.sd_device));
             ctx.setText('#diag-sd-type', available(diagnostics.sd_type));
             ctx.setText('#diag-sd-name', available(diagnostics.sd_name));
@@ -125,11 +119,14 @@ export async function mount(ctx) {
             ctx.setText('#system-last-alarm', Number(status.last_successful_alarm || 0) > 0
                 ? new Date(Number(status.last_successful_alarm) * 1000).toLocaleString()
                 : 'Never');
+            const bluetoothTrack = status.bluetooth_audio_title || '';
             ctx.setText('#system-audio-state', status.alarm_active
                 ? `Alarm playing at ${status.alarm_volume_percent || 0}%`
                 : status.audio_playing
                     ? `Playing ${[status.audio_title, status.audio_artist].filter(Boolean).join(' - ') || status.audio_file || 'music'}`
-                    : 'Stopped');
+                    : status.bluetooth_audio_playing
+                        ? `Playing ${bluetoothTrack || 'Bluetooth audio'}`
+                        : 'Stopped');
 
             const weather = status.weather || {};
             ctx.setText('#system-weather-state', Number(weather.observed_at) > 0
@@ -139,12 +136,6 @@ export async function mount(ctx) {
             const latest = activity.status || {};
             ctx.setText('#system-weather-result', available(diagnostics.weather_result || latest.result || (latest.ok ? 'success' : 'pending')));
             ctx.setText('#system-weather-message', available(diagnostics.weather_message || latest.message));
-
-            const list = Array.isArray(capabilities.capabilities) ? capabilities.capabilities : [];
-            const holder = ctx.$('#system-capabilities');
-            if (holder) holder.innerHTML = list.length
-                ? list.map(item => `<span class="system-capability">${ctx.html(item)}</span>`).join('')
-                : '<span class="muted">No capabilities reported.</span>';
         } catch (error) {
             setBadge('#system-api-state', false);
             ctx.notice(error.message || 'System information could not be loaded', 'warn', 3500);

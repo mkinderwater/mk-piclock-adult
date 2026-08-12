@@ -56,10 +56,13 @@ export async function mount(ctx) {
         ctx.setText('#status-name', status.clock_name);
         ctx.setText('#status-version', status.app_version);
         ctx.setText('#status-uptime', ctx.formatUptime(status.uptime_seconds));
-        const track = [status.audio_title, status.audio_artist].filter(Boolean).join(' - ') || status.audio_file;
+        const localTrack = [status.audio_title, status.audio_artist].filter(Boolean).join(' - ') || status.audio_file;
+        const bluetoothTrack = status.bluetooth_audio_title || '';
+        const track = status.audio_playing ? localTrack : bluetoothTrack;
+        const audioPlaying = Boolean(status.audio_playing || status.bluetooth_audio_playing);
         ctx.setText('#status-audio', status.alarm_active
             ? `Alarm playing at ${status.alarm_volume_percent || 0}%`
-            : (status.audio_playing ? `Playing ${track || 'music'}` : 'Audio stopped'));
+            : (audioPlaying ? `Playing ${track || 'music'}` : 'Audio stopped'));
         ctx.setText('#status-volume', status.alarm_active
             ? `Alarm ${status.alarm_volume_percent || 0}%`
             : `${status.global_volume || 0}%`);
@@ -77,7 +80,7 @@ export async function mount(ctx) {
         ctx.setText('#summary-clock', status.oled_ok ? `Working · ${status.time || ''}` : 'Screen unavailable');
         ctx.setText('#summary-sound', status.alarm_active
             ? `Alarm playing · ${status.alarm_volume_percent || 0}%`
-            : (status.audio_playing ? `Playing ${track || 'music'}` : 'Stopped'));
+            : (audioPlaying ? `Playing ${track || 'music'}` : 'Stopped'));
         ctx.setText('#summary-next-alarm', status.next_alarm_text || 'None scheduled');
         ctx.setText('#summary-bedtime', status.bedtime_enabled
             ? `${ctx.timeValue(status.bedtime_start_hour, status.bedtime_start_min)} to ${ctx.timeValue(status.bedtime_end_hour, status.bedtime_end_min)}`

@@ -54,14 +54,14 @@
 #include "weather_frames.h"
 #include "weather_version.h"
 #define API_NAME "mk-clock-adult-api"
-#define API_VERSION "1.46"
+#define API_VERSION "1.48"
 #define PRODUCT_VERSION MP_PRODUCT_VERSION
 #define BUILD_TIMESTAMP __DATE__ " " __TIME__
 #define DEFAULT_PUBLIC_BIND "0.0.0.0"
 #define DEFAULT_PUBLIC_PORT 8080
 #define CORE_SOCKET_PATH "/run/mk-piclock/core.sock"
+#define BLUETOOTH_CONTROL_SOCKET "/run/mk-clock-bluetooth/control.sock"
 #define WEB_DIR "/opt/mk-piclock/web"
-#define API_DOC_DIR "/opt/mk-piclock/api"
 #define WEB_PASSWORD_FILE "/opt/mk-piclock/config/web-password.txt"
 #define WEB_PASSWORD_TEMP "/opt/mk-piclock/config/.web-password.tmp"
 #define WEB_PASSWORD_MAX 64
@@ -73,6 +73,10 @@
 #define DISK_RESERVE_BYTES (64ULL * 1024ULL * 1024ULL)
 #define DEFAULT_MUSIC_QUOTA_BYTES (1024ULL * 1024ULL * 1024ULL)
 #define SOCKET_TIMEOUT_SEC 15
+#define HTTP_CONNECTION_TIMEOUT_SEC 40
+#define BLUETOOTH_STATUS_TIMEOUT_SEC 4
+#define BLUETOOTH_PAIRING_TIMEOUT_SEC 30
+#define BLUETOOTH_DEVICE_TIMEOUT_SEC 35
 #define MHD_THREAD_POOL_SIZE 2
 #define MHD_CONNECTION_LIMIT 12
 #define FORM_FIELDS_MAX 64
@@ -116,6 +120,9 @@ enum route_id {
     ROUTE_CONFIG_AUDIO,
     ROUTE_CONFIG_PERSONALIZATION,
     ROUTE_CONFIG_DISPLAY,
+    ROUTE_BLUETOOTH_STATUS,
+    ROUTE_BLUETOOTH_PAIRING,
+    ROUTE_BLUETOOTH_DEVICE,
     ROUTE_WEATHER_ACTIVITY_GET,
     ROUTE_WEATHER_FRAMES_GET,
     ROUTE_WEATHER_FRAMES_SET,
@@ -159,6 +166,9 @@ static const struct api_route g_routes[] = {
     {"POST", "/api/v1/config/audio",                    ROUTE_CONFIG_AUDIO},
     {"POST", "/api/v1/config/personalization",          ROUTE_CONFIG_PERSONALIZATION},
     {"POST", "/api/v1/config/display",                  ROUTE_CONFIG_DISPLAY},
+    {"GET",  "/api/v1/bluetooth",                       ROUTE_BLUETOOTH_STATUS},
+    {"POST", "/api/v1/bluetooth/pairing",               ROUTE_BLUETOOTH_PAIRING},
+    {"POST", "/api/v1/bluetooth/device",                ROUTE_BLUETOOTH_DEVICE},
     {"GET",  "/api/v1/weather/activity",              ROUTE_WEATHER_ACTIVITY_GET},
     {"GET",  "/api/v1/config/weather-frames",          ROUTE_WEATHER_FRAMES_GET},
     {"POST", "/api/v1/config/weather-frames",          ROUTE_WEATHER_FRAMES_SET},
@@ -1277,12 +1287,6 @@ static enum MHD_Result serve_static(struct MHD_Connection *connection, const cha
         enum MHD_Result result = queue_file(connection, full, "image/x-icon", 0, 0);
         return result == MHD_NO ? queue_json(connection, 404, "{\"ok\":false,\"error\":\"favicon not found\"}") : result;
     }
-    if (strcmp(path, "/api/v1/openapi.json") == 0) {
-        *handled = 1;
-        snprintf(full, sizeof(full), "%s/openapi-v1.json", API_DOC_DIR);
-        enum MHD_Result result = queue_file(connection, full, "application/json; charset=utf-8", 1, 0);
-        return result == MHD_NO ? queue_json(connection, 404, "{\"ok\":false,\"error\":\"OpenAPI file not found\"}") : result;
-    }
     if (strcmp(path, "/") == 0) {
         *handled = 1;
         snprintf(full, sizeof(full), "%s/index.html", WEB_DIR);
@@ -2198,6 +2202,92 @@ static int form_int(const struct request_context *context, const char *key, int 
     return parse_int_value(form_value(context, key), fallback);
 }
 
+static int valid_bluetooth_mac(const char *value) {
+    if (!value || strlen(value) != 17) return 0;
+    for (size_t i = 0; i < 17; i++) {
+        if ((i + 1) % 3 == 0) {
+            if (value[i] != ':') return 0;
+        } else if (!isxdigit((unsigned char)value[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int bluetooth_control_request(const char *command, char *response, size_t response_len,
+                                     int timeout_sec) {
+    if (!command || !*command || !response || response_len < 2 || timeout_sec < 1) return -1;
+    response[0] = '\0';
+
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+
+    struct timeval timeout = {.tv_sec = timeout_sec, .tv_usec = 0};
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    mp_safe_str(address.sun_path, sizeof(address.sun_path), BLUETOOTH_CONTROL_SOCKET);
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    char request[128];
+    int request_len = snprintf(request, sizeof(request), "%s\n", command);
+    if (request_len <= 0 || (size_t)request_len >= sizeof(request)) {
+        close(fd);
+        return -1;
+    }
+    size_t sent = 0;
+    while (sent < (size_t)request_len) {
+        ssize_t wrote = send(fd, request + sent, (size_t)request_len - sent, MSG_NOSIGNAL);
+        if (wrote <= 0) {
+            close(fd);
+            return -1;
+        }
+        sent += (size_t)wrote;
+    }
+
+    size_t used = 0;
+    while (used + 1 < response_len) {
+        ssize_t got = recv(fd, response + used, response_len - used - 1, 0);
+        if (got < 0) {
+            if (errno == EINTR) continue;
+            close(fd);
+            return -1;
+        }
+        if (got == 0) break;
+        used += (size_t)got;
+        if (memchr(response, '\n', used)) break;
+    }
+    close(fd);
+    if (used == 0) return -1;
+    response[used] = '\0';
+    char *newline = strchr(response, '\n');
+    if (newline) *newline = '\0';
+    return 0;
+}
+
+static enum MHD_Result serve_bluetooth_command_timeout(struct MHD_Connection *connection,
+                                                        const char *command, int error_status,
+                                                        int timeout_sec) {
+    char response[65536];
+    if (bluetooth_control_request(command, response, sizeof(response), timeout_sec) != 0)
+        return queue_json(connection, 503,
+            "{\"ok\":false,\"available\":false,\"error\":\"Bluetooth control service unavailable\"}");
+    int status = strstr(response, "\"ok\":false") ? error_status : 200;
+    return queue_json(connection, status, response);
+}
+
+static enum MHD_Result serve_bluetooth_command(struct MHD_Connection *connection,
+                                                const char *command, int error_status) {
+    return serve_bluetooth_command_timeout(connection, command, error_status,
+                                           BLUETOOTH_STATUS_TIMEOUT_SEC);
+}
+
 static uint64_t form_u64(const struct request_context *context, const char *key, uint64_t fallback) {
     const char *value = form_value(context, key);
     if (!value || !*value) return fallback;
@@ -2395,8 +2485,7 @@ static enum MHD_Result serve_fonts_list(struct MHD_Connection *connection) {
     mp_buffer_append(&body,
         "\",\"builtin_fonts\":["
         "{\"id\":0,\"name\":\"Seven Segment\"},{\"id\":1,\"name\":\"Seven Thin\"},"
-        "{\"id\":2,\"name\":\"Pixel\"},{\"id\":3,\"name\":\"Pixel Bold\"},"
-        "{\"id\":4,\"name\":\"Automatic font detection\"}],"
+        "{\"id\":2,\"name\":\"Pixel\"},{\"id\":3,\"name\":\"Pixel Bold\"}],"
         "\"system_fonts\":[");
     for (int i = 0; i < system_count && !body.failed; i++) {
         char display_name[256];
@@ -3249,6 +3338,34 @@ static enum MHD_Result dispatch_route(struct MHD_Connection *connection,
             }
             return call_core(connection, MP_IPC_OP_CONFIG_DISPLAY, &request, sizeof(request));
         }
+        case ROUTE_BLUETOOTH_STATUS:
+            return serve_bluetooth_command(connection, "status", 503);
+        case ROUTE_BLUETOOTH_PAIRING: {
+            int enabled = form_int(context, "enabled", -1);
+            if (enabled != 0 && enabled != 1)
+                return queue_json(connection, 400,
+                    "{\"ok\":false,\"error\":\"enabled must be 0 or 1\"}");
+            return serve_bluetooth_command_timeout(connection,
+                enabled ? "pairing on" : "pairing off", 503,
+                BLUETOOTH_PAIRING_TIMEOUT_SEC);
+        }
+        case ROUTE_BLUETOOTH_DEVICE: {
+            const char *action = form_value(context, "action");
+            const char *address = form_value(context, "address");
+            if (!action || (strcmp(action, "connect") != 0 &&
+                            strcmp(action, "disconnect") != 0 &&
+                            strcmp(action, "forget") != 0 &&
+                            strcmp(action, "trust") != 0))
+                return queue_json(connection, 400,
+                    "{\"ok\":false,\"error\":\"invalid Bluetooth action\"}");
+            if (!valid_bluetooth_mac(address))
+                return queue_json(connection, 400,
+                    "{\"ok\":false,\"error\":\"invalid Bluetooth address\"}");
+            char command[96];
+            snprintf(command, sizeof(command), "device %.10s %.17s", action, address);
+            return serve_bluetooth_command_timeout(connection, command, 503,
+                                                     BLUETOOTH_DEVICE_TIMEOUT_SEC);
+        }
         case ROUTE_WEATHER_ACTIVITY_GET:
             return weather_activity_get(connection);
         case ROUTE_WEATHER_FRAMES_GET:
@@ -3420,39 +3537,6 @@ static enum MHD_Result dispatch_route(struct MHD_Connection *connection,
     return queue_json(connection, 404, "{\"ok\":false,\"error\":\"route not found\"}");
 }
 
-static enum MHD_Result serve_local_api(struct MHD_Connection *connection, const char *method,
-                                       const char *path, int *handled) {
-    *handled = 0;
-    if (strcmp(method, MHD_HTTP_METHOD_GET) != 0) return MHD_YES;
-    if (strcmp(path, "/api/v1") == 0 || strcmp(path, "/api/v1/") == 0) {
-        *handled = 1;
-        char discovery[512];
-        snprintf(discovery, sizeof(discovery),
-            "{\"name\":\"mk-clock-adult API\",\"api_version\":\"" API_VERSION "\","
-            "\"product_version\":\"%s\",\"http_engine\":\"libmicrohttpd\","
-            "\"core_protocol\":\"binary-ipc-v%u\","
-            "\"status\":\"/api/v1/status\",\"auth\":\"/api/v1/auth/status\","
-            "\"capabilities\":\"/api/v1/capabilities\","
-            "\"diagnostics\":\"/api/v1/diagnostics\",\"weather\":\"/api/v1/weather\","
-            "\"openapi\":\"/api/v1/openapi.json\"}",
-            PRODUCT_VERSION, (unsigned int)MP_IPC_VERSION);
-        return queue_json(connection, 200, discovery);
-    }
-    if (strcmp(path, "/api/v1/capabilities") == 0) {
-        *handled = 1;
-        return queue_json(connection, 200,
-            "{\"ok\":true,\"api_version\":\"" API_VERSION "\",\"capabilities\":["
-            "\"status.read\",\"diagnostics.network.read\",\"display.control\",\"display.preview\",\"display.brightness.preview\",\"weather.activity.read\",\"weather.source.read\",\"weather.source.write\",\"weather.update\","
-            "\"alarm.configure\",\"audio.configure\","
-            "\"audio.metadata\",\"audio.optimize\",\"audio.processing-status\",\"audio.queue-clear\","
-            "\"touch.input\","
-            "\"assets.read\",\"assets.upload\",\"assets.delete\",\"display.color\","
-            "\"network.open-controls\",\"logs.read\",\"backup.download\",\"backup.restore\","
-            "\"auth.optional-plaintext\"]}");
-    }
-    return MHD_YES;
-}
-
 static enum MHD_Result request_handler(void *cls, struct MHD_Connection *connection,
                                        const char *url, const char *method, const char *version,
                                        const char *upload_data, size_t *upload_data_size,
@@ -3508,8 +3592,7 @@ static enum MHD_Result request_handler(void *cls, struct MHD_Connection *connect
                           "{\"ok\":false,\"error\":\"request body could not be parsed\"}");
     if (strcmp(method, MHD_HTTP_METHOD_OPTIONS) == 0) return queue_options(connection);
 
-    int public_api = strcmp(url, "/api/v1") == 0 || strcmp(url, "/api/v1/") == 0 ||
-                     strcmp(url, "/api/v1/auth/status") == 0 ||
+    int public_api = strcmp(url, "/api/v1/auth/status") == 0 ||
                      strcmp(url, "/api/v1/auth/login") == 0;
     if (!public_api && strncmp(url, "/api/v1", 7) == 0) {
         char password[WEB_PASSWORD_MAX + 1];
@@ -3520,10 +3603,8 @@ static enum MHD_Result request_handler(void *cls, struct MHD_Connection *connect
     }
 
     int handled = 0;
-    enum MHD_Result result = serve_local_api(connection, method, url, &handled);
-    if (handled) return result;
     if (context->route) return dispatch_route(connection, context);
-    result = serve_static(connection, method, url, &handled);
+    enum MHD_Result result = serve_static(connection, method, url, &handled);
     if (handled) return result;
     return queue_json(connection, 404, "{\"ok\":false,\"error\":\"route not found\"}");
 }
@@ -3582,7 +3663,7 @@ int main(void) {
         MHD_OPTION_SOCK_ADDR, (struct sockaddr *)&bind_address,
         MHD_OPTION_THREAD_POOL_SIZE, (unsigned int)MHD_THREAD_POOL_SIZE,
         MHD_OPTION_CONNECTION_LIMIT, (unsigned int)MHD_CONNECTION_LIMIT,
-        MHD_OPTION_CONNECTION_TIMEOUT, (unsigned int)SOCKET_TIMEOUT_SEC,
+        MHD_OPTION_CONNECTION_TIMEOUT, (unsigned int)HTTP_CONNECTION_TIMEOUT_SEC,
         MHD_OPTION_NOTIFY_COMPLETED, request_completed, NULL,
         MHD_OPTION_END);
     if (!daemon) {

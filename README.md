@@ -1,40 +1,13 @@
-# mk-clock-adult 2.1A BPI-M2 Zero R1
+# mk-clock-adult 2.3.22
 
-Native Banana Pi M2 Zero alarm clock software for the SSD1322 OLED, TTP223B touch input, MAX98357A I2S audio, ECCC Weather, and an AHT10 inside temperature and humidity sensor.
+Bluetooth dual-mono output retains about 1.51 dB of peak headroom (0.42L + 0.42R). Bluetooth media display is intentionally Title-only for stable iPhone behavior. busctl octal-escaped UTF-8 is decoded before IPC, and common accented Latin characters are folded to display-safe ASCII only at the OLED presentation layer (for example `Noël` displays as `Noel`).
 
-This is now the maintained adult-clock platform. The Raspberry Pi adult branch ends at 1.2.64 and receives no further updates.
+Banana Pi M2 Zero adult clock application for the `bpi-zero-clock 1.0.3` hardware image.
 
-Validated OS image: `Armbian_community_26.8.0-trunk.413_Bananapim2zero_trixie_current_6.18.38_minimal`.
+This release retains the working 2.3.16 Bluetooth pairing/audio behavior and removes the unused Boot partition, Boot filesystem and Boot mount rows from the System → Storage GUI. The lower-level diagnostic fields remain available internally for support use.
 
-For pre-boot Windows customization, the ext4 filesystem is prepared with Linux `e2fsprogs` (`tune2fs`/`e2fsck`) and then edited with SharpExt4Explorer. `install.md` includes hidden and broadcast SSID examples for `/root/.not_logged_in_yet`.
+Bluetooth pairing/control, pairing-only rapid polling, dual-mono Bluetooth playback, conditional `sinc-fastest` resampling, and local MP3/alarm playback are unchanged from 2.3.16.
 
-## BPI port
+## Weather panel form behavior
 
-- Board power is fed directly through CON2: +5 V on physical pin 4 and GND on physical pin 6.
-- Allwinner GPIO mapping through `/dev/gpiochip0`.
-- SSD1322 on `/dev/spidev0.0`.
-- AHT10 on `/dev/i2c-0` using header pins 3 and 5.
-- MAX98357A card discovery with optional `MK_PICLOCK_ALSA_DEVICE` override.
-- Forced stereo MP3 decoding for correct H2+/H3 I2S framing.
-- Custom MAX98357A Device Tree overlay with 256x master clock and codec-controlled PA1 shutdown.
-- No MAX98357A startup/stop click observed on this platform; see `pinouts.md` for why.
-- BPI-only installer, permissions, wiring, diagnostics, and documentation.
-- Removed the unused GUI `$$` helper.
-
-All 1.2.64 Weather, alarm, web password, backup, font, OLED partial-update, and AHT10 functions are retained.
-
-## Bill of materials
-
-See `BOM.md` for the reference hardware purchase list, exact supplier links, component roles, and the design logic behind each selected part.
-
-## Versions
-
-```text
-Product:     mk-clock-adult-2.1A-bpi-m2-zero-r1
-HTTP API:    1.46
-Private IPC: 27
-Weather:     Native C 2.0.14
-Platform:    BPI-M2 Zero
-```
-
-See `install.md` and `pinouts.md`.
+Weather panel controls are mode-aware. Only configuration fields used by the selected source are shown; unrelated Hours ahead / Specific time fields are hidden.

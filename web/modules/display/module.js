@@ -138,9 +138,7 @@ export async function mount(ctx) {
             return;
         }
         if (choice.kind === 'builtin') {
-            const builtinNote = choice.id === 4
-                ? 'Select this to detect the preferred font automatically.'
-                : 'Built-in OLED font preview is approximated in the browser.';
+            const builtinNote = 'Built-in OLED font preview is approximated in the browser.';
             ctx.$('#selected-font-preview').innerHTML = `<div class="font-preview-card"><div class="font-name">${ctx.html(choice.name)}</div><div class="font-sample-box mono"><div>ABCDEFGHIJKLMNOPQRSTUVWXYZ</div><div>1234567890</div></div><div class="small muted">${builtinNote}</div></div>`;
             return;
         }
@@ -161,7 +159,7 @@ export async function mount(ctx) {
         ).map(font => ({
             ...font,
             name: font.key === fonts.default_system_key
-                ? `${font.name || font.file} (Linux default)`
+                ? `${font.name || font.file} (Default)`
                 : (font.name || font.file)
         }));
         const uploadedFonts = [...(fonts.uploaded_fonts || [])].sort((a, b) =>

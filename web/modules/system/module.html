@@ -16,7 +16,7 @@
                 <button id="remove-password" class="btn alt" type="button">Remove password</button>
             </div>
         </form>
-        <p class="small no-margin">No password means no prompt. The password is stored as plain text on this clock.</p>
+        <p class="small no-margin action-followup">No password means no prompt. The password is stored as plain text on this clock.</p>
     </div>
 
     <div class="card">
@@ -31,10 +31,10 @@
             <tr><th>Product</th><td id="system-product">Loading...</td></tr>
             <tr><th>Clock version</th><td id="system-version">Loading...</td></tr>
             <tr><th>API version</th><td id="system-api-version">Loading...</td></tr>
-            <tr><th>Core protocol</th><td id="system-core-protocol">Loading...</td></tr>
             <tr><th>Uptime</th><td id="system-uptime">Loading...</td></tr>
             <tr><th>Clock time</th><td id="system-time">Loading...</td></tr>
         </tbody></table>
+        <div class="button-row"><a class="btn alt" href="/api/v1/diagnostics/report">Download diagnostic report</a></div>
     </div>
 
     <div class="card">
@@ -97,9 +97,6 @@
             <tr><th>Music</th><td id="diag-music-size">Loading...</td></tr>
             <tr><th>Fonts</th><td id="diag-fonts-size">Loading...</td></tr>
             <tr><th>Configuration</th><td id="diag-config-size">Loading...</td></tr>
-            <tr><th>Boot partition</th><td id="diag-boot-device">Loading...</td></tr>
-            <tr><th>Boot filesystem</th><td id="diag-boot-filesystem">Loading...</td></tr>
-            <tr><th>Boot mount</th><td id="diag-boot-mount">Loading...</td></tr>
         </tbody></table>
     </div>
 
@@ -163,19 +160,7 @@
             <input id="backup-file" type="file" name="backup" accept=".zip,application/zip" required>
             <button class="btn alt" type="submit">Restore backup</button>
         </form>
-        <p class="small no-margin">Restore replaces settings, alarms, fonts, and Weather configuration. Music, logs, caches, and sensor state remain unchanged.</p>
+        <p class="small no-margin action-followup">Restore replaces settings, alarms, fonts, and Weather configuration. Music, logs, caches, and sensor state remain unchanged.</p>
     </div>
 
-    <div class="card">
-        <h2>API</h2>
-        <p class="page-intro">The OpenAPI document lists every route included in this adult build.</p>
-        <div class="button-row">
-            <a class="btn" href="/api/v1/diagnostics/report">Download diagnostic report</a>
-            <a class="btn alt" href="/api/v1/openapi.json" target="_blank" rel="noopener">Open API specification</a>
-        </div>
-        <details class="advanced-settings">
-            <summary>Capabilities</summary>
-            <div id="system-capabilities" class="system-capabilities small">Loading...</div>
-        </details>
-    </div>
 </section>

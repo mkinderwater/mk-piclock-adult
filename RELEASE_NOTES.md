@@ -1,40 +1,57 @@
-# mk-clock-adult 2.1A BPI-M2 Zero R1 Release Notes
+## 2.3.22
 
-## Platform transition
+- Simplifies Bluetooth media display to AVRCP Title only; separate Artist metadata is ignored.
+- Decodes busctl octal-escaped UTF-8 bytes before the existing UTF-8-safe IPC path (for example `No\303\253l` becomes internal UTF-8 `Noël`).
+- OLED metadata cleanup folds common accented Latin characters to display-safe ASCII, so `Noël` renders as `Noel` rather than an unsupported glyph or escaped byte sequence.
+- Keeps the 2.3.20/2.3.21 bounded metadata refresh behavior, retaining the last non-empty Title across partial iPhone Track updates.
+- Bluetooth audio level, pairing/connect behavior, resampling, weather GUI, local MP3/alarm audio and hardware behavior are unchanged from 2.3.21.
 
-The adult clock is now maintained only for the Banana Pi M2 Zero. Raspberry Pi adult development ends at 1.2.64.
+## 2.3.22
 
-Reference OS image: `Armbian_community_26.8.0-trunk.413_Bananapim2zero_trixie_current_6.18.38_minimal`.
+- Retunes Bluetooth speaker protection after 2.3.20 proved too quiet.
+- Dual-mono Bluetooth coefficients increase from `0.35 + 0.35` to `0.42 + 0.42`, restoring output level while retaining approximately 1.51 dB of peak headroom versus 2.3.19.
+- Keeps the 2.3.20 bounded metadata refresh burst and adds per-device partial Track merging: non-empty Title and Artist values are retained independently so iPhone AVRCP updates cannot erase the other field while it arrives separately.
+- Bluetooth metadata continues through UTF-8-safe IPC truncation and the same OLED `oled_filter_metadata_text()` cleanup/formatter/marquee path used by local MP3 metadata.
+- Bluetooth pairing/connect behavior, conditional `sinc-fastest` resampling, local MP3/alarm playback, weather GUI, and system GUI are unchanged.
 
-- Documented the image-preparation workflow: Linux `e2fsprogs` prepares/validates ext4 compatibility and SharpExt4Explorer provides Windows read/write editing.
-- Added `/root/.not_logged_in_yet` examples for both hidden and broadcast Wi-Fi SSIDs.
-- Added `BOM.md` with the purchased hardware, supplier links, component roles, and selection rationale, including the selected external power cable and self-adhesive rubber feet, plus a short list of required build items not represented by the supplied purchase links.
+## 2.3.20
 
-## Ported hardware
+- Keeps 2.3.19 Bluetooth pairing/connect behavior unchanged.
+- Adds ~3.1 dB fixed Bluetooth peak headroom in the dual-mono route to reduce speaker rattle on loud transients with effectively zero added CPU cost.
+- Local MP3/alarm audio is unchanged.
+- Adds a bounded 5-second, 0.5-second-interval Bluetooth media refresh burst when A2DP becomes active or AVRCP track metadata changes, improving delayed/inconsistent iPhone title/artist pickup without continuous polling.
 
-- Board power: regulated +5 V to CON2 physical pin 4, GND to physical pin 6.
-- SSD1322 SPI: `/dev/spidev0.0`.
-- OLED D/C: PA2, line 2, physical pin 22.
-- OLED reset: PA0, line 0, physical pin 13.
-- Touch: PA21, line 21, physical pin 38.
-- AHT10: TWI0 on physical pins 3 and 5, exposed as `/dev/i2c-0`.
-- MAX98357A: PA18/PA19/PA20 I2S with PA1 codec shutdown.
-- MAX98357A ALSA discovery and mono-to-stereo decoding are retained from the proven BPI kid-clock branch.
+## 2.3.19
 
-## Retained application functions
+- Fixes a false **Bluetooth control service unavailable** GUI error after a successful device Connect action.
+- Bluetooth status reads retain the short 4-second control-service health timeout.
+- Pairing/device actions receive action-appropriate control-socket timeouts (30s pairing / 35s device actions); HTTP request inactivity allowance is 40s without changing core IPC timeouts.
+- Successful Bluetooth device actions now queue the full inventory/media snapshot through the existing event-driven refresh worker instead of blocking the GUI request on a second expensive scan.
+- Bluetooth pairing/control semantics, metadata/title/artist display, pairing-only rapid polling, dual-mono audio and conditional `sinc-fastest` resampling are otherwise unchanged from 2.3.18.
 
-All adult 1.2.64 Weather, alarm, password, backup, restore, font, music, diagnostics, and OLED update behaviour is retained. The unused shared `$$` query helper was removed without changing GUI behaviour.
+# mk-clock-adult 2.3.19 release notes
 
-## Bug fix ported from mk-piclock kid clock
+## Weather panel GUI clarity
 
-- `ipc_config_alarm()` now marks the OLED display dirty when an alarm is saved, matching the kid clock's v1.9.15 fix. Previously, changing an alarm's time or weekdays, or disabling the last enabled alarm, left the `ALARM` footer stale until an unrelated redraw or the next minute tick.
+- Weather panel controls are now mode-aware: irrelevant inputs are hidden instead of merely disabled.
+- Inside sensor, Outside now, and Today low / high show no extra configuration fields.
+- Hours ahead shows only the 1–48 hour offset input.
+- Specific time shows only the forecast-hour input.
+- Each panel shows a short explanation for the selected source.
+- Weather data semantics and backend configuration are unchanged.
 
-## Versions
+## System GUI cleanup
 
-```text
-Product:     mk-clock-adult-2.1A-bpi-m2-zero-r1
-HTTP API:    1.46
-Private IPC: 27
-Weather:     2.0.14
-Platform:    BPI-M2 Zero
-```
+- Built directly from mk-clock-adult 2.3.16.
+- Removed the following Storage rows from the System GUI because they are not useful on the production Banana Pi image and consistently report unavailable:
+  - Boot partition
+  - Boot filesystem
+  - Boot mount
+- Removed the corresponding browser-side diagnostics bindings.
+- The lower-level diagnostics collector/API is retained for support/CLI use; only the GUI presentation is removed.
+- Bluetooth pairing/control, pairing-only rapid polling, Bluetooth dual-mono audio path, conditional `sinc-fastest` resampling, local MP3/alarm playback, kernel, Device Tree and MAX98357A behavior are unchanged.
+
+## Baseline
+
+- Requires `bpi-zero-clock 1.0.3` / `bpi-m2-zero-r1`.
+- Retains the lean 2.3.10+ APT dependency list.

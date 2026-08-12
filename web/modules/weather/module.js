@@ -29,7 +29,10 @@ export async function mount(ctx) {
     const warningChimeStatus = ctx.$('#weather-warning-chime-status');
     const frameControls = [1, 2, 3].map(index => ({
         mode: ctx.$(`#weather-frame-${index}-mode`),
+        modeHelp: ctx.$(`#weather-frame-${index}-mode-help`),
+        offsetGroup: ctx.$(`#weather-frame-${index}-offset-group`),
         offset: ctx.$(`#weather-frame-${index}-offset`),
+        timeGroup: ctx.$(`#weather-frame-${index}-time-group`),
         time: ctx.$(`#weather-frame-${index}-time`)
     }));
     let savedUrl = '';
@@ -83,8 +86,21 @@ export async function mount(ctx) {
     const updateFrameControls = index => {
         const controls = frameControls[index];
         const mode = controls.mode.value;
-        controls.offset.disabled = mode !== 'offset' || framesSave.disabled;
-        controls.time.disabled = mode !== 'time' || framesSave.disabled;
+        const showOffset = mode === 'offset';
+        const showTime = mode === 'time';
+        const helpText = {
+            room: 'Shows the current temperature and humidity from the local AHT10 sensor.',
+            outside: 'Shows the current ECCC outdoor conditions. No additional setting is required.',
+            today: 'Shows today’s forecast low, high and precipitation. No additional setting is required.',
+            offset: 'Choose how many hours ahead to display, from 1 through 48 hours.',
+            time: 'Choose the next occurrence of a specific forecast hour.'
+        };
+
+        controls.offsetGroup.hidden = !showOffset;
+        controls.timeGroup.hidden = !showTime;
+        controls.offset.disabled = !showOffset || framesSave.disabled;
+        controls.time.disabled = !showTime || framesSave.disabled;
+        controls.modeHelp.textContent = helpText[mode] || '';
     };
 
     const setFramesBusy = busy => {

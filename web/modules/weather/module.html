@@ -1,6 +1,6 @@
 <section class="panel weather-source-module">
     <div class="card">
-        <div class="card-heading-row">
+        <div class="card-title-row">
             <div>
                 <h2>Inside Sensor</h2>
                 <p class="page-intro">Any panel configured as INSIDE uses the local AHT10 temperature and humidity sensor. INSIDE is independent from the ECCC weather source.</p>
@@ -15,11 +15,11 @@
                 <tr><th>Last reading</th><td id="room-sensor-measured">Loading...</td></tr>
             </tbody>
         </table>
-        <p id="room-sensor-error" class="small no-margin" role="status" aria-live="polite"></p>
+        <p id="room-sensor-error" class="small no-margin action-followup" role="status" aria-live="polite"></p>
     </div>
 
     <div class="card">
-        <div class="card-heading-row">
+        <div class="card-title-row">
             <div>
                 <h2>Weather Source</h2>
                 <p class="page-intro">Change the official ECCC GeoMet city used by the weather dashboard.</p>
@@ -49,11 +49,11 @@
             </div>
         </form>
 
-        <p id="weather-source-status" class="small no-margin" role="status" aria-live="polite">Loading.</p>
+        <p id="weather-source-status" class="small no-margin action-followup" role="status" aria-live="polite">Loading.</p>
     </div>
 
     <div class="card">
-        <div class="card-heading-row">
+        <div class="card-title-row">
             <div>
                 <h2>Weather Panels</h2>
                 <p class="page-intro">Choose the source for each of the three OLED weather panels. INSIDE uses the local AHT10 sensor, OUTSIDE uses current ECCC conditions, Today low / high shows today’s forecast extremes, Hours ahead uses a relative forecast, and Specific time uses the next occurrence of a selected forecast hour.</p>
@@ -72,10 +72,15 @@
                         <option value="offset">Hours ahead</option>
                         <option value="time">Specific time</option>
                     </select>
-                    <label for="weather-frame-1-offset">Hours ahead</label>
-                    <input id="weather-frame-1-offset" name="slot1_offset_hours" type="number" min="1" max="48" step="1" value="1">
-                    <label for="weather-frame-1-time">Specific time</label>
-                    <input id="weather-frame-1-time" name="slot1_time" type="time" step="3600" value="07:00">
+                    <p id="weather-frame-1-mode-help" class="small weather-frame-mode-help"></p>
+                    <div id="weather-frame-1-offset-group" class="weather-frame-option" hidden>
+                        <label for="weather-frame-1-offset">Hours ahead</label>
+                        <input id="weather-frame-1-offset" name="slot1_offset_hours" type="number" min="1" max="48" step="1" value="1">
+                    </div>
+                    <div id="weather-frame-1-time-group" class="weather-frame-option" hidden>
+                        <label for="weather-frame-1-time">Specific time</label>
+                        <input id="weather-frame-1-time" name="slot1_time" type="time" step="3600" value="07:00">
+                    </div>
                 </fieldset>
 
                 <fieldset>
@@ -88,10 +93,15 @@
                         <option value="offset">Hours ahead</option>
                         <option value="time">Specific time</option>
                     </select>
-                    <label for="weather-frame-2-offset">Hours ahead</label>
-                    <input id="weather-frame-2-offset" name="slot2_offset_hours" type="number" min="1" max="48" step="1" value="3">
-                    <label for="weather-frame-2-time">Specific time</label>
-                    <input id="weather-frame-2-time" name="slot2_time" type="time" step="3600" value="12:00">
+                    <p id="weather-frame-2-mode-help" class="small weather-frame-mode-help"></p>
+                    <div id="weather-frame-2-offset-group" class="weather-frame-option" hidden>
+                        <label for="weather-frame-2-offset">Hours ahead</label>
+                        <input id="weather-frame-2-offset" name="slot2_offset_hours" type="number" min="1" max="48" step="1" value="3">
+                    </div>
+                    <div id="weather-frame-2-time-group" class="weather-frame-option" hidden>
+                        <label for="weather-frame-2-time">Specific time</label>
+                        <input id="weather-frame-2-time" name="slot2_time" type="time" step="3600" value="12:00">
+                    </div>
                 </fieldset>
 
                 <fieldset>
@@ -104,10 +114,15 @@
                         <option value="offset">Hours ahead</option>
                         <option value="time">Specific time</option>
                     </select>
-                    <label for="weather-frame-3-offset">Hours ahead</label>
-                    <input id="weather-frame-3-offset" name="slot3_offset_hours" type="number" min="1" max="48" step="1" value="6">
-                    <label for="weather-frame-3-time">Specific time</label>
-                    <input id="weather-frame-3-time" name="slot3_time" type="time" step="3600" value="18:00">
+                    <p id="weather-frame-3-mode-help" class="small weather-frame-mode-help"></p>
+                    <div id="weather-frame-3-offset-group" class="weather-frame-option" hidden>
+                        <label for="weather-frame-3-offset">Hours ahead</label>
+                        <input id="weather-frame-3-offset" name="slot3_offset_hours" type="number" min="1" max="48" step="1" value="6">
+                    </div>
+                    <div id="weather-frame-3-time-group" class="weather-frame-option" hidden>
+                        <label for="weather-frame-3-time">Specific time</label>
+                        <input id="weather-frame-3-time" name="slot3_time" type="time" step="3600" value="18:00">
+                    </div>
                 </fieldset>
             </div>
 
@@ -117,11 +132,11 @@
                 <button class="btn alt" id="weather-frames-defaults" type="button">Use INSIDE, +3h, +6h</button>
             </div>
         </form>
-        <p id="weather-frames-status" class="small no-margin" role="status" aria-live="polite">Loading.</p>
+        <p id="weather-frames-status" class="small no-margin action-followup" role="status" aria-live="polite">Loading.</p>
     </div>
 
     <div class="card">
-        <div class="card-heading-row">
+        <div class="card-title-row">
             <div>
                 <h2>Weather Warning Chime</h2>
                 <p class="page-intro">Play the built-in message chime when a new active ECCC warning type appears. Repeated refreshes of the same warning do not chime again.</p>
@@ -150,16 +165,16 @@
                 <button class="btn" id="weather-warning-chime-save" type="submit">Save Warning Chime</button>
             </div>
         </form>
-        <p id="weather-warning-chime-status" class="small no-margin" role="status" aria-live="polite">Loading.</p>
+        <p id="weather-warning-chime-status" class="small no-margin action-followup" role="status" aria-live="polite">Loading.</p>
     </div>
 
     <div class="card">
-        <div class="card-heading-row">
+        <div class="card-title-row">
             <div>
                 <h2>Weather Activity</h2>
                 <p class="page-intro">Every GeoMet refresh appears here, including ECCC icon codes, pixel-art sprites, and unknown-code substitutions.</p>
             </div>
-            <button class="btn alt" id="weather-activity-refresh" type="button">Refresh</button>
+            <button class="btn alt small-btn" id="weather-activity-refresh" type="button">Refresh</button>
         </div>
 
         <p id="weather-activity-summary" class="small" role="status" aria-live="polite">Loading weather activity.</p>

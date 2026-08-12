@@ -12,6 +12,7 @@
         <h2>Volume</h2>
         <form method="POST" action="/api/v1/config/audio" data-busy-text="Saving sound settings..." data-success-text="Sound settings saved" data-error-text="Sound settings could not be saved">
             <label for="global-volume">Normal volume <output id="global-volume-value" class="inline-output" for="global-volume">80%</output></label>
+            <p class="small muted">Saving the volume also updates a normal song that is already playing.</p>
             <input id="global-volume" type="range" name="global_volume" min="0" max="100" step="1" value="80">
             <button class="btn" type="submit">Save volume</button>
         </form>
@@ -63,7 +64,7 @@
     <div class="card hidden" id="music-processing-card">
         <h2>Preparing music</h2>
         <p class="small">New uploads are blocked until every queued song is ready. Clear queue removes waiting files, but does not stop a song already processing.</p>
-        <div class="button-row">
+        <div class="button-row music-queue-actions">
             <button class="btn danger small-btn" type="button" id="clear-music-queue">Clear queue</button>
         </div>
         <div id="music-jobs" class="cards compact-cards"></div>

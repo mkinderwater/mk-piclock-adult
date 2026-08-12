@@ -2,11 +2,11 @@
 #define MK_CLOCK_ADULT_HARDWARE_PROFILE_H
 
 /*
- * mk-clock-adult hardware profile for the Banana Pi M2 Zero on Armbian.
+ * mk-clock-adult hardware profile for the Banana Pi M2 Zero on WiFi Builder Debian.
  * gpiochip0 line offsets use Allwinner port numbering.
  */
 #define MP_PLATFORM_PROFILE "BPI-M2 Zero"
-#define MP_PRODUCT_VERSION "mk-clock-adult-2.1A-bpi-m2-zero-r1"
+#define MP_PRODUCT_VERSION "mk-clock-adult-2.3.22-bpi-m2-zero-r1"
 
 #define MP_OLED_SPI_DEV "/dev/spidev0.0"
 #define MP_GPIO_CHIP "/dev/gpiochip0"

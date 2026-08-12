@@ -202,6 +202,8 @@ label output { float: right; color: var(--main); font-size: 14px; font-weight: 9
 
 .button-grid, .field-row, .primary-actions { display: grid; gap: var(--field-gap); }
 .button-row { display: flex; flex-wrap: wrap; gap: var(--field-gap); margin-top: 10px; }
+.action-followup { margin-top: var(--field-gap) !important; }
+.action-prelude { margin-bottom: var(--field-gap) !important; }
 .button-row .btn { width: auto; }
 .primary-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
@@ -375,17 +377,24 @@ details.card > summary::marker,
 .media-library-facts span { border-color: #bfd0e0; background: #edf4fa; color: #284f75; }
 .media-library-file { margin-top: 7px; overflow-wrap: anywhere; }
 
-/* System module */
-.system-capabilities { display: flex; flex-wrap: wrap; gap: 6px; }
-.system-capability {
-    padding: 4px 7px;
+/* Weather module */
+.weather-source-module fieldset {
+    min-width: 0;
+    margin: 0;
+    padding: 12px;
     border: 1px solid var(--line);
-    border-radius: 999px;
+    border-radius: 8px;
     background: var(--panel-soft);
-    color: #41536a;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    overflow-wrap: anywhere;
 }
+.weather-source-module legend {
+    padding: 0 6px;
+    color: #35465a;
+    font-size: 13px;
+    font-weight: 800;
+}
+
+/* System module */
+
 
 @media (min-width: 620px) {
     .button-grid, .field-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }

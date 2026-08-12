@@ -1,11 +1,15 @@
-import {audioTrackFacts, formatAudioBytes} from '/assets/js/audio-library.js?v=mk-clock-adult-2.1A-bpi-m2-zero-r1';
+import {audioTrackFacts, formatAudioBytes} from '/assets/js/audio-library.js?v=mk-clock-adult-2.3.22-bpi-m2-zero-r1';
 
 export async function mount(ctx) {
     const renderStatus = status => {
         if (!status) return;
-        ctx.setText('#music-status', status.audio_playing ? 'Playing' : 'None');
-        const metadata = [status.audio_title, status.audio_artist].filter(Boolean).join(' - ');
-        ctx.setText('#music-current', metadata || status.audio_file || 'None');
+        const localMetadata = [status.audio_title, status.audio_artist].filter(Boolean).join(' - ');
+        const bluetoothMetadata = [status.bluetooth_audio_title, status.bluetooth_audio_artist].filter(Boolean).join(' - ');
+        const playing = Boolean(status.audio_playing || status.bluetooth_audio_playing);
+        ctx.setText('#music-status', playing ? 'Playing' : 'None');
+        ctx.setText('#music-current', status.audio_playing
+            ? (localMetadata || status.audio_file || 'Music')
+            : (bluetoothMetadata || (status.bluetooth_audio_playing ? 'Bluetooth audio' : 'None')));
         ctx.setValue('#global-volume', status.global_volume ?? 80);
         ctx.setText('#global-volume-value', `${status.global_volume ?? 80}%`);
     };

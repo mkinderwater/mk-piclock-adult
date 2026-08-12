@@ -11,7 +11,16 @@ const authInput = document.querySelector('#auth-password');
 const authError = document.querySelector('#auth-error');
 const authSubmit = document.querySelector('#auth-submit');
 
-let modules = [];
+const modules = Object.freeze([
+    {id: 'dashboard', name: 'Home', group: 'Everyday', enabled: true, default: true, order: 10},
+    {id: 'alarms', name: 'Alarms', group: 'Everyday', enabled: true, order: 20},
+    {id: 'music', name: 'Music', group: 'Everyday', enabled: true, order: 30},
+    {id: 'bluetooth', name: 'Bluetooth', group: 'Everyday', enabled: true, order: 35, css: false},
+    {id: 'weather', name: 'Weather', group: 'Settings', enabled: true, order: 40, css: false},
+    {id: 'display', name: 'Display', group: 'Settings', enabled: true, order: 50},
+    {id: 'system', name: 'System', group: 'Settings', enabled: true, order: 60, css: false},
+    {id: 'log', name: 'Recent Activity', group: 'Help', enabled: true, order: 70}
+]);
 let current = null;
 let status = null;
 let appBooted = false;
@@ -19,8 +28,8 @@ let authPromise = null;
 let authResolve = null;
 let noticeTimer = null;
 const statusListeners = new Set();
-const GUI_VERSION = 'mk-clock-adult-2.1A-bpi-m2-zero-r1';
-const REQUIRED_API_VERSION = '1.46';
+const GUI_VERSION = 'mk-clock-adult-2.3.22-bpi-m2-zero-r1';
+const REQUIRED_API_VERSION = '1.48';
 const oledPreviewIntensity = Array.from({length: 16}, (_, level) =>
     level === 0 ? 0 : Math.pow(level / 15, 0.48));
 const oledPreviewColours = Object.freeze({
@@ -86,7 +95,7 @@ function applyOledTheme(name) {
 }
 
 async function refreshApiState() {
-    const data = await json('/api/v1');
+    const data = await json('/api/v1/diagnostics');
     if (!data.api_version || !data.product_version) {
         throw new Error(`The web GUI is v${GUI_VERSION}, but the running API is older. Rebuild, reinstall, and restart mk-piclock-api.`);
     }
@@ -98,10 +107,6 @@ async function refreshApiState() {
 
 async function openControlPanel() {
     if (!appBooted) {
-        const manifest = await json(`/modules/modules.json?v=${GUI_VERSION}`);
-        modules = (manifest.modules || [])
-            .filter(item => item?.enabled === true && /^[a-z0-9_-]+$/i.test(item.id || ''))
-            .sort((a, b) => (a.order || 0) - (b.order || 0));
         renderMenus();
         appBooted = true;
     }
@@ -278,7 +283,8 @@ function subscribeStatus(callback, signal) {
 
 async function refreshStatusNow() {
     try {
-        status = await json('/api/v1/status');
+        const coreStatus = await json('/api/v1/status');
+        status = coreStatus;
         oledPill.textContent = status.oled_ok ? 'Clock connected' : 'Screen unavailable';
         oledPill.className = status.oled_ok ? 'pill ok' : 'pill warn';
         applyOledTheme(status.oled_color);
