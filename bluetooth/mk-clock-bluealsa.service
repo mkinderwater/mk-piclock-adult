@@ -1,0 +1,27 @@
+[Unit]
+StartLimitIntervalSec=30
+StartLimitBurst=5
+Description=mk-clock Bluetooth A2DP sink (BlueALSA)
+Requires=bluetooth.service
+After=dbus.service bluetooth.service sound.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/bluealsa -p a2dp-sink
+Restart=on-failure
+RestartSec=2
+
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectKernelLogs=true
+ProtectClock=true
+RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
+
+[Install]
+WantedBy=multi-user.target

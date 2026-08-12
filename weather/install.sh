@@ -2,7 +2,7 @@
 set -eu
 
 if [ "$(id -u)" -ne 0 ]; then
-    echo "Run as root, or use: sudo ./install.sh" >&2
+    echo "Run from a root shell: ./install.sh" >&2
     exit 1
 fi
 

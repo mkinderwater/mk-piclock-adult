@@ -1,0 +1,31 @@
+[Unit]
+StartLimitIntervalSec=30
+StartLimitBurst=5
+Description=mk-clock Bluetooth pairing and device control
+Requires=bluetooth.service
+After=dbus.service bluetooth.service mk-piclock-core.service
+
+[Service]
+Type=simple
+Group=mk-piclock
+ExecStart=/usr/local/lib/mk-piclock/mk-clock-bluetooth-control.py
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=mk-clock-bluetooth
+RuntimeDirectoryMode=0770
+UMask=0007
+
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectKernelLogs=true
+ProtectClock=true
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

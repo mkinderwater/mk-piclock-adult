@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+BLUEALSA_APLAY=${BLUEALSA_APLAY:-/usr/bin/bluealsa-aplay}
+COMMON_ARGS="--profile-a2dp --single-audio --volume=software --pcm-period-time=100000 --pcm-buffer-time=500000"
+
+# The --resampler option is only compiled in when bluealsa-aplay has
+# libsamplerate support.  When present, use sinc-fastest: BlueALSA documents it
+# as the practical quality/CPU compromise for Bluetooth audio.  Feed the fixed
+# 48 kHz route PCM so BlueALSA owns adaptive rate conversion and ALSA only does
+# the stereo -> dual-mono channel matrix.
+if "$BLUEALSA_APLAY" --help 2>&1 | grep -q -- '--resampler'; then
+    echo "mk-clock Bluetooth audio: dual-mono mix + sinc-fastest adaptive resampler"
+    exec "$BLUEALSA_APLAY" \
+        --pcm=mkpiclock_bt_hq \
+        --resampler=sinc-fastest \
+        --profile-a2dp \
+        --single-audio \
+        --volume=software \
+        --pcm-period-time=100000 \
+        --pcm-buffer-time=500000
+fi
+
+echo "mk-clock Bluetooth audio: dual-mono mix + ALSA rate-conversion fallback"
+exec "$BLUEALSA_APLAY" \
+    --pcm=mkpiclock_bt_compat \
+    --profile-a2dp \
+    --single-audio \
+    --volume=software \
+    --pcm-period-time=100000 \
+    --pcm-buffer-time=500000
