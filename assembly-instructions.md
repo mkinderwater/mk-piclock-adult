@@ -78,16 +78,16 @@ Do not power the finished clock from USB and the 5 V header at the same time.
 
 Build the clock in this order:
 
-1. Mount the USB-C adapter.
-2. Mount the Banana Pi M2 Zero.
-3. Mount the OLED.
-4. Mount the speaker.
-5. Mount the MAX98357A amplifier.
-6. Mount the AHT10 sensor.
-7. Mount the TTP223B touch sensor using the enclosure foot holes.
-8. Fit the rubber feet.
-9. Complete and inspect all wiring.
-10. Install the software and run hardware verification.
+1. Mount the TTP223B touch sensor using the enclosure foot holes. This must be done first as you will not be able to access the screws to affix.
+2. Mount the USB-C adapter.
+3. Mount the Banana Pi M2 Zero.
+5. Mount the OLED.
+6. Mount the speaker.
+7. Mount the MAX98357A amplifier.
+8. Mount the AHT10 sensor.
+10. Fit the rubber feet (10mm sticky back or w/screws).
+11. Complete and inspect all wiring.
+12. Install the software and run hardware verification.
 
 This order keeps the mechanical work simple and leaves the wiring visible until the final inspection.
 
