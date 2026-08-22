@@ -60,9 +60,16 @@ OWNED_PATHS=(
     usr/lib/sysusers.d/mk-piclock.conf
     etc/mk-clock-adult-release
 )
-# Preserve unknown files left by older previews inside the transaction backup.
-# Current persistent user content lives below assets/music and assets/fonts; the
-# only current top-level config files are the web password files.
+# Persistent user data is intentionally outside release ownership.
+# Assets below music/podcasts/fonts and every file below config survive upgrades.
+# Keep config as a directory-level persistence boundary so future settings do not
+# need to be added to an installer allowlist.
+ROLLBACK_STATE_PATHS=(
+    opt/mk-piclock/config
+)
+
+# Preserve/remove only unknown legacy top-level asset files. Persistent asset
+# directories are never classified as legacy and are never removed on upgrade.
 LEGACY_PATHS=()
 if [ -d /opt/mk-piclock/assets ]; then
     while IFS= read -r -d '' path; do
@@ -73,15 +80,6 @@ if [ -d /opt/mk-piclock/assets ]; then
         LEGACY_PATHS+=("${path#/}")
     done < <(find /opt/mk-piclock/assets -mindepth 1 -maxdepth 1 \
         \( -type f -o -type l \) -print0 2>/dev/null)
-fi
-if [ -d /opt/mk-piclock/config ]; then
-    while IFS= read -r -d '' path; do
-        base=$(basename "$path")
-        case "$base" in
-            web-password.txt|.web-password.tmp) continue ;;
-        esac
-        LEGACY_PATHS+=("${path#/}")
-    done < <(find /opt/mk-piclock/config -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
 fi
 UNITS=(mk-piclock-core.service mk-piclock-api.service mk-piclock-weather.path mk-piclock-weather.timer)
 BACKUP_DIR=$(mktemp -d /var/tmp/mk-clock-adult-install.XXXXXX)
@@ -97,7 +95,7 @@ for unit in "${UNITS[@]}"; do
 done
 
 EXISTING=()
-for path in "${OWNED_PATHS[@]}" "${LEGACY_PATHS[@]}"; do
+for path in "${OWNED_PATHS[@]}" "${LEGACY_PATHS[@]}" "${ROLLBACK_STATE_PATHS[@]}"; do
     [ -e "/$path" ] || [ -L "/$path" ] || continue
     EXISTING+=("$path")
 done
@@ -114,7 +112,7 @@ rollback() {
     echo "ERROR   Installation failed; restoring previous release" >&2
     systemctl disable --now "${UNITS[@]}" >/dev/null 2>&1 || true
     systemctl stop mk-piclock-weather.service >/dev/null 2>&1 || true
-    for path in "${OWNED_PATHS[@]}" "${LEGACY_PATHS[@]}"; do rm -rf "/$path"; done
+    for path in "${OWNED_PATHS[@]}" "${LEGACY_PATHS[@]}" "${ROLLBACK_STATE_PATHS[@]}"; do rm -rf "/$path"; done
     tar -xpf "$BACKUP_TAR" -C / >/dev/null 2>&1 || true
     systemctl daemon-reload >/dev/null 2>&1 || true
     while IFS= read -r unit; do [ -n "$unit" ] && systemctl enable "$unit" >/dev/null 2>&1 || true; done < "$ENABLED_BEFORE"
@@ -148,9 +146,10 @@ udevadm trigger --subsystem-match=spidev --action=change || true
 udevadm trigger --subsystem-match=gpio --action=change || true
 udevadm trigger --subsystem-match=i2c-dev --action=change || true
 
-mkdir -p /opt/mk-piclock/assets/music /opt/mk-piclock/assets/music/.processing /opt/mk-piclock/assets/fonts /opt/mk-piclock/config
+mkdir -p /opt/mk-piclock/assets/music /opt/mk-piclock/assets/music/.processing /opt/mk-piclock/assets/podcasts /opt/mk-piclock/assets/podcasts/upload /opt/mk-piclock/assets/fonts /opt/mk-piclock/config
 chown -R mk-piclock-api:mk-piclock /opt/mk-piclock/assets
 chmod -R u=rwX,g=rX,o= /opt/mk-piclock/assets
+chmod 0770 /opt/mk-piclock/assets/podcasts/upload
 chown -R mk-piclock-core:mk-piclock /opt/mk-piclock/config
 chmod -R u=rwX,g=rwX,o= /opt/mk-piclock/config
 
