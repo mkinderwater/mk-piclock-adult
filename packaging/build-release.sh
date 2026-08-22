@@ -28,6 +28,23 @@ cp -a "$ROOT/." "$STAGE/"
 rm -f "$STAGE/mk-piclock-core" "$STAGE/mk-piclock-api"
 rm -rf "$STAGE/weather/build"
 
+# Executable release entry points must remain executable after extraction.
+# Normalize them here so a source tree copied from a permission-losing medium
+# cannot produce an unusable release archive.
+RELEASE_SCRIPTS=(
+    install.sh
+    hardware/verify-bpi-hardware.sh
+    packaging/build-release.sh
+    scripts/deploy.sh
+    scripts/verify-install.sh
+    weather/install.sh
+    weather/uninstall.sh
+)
+for script in "${RELEASE_SCRIPTS[@]}"; do
+    [ -f "$STAGE/$script" ] || { echo "ERROR: missing release script: $script" >&2; exit 1; }
+    chmod 0755 "$STAGE/$script"
+done
+
 # ZIP timestamps are timezone-less. Normalize all entries to a fixed historical
 # instant and create the archive under UTC so extraction cannot make source files
 # appear to be in the future on Mountain-time clocks.
@@ -41,5 +58,17 @@ rm -f "$OUTPUT"
 )
 
 unzip -tq "$OUTPUT" >/dev/null
+
+# Verify the archive itself restores executable entry points correctly.
+VERIFY_DIR="$TMP/verify"
+mkdir -p "$VERIFY_DIR"
+unzip -q "$OUTPUT" -d "$VERIFY_DIR"
+for script in "${RELEASE_SCRIPTS[@]}"; do
+    test -x "$VERIFY_DIR/$PRODUCT/$script" || {
+        echo "ERROR: packaged script lost executable mode: $script" >&2
+        exit 1
+    }
+done
+
 printf 'Created %s\n' "$OUTPUT"
 sha256sum "$OUTPUT"
