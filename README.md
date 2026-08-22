@@ -191,6 +191,12 @@ HTTP API: v1.62
 Private core/API IPC protocol: v35
 ```
 
+## Manuals
+
+Read `clock-instructions.md` for day-to-day use, touch controls, alarms, Music, Podcasts, Weather, Display, System, backups, and upgrades.
+
+Read `assembly-instructions.md` to build the physical clock, wire each module, position the sensor/touch/speaker, perform the pre-power inspection, and verify the finished hardware.
+
 ## Install
 
 Read `INSTALL.md`, then run:

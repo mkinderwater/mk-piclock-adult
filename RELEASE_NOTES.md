@@ -104,6 +104,10 @@ Transactional rollback also includes configuration state.
 - Cache/runtime state is updated only after the core accepts the weather update.
 - Icon state rolls back if publication fails.
 
+## User documentation
+
+Added `clock-instructions.md` as the complete user manual. It covers daily touch use, every GUI module, alarms, Music, Podcasts, bulk imports, Weather, indoor trend behavior, Display, System, backups, upgrades, troubleshooting, and the operating decisions behind each feature. Added `assembly-instructions.md` for physical construction, wiring, component placement, pre-power inspection, first power-on, and hardware verification.
+
 ## Packaging
 
 Fixed executable permissions in the release ZIP.
@@ -135,3 +139,5 @@ OUT -> PA17 / physical pin 37
 PA21 / physical pin 38 is free.
 
 See `HARDWARE_MIGRATION.md` if upgrading an older clock wired for pin 38.
+
+- Assembly instructions specify the production fastener sizes derived from the enclosure model.

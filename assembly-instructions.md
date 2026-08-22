@@ -4,22 +4,58 @@ This manual covers the physical build of the adult clock.
 
 Use `clock-instructions.md` after the clock is assembled and running. Use `INSTALL.md` for software installation. Use `pinouts.md` when you need the complete electrical reference.
 
-## 1. Hardware used
+## 1. Parts required
 
-The current release targets:
+Use these parts for the current build:
 
-- Banana Pi M2 Zero
+- Banana Pi M2 Zero board
+- USB-C power adapter / breakout for the clock power input
 - 3.12-inch SSD1322 256x64 SPI OLED
-- MAX98357A I2S amplifier
-- speaker connected to the MAX98357A differential output
 - AHT10 temperature and humidity sensor
+- MAX98357A I2S amplifier
+- speaker
 - TTP223B capacitive touch sensor
-- regulated 5 V power supply
+- rubber feet
+- regulated 5 V USB-C power supply
 - microSD card containing `bpi-zero-clock 1.0.4-preview36`
+
+The speaker is a separate physical part. It connects to the MAX98357A after both parts are mounted.
 
 The software expects the current R1 wiring. Older PA21 touch wiring must be moved to PA17 before use.
 
-## 2. Before assembly
+
+## 2. Fastener kit
+
+The enclosure model defines the mounting hardware. Use these sizes unless the physical component has been changed from the production model.
+
+| Location | Qty | Fastener | Why |
+| --- | ---: | --- | --- |
+| OLED to lid | 4 | M2 x 6 mm countersunk machine screws + M2 nuts | The lid has 2.7 mm M2 clearance slots and a 1.1 mm tapered head recess. This is a through-bolt mount, not a printed thread. |
+| Lid to base | 4 | M3 x 10 mm pan-head self-tapping screws | The lid has 3.0 mm clearance holes. The base uses 2.65 mm blind pilots with a 3.05 mm lead-in and 10 mm pilot depth. |
+| Banana Pi M2 Zero | 3 | M2.5 x 5 mm pan-head self-tapping screws | Three Pi standoffs use 1.8 mm printed pilots. The fourth Pi mounting hole locates on the printed 2.4 mm anchor peg and does not use a screw. |
+| MAX98357A amplifier | 2 | M2.5 x 5 mm pan-head self-tapping screws | Both amplifier standoffs use 1.8 mm printed pilots. |
+| Speaker retainers | 2 | M2.5 x 5 mm pan-head self-tapping screws | The two speaker mounting supports use 1.8 mm printed pilots. |
+| USB-C adapter | 2 | M2.5 x 5 mm pan-head self-tapping screws | The adapter supports use the same 1.8 mm printed pilot as the Pi hardware. |
+| AHT10 | 1 | M3 x 5 mm pan-head self-tapping screw | The model explicitly uses a tapered 2.9 mm to 2.4 mm pilot for an M3 x 5 screw through the sensor board's 3.2 mm mounting hole. |
+| TTP223B touch board | 3 | M2.5 x 5 mm pan-head self-tapping screws | The model specifies a 2.5 mm shank, 5 mm screw length and 1.8 mm blind pilots. |
+| Rubber feet | 4 | M2.5 x 6 mm pan-head self-tapping screws | Each TPU foot has 2.9 mm shank clearance and a 5.4 mm x 2.0 mm head pocket. The screw then taps into the 3 mm case wall. |
+
+Recommended hardware to have on hand:
+
+- 15 x M2.5 x 5 mm pan-head self-tapping screws
+- 4 x M2.5 x 6 mm pan-head self-tapping screws
+- 1 x M3 x 5 mm pan-head self-tapping screw
+- 4 x M3 x 10 mm pan-head self-tapping screws
+- 4 x M2 x 6 mm countersunk machine screws
+- 4 x M2 nuts
+
+The M2.5 x 5 total includes 3 Pi, 2 amplifier, 2 speaker, 2 USB-C and 3 touch screws, with 3 spares.
+
+Use screws intended for plastic where specified as self-tapping. Start each screw by hand and stop when the part is seated. The printed pilots are not intended for repeated high-torque removal.
+
+Do not use an 8 mm foot screw by default. The foot screw taps only into the 3 mm case wall and an unnecessarily long screw can project into the enclosure.
+
+## 3. Before assembly
 
 Confirm the Banana Pi header orientation before connecting anything.
 
@@ -38,23 +74,30 @@ Keep these rules in mind:
 
 Do not power the finished clock from USB and the 5 V header at the same time.
 
-## 3. Recommended assembly order
+## 4. Recommended assembly order
 
-Build and test in this order:
+Build the clock in this order:
 
-1. Banana Pi and power
-2. OLED
-3. AHT10 sensor
-4. MAX98357A amplifier and speaker
-5. TTP223B touch sensor
-6. enclosure mounting
-7. software installation and hardware verification
+1. Mount the USB-C adapter.
+2. Mount the Banana Pi M2 Zero.
+3. Mount the OLED.
+4. Mount the speaker.
+5. Mount the MAX98357A amplifier.
+6. Mount the AHT10 sensor.
+7. Mount the TTP223B touch sensor using the enclosure foot holes.
+8. Fit the rubber feet.
+9. Complete and inspect all wiring.
+10. Install the software and run hardware verification.
 
-This makes faults easier to isolate. Test each subsystem before permanently closing the enclosure.
+This order keeps the mechanical work simple and leaves the wiring visible until the final inspection.
 
-## 4. Banana Pi power
+## 5. USB-C adapter and Banana Pi
 
-Connect the external regulated supply:
+Mount the USB-C adapter in the enclosure so the connector is square with the external opening and can accept a cable without loading the board or wiring. Secure it with **2 x M2.5 x 5 mm pan-head self-tapping screws**.
+
+Mount the Banana Pi M2 Zero on its intended standoffs. The model uses **3 x M2.5 x 5 mm pan-head self-tapping screws**. The fourth mounting hole sits over the printed anchor peg and does not receive a screw. Confirm the 40-pin header remains accessible before tightening the board.
+
+Connect the regulated 5 V output from the USB-C power input to the Banana Pi:
 
 ```text
 +5 V -> physical pin 4
@@ -63,11 +106,13 @@ GND  -> physical pin 6
 
 All ground pins on the 40-pin header are common.
 
-Use a supply with enough current for the Banana Pi, OLED, amplifier and speaker load. A weak supply can produce random resets, audio problems or unstable Wi-Fi.
+Use a USB-C supply with enough current for the Banana Pi, OLED, MAX98357A and speaker load. A weak supply can cause resets, audio problems or unstable Wi-Fi.
 
-Do not apply power yet if the other modules are still being wired.
+The USB-C adapter is the clock's external power input. Do not power the clock from another USB connector or a second 5 V source at the same time.
 
-## 5. SSD1322 OLED
+Do not apply power while the remaining modules are being wired.
+
+## 6. SSD1322 OLED
 
 Connect the OLED as follows:
 
@@ -81,13 +126,15 @@ OLED RES#     -> PA0, physical pin 13
 OLED CS#      -> PC3 / SPI0 CS0, physical pin 24
 ```
 
+Secure the OLED to the lid with **4 x M2 x 6 mm countersunk machine screws and 4 x M2 nuts**. The horizontal slots allow for PLA/ASA shrink variation. Centre the display before tightening the nuts. Do not use self-tapping screws in the OLED PCB.
+
 The display uses `/dev/spidev0.0`.
 
 OLED MISO is not used. Leave the unused OLED pins disconnected unless the display vendor specifically requires otherwise.
 
 Before continuing, check OLED power polarity twice. The OLED is a 3.3 V device in this build.
 
-## 6. AHT10 temperature and humidity sensor
+## 7. AHT10 temperature and humidity sensor
 
 Connect the AHT10:
 
@@ -107,6 +154,8 @@ Address:    0x38
 
 ### Sensor placement
 
+Mount the AHT10 with **1 x M3 x 5 mm pan-head self-tapping screw** through its 3.2 mm board hole into the tapered printed pilot.
+
 Mount the AHT10 where room air can reach it.
 
 Keep it away from:
@@ -122,7 +171,9 @@ The sensor measures the air around the clock. If it is trapped beside a warm boa
 
 Do not seal the sensor inside an airtight enclosure. Provide ventilation openings near it.
 
-## 7. MAX98357A amplifier
+## 8. MAX98357A amplifier
+
+Mount the MAX98357A with **2 x M2.5 x 5 mm pan-head self-tapping screws** into the printed amplifier standoffs.
 
 Connect the amplifier:
 
@@ -144,22 +195,26 @@ mclk-fs = 256
 SD/EN delay = 5 ms
 ```
 
-## 8. Speaker
+## 9. Speaker
 
-Connect the speaker directly to the MAX98357A:
+The speaker is a separate assembly item. Mount it before final wiring so the cone, frame and leads cannot interfere with the Banana Pi, OLED or enclosure.
+
+Position the speaker directly behind the enclosure speaker opening or grille. Seat it flat and retain it with **2 x M2.5 x 5 mm pan-head self-tapping screws** in the two printed speaker supports. Keep adhesive, screws and wiring away from the cone and surround.
+
+Route the two speaker leads back to the MAX98357A. Leave enough slack for assembly, but keep the leads clear of the cone.
+
+Connect the speaker directly to the amplifier:
 
 ```text
-Speaker + -> SPK+
-Speaker - -> SPK-
+Speaker + -> MAX98357A SPK+
+Speaker - -> MAX98357A SPK-
 ```
 
-The amplifier output is differential. Neither speaker terminal is ground.
+The MAX98357A output is differential. Neither speaker terminal is ground. Do not connect `SPK-` to GND.
 
-Do not connect `SPK-` to GND.
+Before closing the enclosure, play audio and confirm the speaker is clear, secure and free of buzz or contact with the case.
 
-Mount the speaker so the cone has clearance to move. Avoid pressing the cone against the enclosure or wiring. Use an opening or grille so sound is not trapped inside the case.
-
-## 9. TTP223B touch sensor
+## 10. TTP223B touch sensor
 
 Connect the touch board:
 
@@ -175,11 +230,11 @@ Older clock builds used pin 38 for touch. Move that wire to pin 37 before instal
 
 ### Touch placement
 
-Mount the touch sensor directly behind the intended touch area of the enclosure.
+Use **3 x M2.5 x 5 mm pan-head self-tapping screws** to secure the TTP223B. The two right-side screws are driven through the screwdriver access holes hidden below the right rubber feet. Secure the sensor before fitting the rubber feet.
 
-Keep the sensing face close to the outer surface. Thick plastic, large air gaps or metal between the sensor and the user's finger can reduce sensitivity.
+Keep the sensing face close to the intended outer touch surface. Thick plastic, a large air gap or metal between the sensor and the user's finger can reduce sensitivity.
 
-Test the touch sensor before permanently bonding it in place.
+Confirm the sensor cannot move when the clock is handled. Test touch operation before fitting the feet permanently.
 
 The finished clock uses touch for:
 
@@ -188,7 +243,15 @@ The finished clock uses touch for:
 - starting a random Podcast with 10 short taps in 8 seconds, when enabled
 - opening diagnostics with a 15-second hold
 
-## 10. Complete 40-pin connections
+## 11. Rubber feet
+
+Fit the rubber feet after the touch sensor is secured and its wiring has been tested. Secure each foot with **1 x M2.5 x 6 mm pan-head self-tapping screw**. The foot provides 2.9 mm shank clearance and a recessed 5.4 mm head pocket.
+
+The foot holes are part of the touch-sensor mounting arrangement. Confirm the touch board is held correctly before the feet are fully seated.
+
+Check that all feet sit flat so the clock does not rock and that no foot or mounting fastener pinches the touch-sensor wiring.
+
+## 12. Complete 40-pin connections
 
 Use this table as the assembly checklist.
 
@@ -216,7 +279,7 @@ Use this table as the assembly checklist.
 | 39 | TTP223B ground | GND |
 | 40 | MAX98357A DIN | PA20 |
 
-## 11. Enclosure layout
+## 13. Enclosure layout
 
 Arrange the components so each part can do its job without interfering with another.
 
@@ -233,7 +296,7 @@ Recommended priorities:
 
 Provide enough strain relief that moving the clock or opening the case does not pull directly on header connections.
 
-## 12. Pre-power inspection
+## 14. Pre-power inspection
 
 Before applying power, verify each item:
 
@@ -261,7 +324,7 @@ Before applying power, verify each item:
 
 If any connection is uncertain, correct it before applying power.
 
-## 13. First power-on
+## 15. First power-on
 
 Insert the prepared microSD card and apply the regulated 5 V supply.
 
@@ -269,7 +332,7 @@ The board should boot without repeated resets. The OLED should initialize once t
 
 If the board repeatedly reboots, disconnect power and check the 5 V supply and wiring before continuing.
 
-## 14. Install the clock software
+## 16. Install the clock software
 
 The base image must be `bpi-zero-clock 1.0.4-preview36` with the current playback hardware contract.
 
@@ -285,7 +348,7 @@ The installer verifies the expected hardware baseline before installing the cloc
 
 See `INSTALL.md` for the complete software procedure.
 
-## 15. Verify the hardware after install
+## 17. Verify the hardware after install
 
 Check the base-image hardware metadata:
 
@@ -312,7 +375,7 @@ cat /proc/asound/pcm
 
 The audio card should include `MAX98357A`. The I2S device should expose playback without a capture endpoint.
 
-## 16. Functional test
+## 18. Functional test
 
 Test the finished clock before closing the enclosure.
 
@@ -350,9 +413,11 @@ Then test the configured hold/tap shortcuts.
 
 Open the clock web GUI from another device. Confirm the expected hostname/IP and weather status.
 
-## 17. Close the enclosure
+## 19. Close the enclosure
 
 Close the case only after OLED, sensor, audio, touch and network tests pass.
+
+Close the enclosure with **4 x M3 x 10 mm pan-head self-tapping screws** through the lid into the blind corner pilots.
 
 Before installing the final screws:
 
@@ -364,7 +429,7 @@ Before installing the final screws:
 
 Power the completed clock once more after closing the enclosure and repeat the basic OLED, sensor, audio and touch checks.
 
-## 18. Service reference
+## 20. Service reference
 
 For normal operation, read `clock-instructions.md`.
 
