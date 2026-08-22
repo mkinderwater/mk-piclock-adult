@@ -56,7 +56,7 @@
                 <div>
                     <label for="clock-font">Clock font</label>
                     <select id="clock-font" aria-describedby="clock-font-help"><option>Loading fonts...</option></select>
-                    <p class="small no-margin" id="clock-font-help">DejaVu Sans Mono is the installed default. Upload a TTF or OTF font below to use a different clock font.</p>
+                    <p class="small no-margin" id="clock-font-help">DejaVu Sans Mono is the installed default. Upload a TTF or OTF font below, then choose it here when you want to use it.</p>
                 </div>
                 <div>
                     <label for="oled-font-size">Font size</label>
@@ -75,7 +75,7 @@
         <summary>Manage fonts</summary>
         <p class="advanced-note">Add or remove custom fonts. Choose the active clock font above.</p>
         <div class="details-body">
-            <form method="POST" action="/api/v1/assets/fonts/upload" enctype="multipart/form-data" data-busy-text="Adding font..." data-success-text="Font added" data-error-text="Font could not be added">
+            <form method="POST" action="/api/v1/assets/fonts/upload" enctype="multipart/form-data" data-busy-text="Adding font..." data-success-text="Font added. Choose it above to use it." data-error-text="Font could not be added">
                 <label for="font-upload-file">Upload a font file</label>
                 <input id="font-upload-file" type="file" name="file" accept=".ttf,.otf,font/ttf,font/otf">
                 <button class="btn" type="submit">Add font</button>

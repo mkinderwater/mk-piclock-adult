@@ -21,7 +21,7 @@ export async function mount(ctx) {
         }
         list.innerHTML = alarms.map(alarm => `
             <div class="card alarm-card">
-                <div class="card-title-row"><h2>Alarm ${alarm.id}</h2><span class="badge ${alarm.enabled ? 'ok' : ''}">${alarm.enabled ? 'On' : 'Off'}</span></div>
+                <div class="card-title-row"><h2><svg class="title-icon" aria-hidden="true"><use href="#icon-bell"></use></svg>Alarm ${alarm.id}</h2><span class="badge ${alarm.enabled ? 'ok' : ''}">${alarm.enabled ? 'On' : 'Off'}</span></div>
                 <form method="POST" action="/api/v1/config/alarms" data-busy-text="Saving alarm ${alarm.id}..." data-success-text="Alarm ${alarm.id} saved" data-error-text="Alarm ${alarm.id} could not be saved">
                     <input type="hidden" name="id" value="${alarm.id}">
                     <div class="field-row">

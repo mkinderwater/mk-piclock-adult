@@ -2,7 +2,7 @@
     <div class="card">
         <div class="card-title-row">
             <div>
-                <h2>Inside Sensor</h2>
+                <h2>Inside sensor</h2>
                 <p class="page-intro">Any panel configured as INSIDE uses the local AHT10 temperature and humidity sensor. INSIDE is independent from the ECCC weather source.</p>
             </div>
         </div>
@@ -21,12 +21,107 @@
     <div class="card">
         <div class="card-title-row">
             <div>
-                <h2>Weather Source</h2>
-                <p class="page-intro">Change the official ECCC GeoMet city used by the weather dashboard.</p>
+                <h2>Weather source</h2>
+                <p class="page-intro">Change the official ECCC GeoMet Canadian location used by the weather dashboard.</p>
             </div>
         </div>
 
         <form id="weather-source-form" method="POST" action="/api/v1/config/weather-source" data-module-handles-submit="true">
+            <label for="weather-source-preset">Common Canadian location</label>
+            <select id="weather-source-preset" aria-describedby="weather-source-help">
+                <option value="">Custom GeoMet URL</option>
+                <optgroup label="Alberta">
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/ab-52?f=json">Calgary, AB</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/ab-50?f=json">Edmonton, AB</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/ab-30?f=json">Lethbridge, AB</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/ab-51?f=json">Medicine Hat, AB</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/ab-58?f=json">Brooks, AB</option>
+                </optgroup>
+                <optgroup label="British Columbia">
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/bc-72?f=json">Invermere, BC</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/bc-74?f=json">Vancouver, BC</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/bc-85?f=json">Victoria, BC</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/bc-79?f=json">Prince George, BC</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/bc-81?f=json">Abbotsford, BC</option>
+                </optgroup>
+                <optgroup label="Manitoba">
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/mb-38?f=json">Winnipeg, MB</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/mb-52?f=json">Brandon, MB</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/mb-34?f=json">Thompson, MB</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/mb-29?f=json">Portage la Prairie, MB</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/mb-46?f=json">Swan River, MB</option>
+                </optgroup>
+                <optgroup label="New Brunswick">
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nb-29?f=json">Fredericton, NB</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nb-23?f=json">Saint John, NB</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nb-25?f=json">Miramichi, NB</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nb-32?f=json">Edmundston, NB</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nb-2?f=json">Campbellton, NB</option>
+                </optgroup>
+                <optgroup label="Newfoundland and Labrador">
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nl-24?f=json">St. John's, NL</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nl-39?f=json">Deer Lake, NL</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nl-40?f=json">Nain, NL</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nl-14?f=json">Bonavista, NL</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nl-5?f=json">Grand Bank, NL</option>
+                </optgroup>
+                <optgroup label="Nova Scotia">
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/ns-40?f=json">Halifax (Shearwater), NS</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/ns-3?f=json">Antigonish, NS</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/ns-15?f=json">Windsor, NS</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/ns-17?f=json">Kentville, NS</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/ns-39?f=json">Liverpool, NS</option>
+                </optgroup>
+                <optgroup label="Northwest Territories">
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nt-24?f=json">Yellowknife, NT</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nt-30?f=json">Inuvik, NT</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nt-21?f=json">Norman Wells, NT</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nt-4?f=json">Fort Simpson, NT</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nt-20?f=json">Tuktoyaktuk, NT</option>
+                </optgroup>
+                <optgroup label="Nunavut">
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nu-15?f=json">Cambridge Bay, NU</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nu-14?f=json">Baker Lake, NU</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nu-25?f=json">Pond Inlet, NU</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nu-10?f=json">Arctic Bay, NU</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/nu-24?f=json">Gjoa Haven, NU</option>
+                </optgroup>
+                <optgroup label="Ontario">
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/on-143?f=json">Toronto, ON</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/on-118?f=json">Ottawa (Kanata - Orléans), ON</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/on-82?f=json">Kitchener-Waterloo, ON</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/on-40?f=json">Greater Sudbury, ON</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/on-127?f=json">Timmins, ON</option>
+                </optgroup>
+                <optgroup label="Prince Edward Island">
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/pe-3?f=json">Summerside, PE</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/pe-6?f=json">East Point, PE</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/pe-1?f=json">North Cape, PE</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/pe-4?f=json">St. Peters Bay, PE</option>
+                </optgroup>
+                <optgroup label="Quebec">
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/qc-147?f=json">Montréal, QC</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/qc-133?f=json">Québec, QC</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/qc-76?f=json">Laval, QC</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/qc-136?f=json">Sherbrooke, QC</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/qc-138?f=json">Rimouski, QC</option>
+                </optgroup>
+                <optgroup label="Saskatchewan">
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/sk-32?f=json">Regina, SK</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/sk-40?f=json">Saskatoon, SK</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/sk-41?f=json">Swift Current, SK</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/sk-33?f=json">Yorkton, SK</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/sk-24?f=json">Moose Jaw, SK</option>
+                </optgroup>
+                <optgroup label="Yukon">
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/yt-16?f=json">Whitehorse, YT</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/yt-5?f=json">Haines Junction, YT</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/yt-13?f=json">Watson Lake, YT</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/yt-2?f=json">Carcross, YT</option>
+                    <option value="https://api.weather.gc.ca/collections/citypageweather-realtime/items/yt-11?f=json">Old Crow, YT</option>
+                </optgroup>
+            </select>
+
             <label for="weather-source-url">GeoMet source URL</label>
             <input
                 id="weather-source-url"
@@ -40,12 +135,10 @@
                 required
                 aria-describedby="weather-source-help"
                 placeholder="https://api.weather.gc.ca/collections/citypageweather-realtime/items/ab-52?f=json">
-            <p id="weather-source-help" class="small">Edit or replace the complete URL. Saving it changes the source used by the next weather refresh.</p>
+            <p id="weather-source-help" class="small">Choose a Canadian ECCC location or enter an official GeoMet citypageweather-realtime item URL. This ECCC collection does not provide U.S. city forecasts.</p>
 
             <div class="button-row">
-                <button class="btn" id="weather-source-save" type="submit">Save URL &amp; Refresh</button>
-                <button class="btn alt" id="weather-source-calgary" type="button">Use Calgary</button>
-                <button class="btn alt" id="weather-source-revert" type="button">Revert</button>
+                <button class="btn" id="weather-source-save" type="submit">Save URL and refresh</button>
             </div>
         </form>
 
@@ -55,13 +148,13 @@
     <div class="card">
         <div class="card-title-row">
             <div>
-                <h2>Weather Panels</h2>
+                <h2>Weather panels</h2>
                 <p class="page-intro">Choose the source for each of the three OLED weather panels. INSIDE uses the local AHT10 sensor, OUTSIDE uses current ECCC conditions, Today low / high shows today’s forecast extremes, Hours ahead uses a relative forecast, and Specific time uses the next occurrence of a selected forecast hour.</p>
             </div>
         </div>
 
         <form id="weather-frames-form" method="POST" action="/api/v1/config/weather-frames" data-module-handles-submit="true">
-            <div class="field-row">
+            <div class="field-row weather-frame-grid">
                 <fieldset>
                     <legend>First panel</legend>
                     <label for="weather-frame-1-mode">Source</label>
@@ -126,10 +219,9 @@
                 </fieldset>
             </div>
 
-            <p class="small">Panels may repeat a source. Today low / high uses the current local day’s available hourly forecast, includes the current reading, and shows the highest precipitation probability for the day. Hours ahead accepts 1 through 48 hours. Specific time selects the next matching hour in the configured Weather timezone, rolling into tomorrow after that hour has passed.</p>
+            <p class="small">Panels may repeat a source. Today low / high uses ECCC’s official daily forecast high and low. The last official value for the current local date is retained when ECCC rolls that period out of the feed; hourly forecasts are used only for the day’s precipitation probability. Hours ahead accepts 1 through 48 hours. Specific time selects the next matching hour in the configured Weather timezone, rolling into tomorrow after that hour has passed.</p>
             <div class="button-row">
-                <button class="btn" id="weather-frames-save" type="submit">Save Panels &amp; Refresh</button>
-                <button class="btn alt" id="weather-frames-defaults" type="button">Use INSIDE, +3h, +6h</button>
+                <button class="btn" id="weather-frames-save" type="submit">Save panels and refresh</button>
             </div>
         </form>
         <p id="weather-frames-status" class="small no-margin action-followup" role="status" aria-live="polite">Loading.</p>
@@ -138,7 +230,7 @@
     <div class="card">
         <div class="card-title-row">
             <div>
-                <h2>Weather Warning Chime</h2>
+                <h2>Weather warning chime</h2>
                 <p class="page-intro">Play the built-in message chime when a new active ECCC warning type appears. Repeated refreshes of the same warning do not chime again.</p>
             </div>
         </div>
@@ -162,7 +254,7 @@
             </div>
             <p class="small">The chime uses the clock's global volume, capped at 55%, and is skipped while music or an alarm is already playing.</p>
             <div class="button-row">
-                <button class="btn" id="weather-warning-chime-save" type="submit">Save Warning Chime</button>
+                <button class="btn" id="weather-warning-chime-save" type="submit">Save warning chime</button>
             </div>
         </form>
         <p id="weather-warning-chime-status" class="small no-margin action-followup" role="status" aria-live="polite">Loading.</p>
@@ -171,7 +263,7 @@
     <div class="card">
         <div class="card-title-row">
             <div>
-                <h2>Weather Activity</h2>
+                <h2>Weather activity</h2>
                 <p class="page-intro">Every GeoMet refresh appears here, including ECCC icon codes, pixel-art sprites, and unknown-code substitutions.</p>
             </div>
             <button class="btn alt small-btn" id="weather-activity-refresh" type="button">Refresh</button>

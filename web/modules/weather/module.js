@@ -3,13 +3,12 @@ const ACTIVITY_ENDPOINT = '/api/v1/weather/activity';
 const FRAMES_ENDPOINT = '/api/v1/config/weather-frames';
 const STATUS_ENDPOINT = '/api/v1/status';
 const DISPLAY_CONFIG_ENDPOINT = '/api/v1/config/display';
-const CALGARY_URL = 'https://api.weather.gc.ca/collections/citypageweather-realtime/items/ab-52?f=json';
+const DEFAULT_SOURCE_URL = 'https://api.weather.gc.ca/collections/citypageweather-realtime/items/ab-52?f=json';
 
 export async function mount(ctx) {
     const input = ctx.$('#weather-source-url');
+    const preset = ctx.$('#weather-source-preset');
     const save = ctx.$('#weather-source-save');
-    const calgary = ctx.$('#weather-source-calgary');
-    const revert = ctx.$('#weather-source-revert');
     const status = ctx.$('#weather-source-status');
     const roomSensorStatus = ctx.$('#room-sensor-status');
     const roomSensorTemperature = ctx.$('#room-sensor-temperature');
@@ -21,7 +20,6 @@ export async function mount(ctx) {
     const activitySummary = ctx.$('#weather-activity-summary');
     const activityList = ctx.$('#weather-activity-list');
     const framesSave = ctx.$('#weather-frames-save');
-    const framesDefaults = ctx.$('#weather-frames-defaults');
     const framesStatus = ctx.$('#weather-frames-status');
     const warningChimeEnabled = ctx.$('#weather-warning-chime-enabled');
     const warningChimeBedtime = ctx.$('#weather-warning-chime-bedtime');
@@ -42,19 +40,25 @@ export async function mount(ctx) {
     const setStatus = (text, kind = '') => {
         if (!status) return;
         status.textContent = text;
-        status.className = `small no-margin ${kind}`.trim();
+        status.className = `small no-margin action-followup ${kind}`.trim();
     };
 
     const setBusy = busy => {
         save.disabled = busy;
-        calgary.disabled = busy;
-        revert.disabled = busy || !dirty;
+        preset.disabled = busy;
         input.disabled = busy;
+    };
+
+    const syncPresetFromUrl = () => {
+        const currentUrl = input.value.trim();
+        preset.value = Array.from(preset.options).some(option => option.value === currentUrl)
+            ? currentUrl
+            : '';
     };
 
     const updateDirtyState = () => {
         dirty = input.value.trim() !== savedUrl;
-        revert.disabled = !dirty;
+        syncPresetFromUrl();
         setStatus(dirty
             ? 'URL changed. Press Save URL & Refresh to apply it.'
             : 'This is the active weather source URL.');
@@ -63,13 +67,13 @@ export async function mount(ctx) {
     const setFramesStatus = (text, kind = '') => {
         if (!framesStatus) return;
         framesStatus.textContent = text;
-        framesStatus.className = `small no-margin ${kind}`.trim();
+        framesStatus.className = `small no-margin action-followup ${kind}`.trim();
     };
 
     const setWarningChimeStatus = (text, kind = '') => {
         if (!warningChimeStatus) return;
         warningChimeStatus.textContent = text;
-        warningChimeStatus.className = `small no-margin ${kind}`.trim();
+        warningChimeStatus.className = `small no-margin action-followup ${kind}`.trim();
     };
 
     const setWarningChimeBusy = busy => {
@@ -105,7 +109,6 @@ export async function mount(ctx) {
 
     const setFramesBusy = busy => {
         framesSave.disabled = busy;
-        framesDefaults.disabled = busy;
         frameControls.forEach((controls, index) => {
             controls.mode.disabled = busy;
             updateFrameControls(index);
@@ -176,7 +179,7 @@ export async function mount(ctx) {
             ? new Date(Number(room.measured_at) * 1000).toLocaleString()
             : 'No successful reading';
         roomSensorError.textContent = room.error || '';
-        roomSensorError.className = `small no-margin ${room.error ? 'warn-text' : ''}`.trim();
+        roomSensorError.className = `small no-margin action-followup ${room.error ? 'warn-text' : ''}`.trim();
     };
 
     const loadRoomSensor = async () => {
@@ -192,7 +195,7 @@ export async function mount(ctx) {
             if (!ctx.signal.aborted) {
                 roomSensorStatus.textContent = 'Unavailable';
                 roomSensorError.textContent = error.message || 'Inside sensor status could not be loaded.';
-                roomSensorError.className = 'small no-margin warn-text';
+                roomSensorError.className = 'small no-margin action-followup warn-text';
             }
         }
     };
@@ -319,7 +322,7 @@ export async function mount(ctx) {
                 signal: ctx.signal
             }));
             if (ctx.signal.aborted) return;
-            savedUrl = String(data.url || data.default_url || CALGARY_URL);
+            savedUrl = String(data.url || data.default_url || DEFAULT_SOURCE_URL);
             if (!dirty) input.value = savedUrl;
             updateDirtyState();
         } catch (error) {
@@ -331,18 +334,19 @@ export async function mount(ctx) {
 
     ctx.on('input', '#weather-source-url', updateDirtyState);
 
+    ctx.on('change', '#weather-source-preset', () => {
+        if (preset.value) {
+            input.value = preset.value;
+            updateDirtyState();
+        } else {
+            input.focus();
+            updateDirtyState();
+        }
+    });
+
     ctx.on('change', '#weather-frame-1-mode', () => updateFrameControls(0));
     ctx.on('change', '#weather-frame-2-mode', () => updateFrameControls(1));
     ctx.on('change', '#weather-frame-3-mode', () => updateFrameControls(2));
-
-    ctx.on('click', '#weather-frames-defaults', () => {
-        applyFrames({
-            slot1: {mode: 'room', offset_hours: 1, time: '07:00'},
-            slot2: {mode: 'offset', offset_hours: 3, time: '12:00'},
-            slot3: {mode: 'offset', offset_hours: 6, time: '18:00'}
-        });
-        setFramesStatus('INSIDE, +3h and +6h selected. Press Save Panels & Refresh to apply them.');
-    });
 
     ctx.on('submit', '#weather-frames-form', async (event, form) => {
         event.preventDefault();
@@ -466,6 +470,7 @@ export async function mount(ctx) {
             savedUrl = String(data.url || requestedUrl);
             input.value = savedUrl;
             dirty = false;
+            syncPresetFromUrl();
             setStatus(data.changed === false
                 ? 'URL was already active. Weather refresh requested.'
                 : 'URL saved. Weather refresh requested.', 'ok-text');
@@ -483,18 +488,6 @@ export async function mount(ctx) {
         }
     });
 
-    ctx.on('click', '#weather-source-calgary', () => {
-        input.value = CALGARY_URL;
-        input.focus();
-        updateDirtyState();
-    });
-
-    ctx.on('click', '#weather-source-revert', () => {
-        input.value = savedUrl;
-        input.focus();
-        updateDirtyState();
-    });
-
     ctx.on('click', '#weather-activity-refresh', loadActivity);
 
     const timer = window.setInterval(loadActivity, 10000);
@@ -507,11 +500,18 @@ export async function mount(ctx) {
     setBusy(false);
     setFramesBusy(false);
     setWarningChimeBusy(false);
-    await Promise.all([loadSource(), loadFrames(), loadWarningChimeSettings(), loadRoomSensor(), loadActivity()]);
+    await loadSource();
+    await loadFrames();
+    await loadWarningChimeSettings();
+    await loadRoomSensor();
+    await loadActivity();
     return {
         refresh: async () => {
             if (!dirty) await loadSource();
-            await Promise.all([loadFrames(), loadWarningChimeSettings(), loadRoomSensor(), loadActivity()]);
+            await loadFrames();
+            await loadWarningChimeSettings();
+            await loadRoomSensor();
+            await loadActivity();
         }
     };
 }

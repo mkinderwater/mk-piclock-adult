@@ -57,9 +57,8 @@ export async function mount(ctx) {
         ctx.setText('#status-version', status.app_version);
         ctx.setText('#status-uptime', ctx.formatUptime(status.uptime_seconds));
         const localTrack = [status.audio_title, status.audio_artist].filter(Boolean).join(' - ') || status.audio_file;
-        const bluetoothTrack = status.bluetooth_audio_title || '';
-        const track = status.audio_playing ? localTrack : bluetoothTrack;
-        const audioPlaying = Boolean(status.audio_playing || status.bluetooth_audio_playing);
+        const track = localTrack;
+        const audioPlaying = Boolean(status.audio_playing);
         ctx.setText('#status-audio', status.alarm_active
             ? `Alarm playing at ${status.alarm_volume_percent || 0}%`
             : (audioPlaying ? `Playing ${track || 'music'}` : 'Audio stopped'));
@@ -126,17 +125,11 @@ export async function mount(ctx) {
         ctx.setText('#status-weather-forecast', weatherPanels.length
             ? weatherPanels.map(slot => {
                 if (String(slot.kind || '') === 'today') {
-                    const formatHour = value => {
-                        const hour = Math.max(0, Math.min(23, Number(value) || 0));
-                        if (status.clock_24h_mode) return `${String(hour).padStart(2, '0')}:00`;
-                        const displayHour = hour % 12 || 12;
-                        return `${displayHour} ${hour < 12 ? 'AM' : 'PM'}`;
-                    };
                     const low = slot.low_temperature_available
-                        ? `${Math.round(Number(slot.low_temperature_c))}°C at ${formatHour(slot.low_hour)}`
+                        ? `${Math.round(Number(slot.low_temperature_c))}°C`
                         : 'unavailable';
                     const high = slot.high_temperature_available
-                        ? `${Math.round(Number(slot.high_temperature_c))}°C at ${formatHour(slot.high_hour)}`
+                        ? `${Math.round(Number(slot.high_temperature_c))}°C`
                         : 'unavailable';
                     const precipitation = Math.max(0, Math.min(100,
                         Math.round(Number(slot.precipitation_probability_percent) || 0)));

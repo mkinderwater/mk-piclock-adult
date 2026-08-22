@@ -11,9 +11,9 @@
         <form id="password-form" method="POST" action="/api/v1/auth/password" data-module-handles-submit="true">
             <label for="new-web-password">New password</label>
             <input id="new-web-password" name="password" type="password" maxlength="64" autocomplete="new-password" placeholder="Enter a simple password">
-            <div class="button-grid">
+            <div id="password-actions" class="button-grid single-column">
                 <button class="btn" type="submit">Save password</button>
-                <button id="remove-password" class="btn alt" type="button">Remove password</button>
+                <button id="remove-password" class="btn alt hidden" type="button">Remove password</button>
             </div>
         </form>
         <p class="small no-margin action-followup">No password means no prompt. The password is stored as plain text on this clock.</p>
@@ -21,11 +21,52 @@
 
     <div class="card">
         <div class="card-title-row">
+            <div><h2>Time zone</h2><p class="small no-margin">Local time used by the clock, alarms, and Weather day boundaries.</p></div>
+            <span id="timezone-state" class="badge">Loading</span>
+        </div>
+        <form id="timezone-form" method="POST" action="/api/v1/system/timezone" data-module-handles-submit="true">
+            <label for="system-timezone">Clock timezone</label>
+            <select id="system-timezone" name="timezone" required disabled>
+                <option value="">Loading timezones...</option>
+            </select>
+            <button class="btn" type="submit">Save timezone</button>
+        </form>
+        <p class="small no-margin action-followup">Changing timezone does not change UTC or NTP synchronization. Weather refreshes using the new local day automatically.</p>
+    </div>
+
+    <div class="card">
+        <div class="card-title-row">
+            <div><h2>Hostname</h2><p class="small no-margin">Network name advertised by the clock.</p></div>
+            <span id="hostname-state" class="badge">Loading</span>
+        </div>
+        <form id="hostname-form" method="POST" action="/api/v1/system/hostname" data-module-handles-submit="true">
+            <label for="system-hostname">Hostname</label>
+            <input id="system-hostname" name="hostname" type="text" maxlength="253" autocomplete="off" spellcheck="false" required>
+            <button class="btn" type="submit">Save hostname</button>
+        </form>
+        <p class="small no-margin action-followup">Use letters, numbers, hyphens, and periods. Existing network connections remain active.</p>
+    </div>
+
+    <div class="card">
+        <div class="card-title-row">
+            <div><h2>NTP source</h2><p class="small no-margin">Optional time source for Linux clock synchronization.</p></div>
+            <span id="ntp-source-state" class="badge">System default</span>
+        </div>
+        <div id="ntp-form">
+            <label for="system-ntp-server">NTP server</label>
+            <input id="system-ntp-server" name="server" type="text" maxlength="253" autocomplete="off" spellcheck="false" placeholder="Leave blank for system defaults">
+            <button class="btn" id="ntp-save" type="button">Save NTP source</button>
+        </div>
+        <p class="small no-margin action-followup">Enter one NTP hostname or IP address. Leave blank to remove the custom source and return to system defaults.</p>
+    </div>
+
+
+    <div class="card">
+        <div class="card-title-row">
             <div>
                 <h2>System</h2>
                 <p class="page-intro">Clock software, service health, and runtime information.</p>
             </div>
-            <button class="btn alt small-btn" id="system-refresh" type="button">Refresh</button>
         </div>
         <table class="info-table"><tbody>
             <tr><th>Product</th><td id="system-product">Loading...</td></tr>

@@ -9,7 +9,10 @@ User=mk-piclock-core
 Group=mk-piclock
 SupplementaryGroups=audio spi gpio i2c
 Environment=MK_PICLOCK_API_USER=mk-piclock-api
-Environment=MK_PICLOCK_ALSA_DEVICE=mkpiclock_mix
+# Preserve local MP3/alarm fidelity by opening the physical PCM at the decoded
+# native sample rate. plughw is used only if format conversion is required.
+Environment=MK_PICLOCK_ALSA_DIRECT_DEVICE=hw:MAX98357A,0
+Environment=MK_PICLOCK_ALSA_DEVICE=plughw:MAX98357A,0
 Environment=MK_AHT10_ENABLED=1
 Environment=MK_AHT10_DEVICE=/dev/i2c-0
 Environment=MK_AHT10_ADDRESS=0x38
@@ -19,6 +22,10 @@ ExecStart=/opt/mk-piclock/mk-piclock-core
 WorkingDirectory=/opt/mk-piclock
 Restart=always
 RestartSec=3
+# Process-level supervision complements the image's hardware watchdog. The core
+# sends WATCHDOG=1 from its main loop, so a stalled main loop is restarted.
+WatchdogSec=45s
+NotifyAccess=main
 UMask=0027
 LimitRTPRIO=10
 RuntimeDirectory=mk-piclock

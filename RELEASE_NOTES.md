@@ -1,57 +1,48 @@
-## 2.3.22
+# mk-clock-adult 2.3.50-preview42
 
-- Simplifies Bluetooth media display to AVRCP Title only; separate Artist metadata is ignored.
-- Decodes busctl octal-escaped UTF-8 bytes before the existing UTF-8-safe IPC path (for example `No\303\253l` becomes internal UTF-8 `Noël`).
-- OLED metadata cleanup folds common accented Latin characters to display-safe ASCII, so `Noël` renders as `Noel` rather than an unsupported glyph or escaped byte sequence.
-- Keeps the 2.3.20/2.3.21 bounded metadata refresh behavior, retaining the last non-empty Title across partial iPhone Track updates.
-- Bluetooth audio level, pairing/connect behavior, resampling, weather GUI, local MP3/alarm audio and hardware behavior are unchanged from 2.3.21.
+## Weather reboot and offline cache recovery
 
-## 2.3.22
+- Cached weather restoration no longer waits for `network-online.target`; it starts as soon as the clock core and local API are started.
+- `/run/mk-piclock/weather.json` is no longer used as evidence that the current core process received weather.
+- A dedicated `/run/mk-piclock/weather-published.stamp` is written only after the core acknowledges a weather update.
+- The publication stamp is compared with `/run/mk-piclock/core.sock`, so a core restart or software upgrade automatically republishes the valid last-good forecast even when runtime JSON survived.
+- Cached weather publication retries the local API/core path during startup, covering the short race while the API and core socket become ready.
+- Runtime JSON and the persistent last-good cache are now written only after the core has accepted the corresponding weather state.
+- Runtime icon files are snapshotted before publication and rolled back if the core rejects the update, preventing failed refreshes from pairing new icons with old in-memory weather.
+- With a valid cache less than 24 hours old, loss of Internet after a reboot or application restart should therefore show cached panels instead of leaving the OLED on `?` placeholders.
 
-- Retunes Bluetooth speaker protection after 2.3.20 proved too quiet.
-- Dual-mono Bluetooth coefficients increase from `0.35 + 0.35` to `0.42 + 0.42`, restoring output level while retaining approximately 1.51 dB of peak headroom versus 2.3.19.
-- Keeps the 2.3.20 bounded metadata refresh burst and adds per-device partial Track merging: non-empty Title and Artist values are retained independently so iPhone AVRCP updates cannot erase the other field while it arrives separately.
-- Bluetooth metadata continues through UTF-8-safe IPC truncation and the same OLED `oled_filter_metadata_text()` cleanup/formatter/marquee path used by local MP3 metadata.
-- Bluetooth pairing/connect behavior, conditional `sinc-fastest` resampling, local MP3/alarm playback, weather GUI, and system GUI are unchanged.
+## Serialized music upload and transcoding
 
-## 2.3.20
+- Music uploads remain limited to 14 MP3 files per batch.
+- The internal job table is now 14 slots, matching the maximum batch size.
+- Only one music upload batch may be received at a time. A competing upload is rejected before its request body is written to temporary storage.
+- After the full batch is staged, transcoding begins and remains strictly one song at a time.
+- New music uploads are rejected while any song is queued or processing, avoiding upload I/O competing with transcoding CPU and SD-card I/O.
 
-- Keeps 2.3.19 Bluetooth pairing/connect behavior unchanged.
-- Adds ~3.1 dB fixed Bluetooth peak headroom in the dual-mono route to reduce speaker rattle on loud transients with effectively zero added CPU cost.
-- Local MP3/alarm audio is unchanged.
-- Adds a bounded 5-second, 0.5-second-interval Bluetooth media refresh burst when A2DP becomes active or AVRCP track metadata changes, improving delayed/inconsistent iPhone title/artist pickup without continuous polling.
+## Touch power wiring documentation
 
-## 2.3.19
+- Installer preflight now shows the complete TTP223B wiring: VCC to 3.3 V on physical pin 17, GND to physical pin 39, and OUT to PA17 on physical pin 37.
+- README touch wiring now shows power, ground, and signal together instead of only the signal pin.
+- `pinouts.md` already carried the correct electrical wiring and remains authoritative.
 
-- Fixes a false **Bluetooth control service unavailable** GUI error after a successful device Connect action.
-- Bluetooth status reads retain the short 4-second control-service health timeout.
-- Pairing/device actions receive action-appropriate control-socket timeouts (30s pairing / 35s device actions); HTTP request inactivity allowance is 40s without changing core IPC timeouts.
-- Successful Bluetooth device actions now queue the full inventory/media snapshot through the existing event-driven refresh worker instead of blocking the GUI request on a second expensive scan.
-- Bluetooth pairing/control semantics, metadata/title/artist display, pairing-only rapid polling, dual-mono audio and conditional `sinc-fastest` resampling are otherwise unchanged from 2.3.18.
+## Font upload selection
 
-# mk-clock-adult 2.3.19 release notes
+- Uploading a TTF or OTF font now adds it to the available font list without changing the active clock font.
+- The active clock font changes only when the user selects a font in Clock display and saves the setting.
+- If an uploaded file replaces a font that is already selected, the font cache is refreshed so the existing selection can use the updated file.
+- The Display page now states that an uploaded font must be chosen manually before it is used.
 
-## Weather panel GUI clarity
+## Previous fixes retained
 
-- Weather panel controls are now mode-aware: irrelevant inputs are hidden instead of merely disabled.
-- Inside sensor, Outside now, and Today low / high show no extra configuration fields.
-- Hours ahead shows only the 1–48 hour offset input.
-- Specific time shows only the forecast-hour input.
-- Each panel shows a short explanation for the selected source.
-- Weather data semantics and backend configuration are unchanged.
+- Preview37 weather high-time fallback remains intact: a valid derived time is shown when available; otherwise an official high is labelled `HIGH`.
+- Preview36 documentation, wiring, and playback-only cleanup remains intact.
+- Preview35 compile hotfix remains intact.
 
-## System GUI cleanup
+## Playback-only hardware contract
 
-- Built directly from mk-clock-adult 2.3.16.
-- Removed the following Storage rows from the System GUI because they are not useful on the production Banana Pi image and consistently report unavailable:
-  - Boot partition
-  - Boot filesystem
-  - Boot mount
-- Removed the corresponding browser-side diagnostics bindings.
-- The lower-level diagnostics collector/API is retained for support/CLI use; only the GUI presentation is removed.
-- Bluetooth pairing/control, pairing-only rapid polling, Bluetooth dual-mono audio path, conditional `sinc-fastest` resampling, local MP3/alarm playback, kernel, Device Tree and MAX98357A behavior are unchanged.
-
-## Baseline
-
-- Requires `bpi-zero-clock 1.0.3` / `bpi-m2-zero-r1`.
-- Retains the lean 2.3.10+ APT dependency list.
+- Paired base: `bpi-zero-clock 1.0.4-preview36`.
+- Kernel: `6.12.101+deb13-armmp`.
+- MAX98357A playback: PA19/BCLK pin 27, PA18/LRC pin 28, PA20/DIN pin 40, PA1/SD-EN pin 11.
+- Touch: VCC 3.3 V pin 17; GND pin 39; OUT PA17 pin 37 / gpiochip0 line 17.
+- PA21 / physical pin 38: free / unassigned.
+- HTTP API remains v1.59. Private core/API IPC remains v33.

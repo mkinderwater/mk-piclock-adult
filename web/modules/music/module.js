@@ -1,15 +1,16 @@
-import {audioTrackFacts, formatAudioBytes} from '/assets/js/audio-library.js?v=mk-clock-adult-2.3.22-bpi-m2-zero-r1';
+import {audioTrackFacts, formatAudioBytes} from '/assets/js/audio-library.js?v=mk-clock-adult-2.3.50-preview42-bpi-m2-zero-r1';
+
+const MAX_MUSIC_UPLOAD_FILES = 14;
 
 export async function mount(ctx) {
     const renderStatus = status => {
         if (!status) return;
         const localMetadata = [status.audio_title, status.audio_artist].filter(Boolean).join(' - ');
-        const bluetoothMetadata = [status.bluetooth_audio_title, status.bluetooth_audio_artist].filter(Boolean).join(' - ');
-        const playing = Boolean(status.audio_playing || status.bluetooth_audio_playing);
+        const playing = Boolean(status.audio_playing);
         ctx.setText('#music-status', playing ? 'Playing' : 'None');
         ctx.setText('#music-current', status.audio_playing
             ? (localMetadata || status.audio_file || 'Music')
-            : (bluetoothMetadata || (status.bluetooth_audio_playing ? 'Bluetooth audio' : 'None')));
+            : 'None');
         ctx.setValue('#global-volume', status.global_volume ?? 80);
         ctx.setText('#global-volume-value', `${status.global_volume ?? 80}%`);
     };
@@ -143,8 +144,8 @@ export async function mount(ctx) {
             ctx.notice('Select one or more MP3 files.', 'warn', 3000);
             return;
         }
-        if (files.files.length > 32) {
-            ctx.notice('Select 32 MP3 files or fewer.', 'warn', 3000);
+        if (files.files.length > MAX_MUSIC_UPLOAD_FILES) {
+            ctx.notice(`Select ${MAX_MUSIC_UPLOAD_FILES} MP3 files or fewer.`, 'warn', 3000);
             return;
         }
         try {

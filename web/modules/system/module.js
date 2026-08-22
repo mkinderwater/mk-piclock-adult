@@ -29,19 +29,73 @@ export async function mount(ctx) {
         if (!node) return;
         node.textContent = data.password_required ? 'Enabled' : 'Not set';
         node.className = `badge ${data.password_required ? 'ok' : ''}`.trim();
+        const remove = ctx.$('#remove-password');
+        if (remove) remove.classList.toggle('hidden', !data.password_required);
+        const actions = ctx.$('#password-actions');
+        if (actions) actions.classList.toggle('single-column', !data.password_required);
     };
 
+    const renderTimezone = data => {
+        const select = ctx.$('#system-timezone');
+        const state = ctx.$('#timezone-state');
+        if (!select || !state) return;
+        const current = data.timezone || 'UTC';
+        state.textContent = current;
+        state.className = 'badge ok';
+        if (!select.dataset.loaded) {
+            const zones = Array.isArray(data.zones) ? [...new Set(data.zones)] : [];
+            zones.sort((a, b) => a.localeCompare(b));
+            select.replaceChildren(...zones.map(zone => {
+                const option = document.createElement('option');
+                option.value = zone;
+                option.textContent = zone.replaceAll('_', ' ');
+                return option;
+            }));
+            select.dataset.loaded = '1';
+        }
+        if ([...select.options].some(option => option.value === current)) select.value = current;
+        select.disabled = false;
+    };
+
+    const loadTimezone = async () => {
+        const data = await ctx.json('/api/v1/system/timezone', {signal: ctx.signal});
+        renderTimezone(data);
+    };
+
+    const renderSystemSettings = data => {
+        const hostname = ctx.$('#system-hostname');
+        const hostnameState = ctx.$('#hostname-state');
+        const ntp = ctx.$('#system-ntp-server');
+        const ntpState = ctx.$('#ntp-source-state');
+        if (hostname && document.activeElement !== hostname) hostname.value = data.hostname || '';
+        if (hostnameState) {
+            hostnameState.textContent = data.hostname || 'Unavailable';
+            hostnameState.className = `badge ${data.hostname ? 'ok' : 'warn'}`;
+        }
+        if (ntp && document.activeElement !== ntp) ntp.value = data.ntp_server || '';
+        if (ntpState) {
+            ntpState.textContent = data.ntp_server || 'System default';
+            ntpState.className = `badge ${data.ntp_server ? 'ok' : ''}`.trim();
+        }
+    };
+
+    const loadSystemSettings = async () => {
+        const data = await ctx.json('/api/v1/system/settings', {signal: ctx.signal});
+        renderSystemSettings(data);
+        return data;
+    };
+
+
     const refresh = async () => {
-        const button = ctx.$('#system-refresh');
-        if (button) ctx.busy(button, true, 'Refreshing...');
         try {
-            const [status, source, activity, diagnostics, auth] = await Promise.all([
-                ctx.json('/api/v1/status', {signal: ctx.signal}),
-                ctx.json('/api/v1/config/weather-source', {signal: ctx.signal}),
-                ctx.json('/api/v1/weather/activity', {signal: ctx.signal}),
-                ctx.json('/api/v1/diagnostics', {signal: ctx.signal}),
-                ctx.json('/api/v1/auth/status', {signal: ctx.signal})
-            ]);
+            /* Keep the embedded API request pattern intentionally quiet.  A System
+               refresh needs several independent documents, but there is no benefit
+               to opening all of those connections at the same instant. */
+            const status = await ctx.json('/api/v1/status', {signal: ctx.signal});
+            const diagnostics = await ctx.json('/api/v1/diagnostics', {signal: ctx.signal});
+            const source = await ctx.json('/api/v1/config/weather-source', {signal: ctx.signal});
+            const activity = await ctx.json('/api/v1/weather/activity', {signal: ctx.signal});
+            const auth = await ctx.json('/api/v1/auth/status', {signal: ctx.signal});
 
             renderPassword(auth);
             ctx.setText('#system-product', 'mk-clock-adult');
@@ -119,14 +173,11 @@ export async function mount(ctx) {
             ctx.setText('#system-last-alarm', Number(status.last_successful_alarm || 0) > 0
                 ? new Date(Number(status.last_successful_alarm) * 1000).toLocaleString()
                 : 'Never');
-            const bluetoothTrack = status.bluetooth_audio_title || '';
             ctx.setText('#system-audio-state', status.alarm_active
                 ? `Alarm playing at ${status.alarm_volume_percent || 0}%`
                 : status.audio_playing
                     ? `Playing ${[status.audio_title, status.audio_artist].filter(Boolean).join(' - ') || status.audio_file || 'music'}`
-                    : status.bluetooth_audio_playing
-                        ? `Playing ${bluetoothTrack || 'Bluetooth audio'}`
-                        : 'Stopped');
+                    : 'Stopped');
 
             const weather = status.weather || {};
             ctx.setText('#system-weather-state', Number(weather.observed_at) > 0
@@ -139,8 +190,6 @@ export async function mount(ctx) {
         } catch (error) {
             setBadge('#system-api-state', false);
             ctx.notice(error.message || 'System information could not be loaded', 'warn', 3500);
-        } finally {
-            if (button) ctx.busy(button, false);
         }
     };
 
@@ -149,7 +198,7 @@ export async function mount(ctx) {
         event.preventDefault();
         const password = form.elements.password.value;
         if (!password) {
-            ctx.notice('Enter a password, or use Remove Password.', 'warn', 3000);
+            ctx.notice('Enter a password.', 'warn', 3000);
             return;
         }
         const button = event.submitter || form.querySelector('[type="submit"]');
@@ -184,6 +233,66 @@ export async function mount(ctx) {
         } catch (_) {}
     });
 
+    ctx.on('submit', '#timezone-form', async (event, form) => {
+        event.preventDefault();
+        const timezone = form.elements.timezone.value;
+        if (!timezone) return;
+        const button = event.submitter || form.querySelector('[type="submit"]');
+        try {
+            const response = await ctx.update(form.action, {
+                method: 'POST',
+                body: new URLSearchParams({timezone}),
+                button,
+                busyText: 'Saving timezone...',
+                done: 'Timezone changed',
+                errorText: 'Timezone could not be changed',
+                refreshStatus: false
+            });
+            const data = await response.json();
+            renderTimezone({...data, zones: [...ctx.$('#system-timezone').options].map(option => option.value)});
+            await refresh();
+        } catch (_) {}
+    });
+
+    ctx.on('submit', '#hostname-form', async (event, form) => {
+        event.preventDefault();
+        const hostname = form.elements.hostname.value.trim();
+        if (!hostname) return;
+        const button = event.submitter || form.querySelector('[type="submit"]');
+        try {
+            await ctx.update(form.action, {
+                method: 'POST',
+                body: new URLSearchParams({hostname}),
+                button,
+                busyText: 'Saving hostname...',
+                done: 'Hostname changed',
+                errorText: 'Hostname could not be changed',
+                refreshStatus: false
+            });
+            await loadSystemSettings();
+            await refresh();
+        } catch (_) {}
+    });
+
+    ctx.on('click', '#ntp-save', async (_event, button) => {
+        const input = ctx.$('#system-ntp-server');
+        const server = input?.value.trim() || '';
+        try {
+            await ctx.update('/api/v1/system/ntp', {
+                method: 'POST',
+                body: new URLSearchParams({server}),
+                button,
+                busyText: 'Saving NTP source...',
+                done: server ? `NTP source set to ${server}` : 'NTP source reset to system defaults',
+                errorText: 'NTP source could not be changed',
+                refreshStatus: false
+            });
+            await loadSystemSettings();
+            await refresh();
+        } catch (_) {}
+    });
+
+
     ctx.on('submit', '#restore-form', async (event, form) => {
         event.preventDefault();
         if (!window.confirm('Restore this backup? Settings, alarms, fonts, and Weather configuration will be replaced. Music will remain unchanged.')) return;
@@ -202,9 +311,14 @@ export async function mount(ctx) {
         } catch (_) {}
     });
 
-    ctx.on('click', '#system-refresh', () => refresh());
     await refresh();
-    const timer = window.setInterval(() => refresh().catch(() => {}), 10000);
-    ctx.signal.addEventListener('abort', () => window.clearInterval(timer), {once: true});
+    try { await loadTimezone(); } catch (error) {
+        const state = ctx.$('#timezone-state');
+        if (state) { state.textContent = 'Unavailable'; state.className = 'badge warn'; }
+        ctx.notice(error.message || 'Timezone information could not be loaded', 'warn', 3000);
+    }
+    try { await loadSystemSettings(); } catch (error) {
+        ctx.notice(error.message || 'System settings could not be loaded', 'warn', 3000);
+    }
     return {refresh};
 }

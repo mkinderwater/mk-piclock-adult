@@ -6,7 +6,7 @@
 /* Private same-host protocol. Integer fields use native byte order because both
  * endpoints run on the same Linux device and are built from this header. */
 #define MP_IPC_MAGIC 0x4D4B5043u /* MKPC */
-#define MP_IPC_VERSION 28u
+#define MP_IPC_VERSION 33u
 #define MP_IPC_MAX_PAYLOAD (128u * 1024u)
 
 struct mp_ipc_request_header {
@@ -51,7 +51,7 @@ enum mp_ipc_opcode {
     MP_IPC_OP_WEATHER_UPDATE = 19,
     MP_IPC_OP_CONFIG_EXPORT = 20,
     MP_IPC_OP_CONFIG_IMPORT = 21,
-    MP_IPC_OP_BLUETOOTH_STATE = 22
+    MP_IPC_OP_TIMEZONE_RELOAD = 22,
 };
 
 enum mp_ipc_display_action_code {
@@ -60,6 +60,8 @@ enum mp_ipc_display_action_code {
     MP_IPC_ACTION_STOP_AUDIO = 3,
     MP_IPC_ACTION_PLAY_MUSIC = 4
 };
+
+
 
 enum mp_ipc_asset_kind {
     MP_IPC_ASSET_MUSIC = 1,
@@ -85,19 +87,6 @@ struct mp_ipc_brightness_preview {
     uint8_t reserved[2];
 };
 
-#define MP_IPC_BLUETOOTH_TEXT_MAX 160
-#define MP_IPC_BLUETOOTH_PASSKEY_MAX 16
-
-struct mp_ipc_bluetooth_state {
-    uint8_t playing;
-    uint8_t pairing_passkey_active;
-    uint8_t reserved[2];
-    char title[MP_IPC_BLUETOOTH_TEXT_MAX];
-    char artist[MP_IPC_BLUETOOTH_TEXT_MAX];
-    char pairing_passkey[MP_IPC_BLUETOOTH_PASSKEY_MAX];
-};
-
-_Static_assert(sizeof(struct mp_ipc_bluetooth_state) == 340, "Bluetooth IPC state must be 340 bytes");
 
 
 struct mp_ipc_alarm_config {

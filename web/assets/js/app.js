@@ -12,14 +12,13 @@ const authError = document.querySelector('#auth-error');
 const authSubmit = document.querySelector('#auth-submit');
 
 const modules = Object.freeze([
-    {id: 'dashboard', name: 'Home', group: 'Everyday', enabled: true, default: true, order: 10},
-    {id: 'alarms', name: 'Alarms', group: 'Everyday', enabled: true, order: 20},
-    {id: 'music', name: 'Music', group: 'Everyday', enabled: true, order: 30},
-    {id: 'bluetooth', name: 'Bluetooth', group: 'Everyday', enabled: true, order: 35, css: false},
-    {id: 'weather', name: 'Weather', group: 'Settings', enabled: true, order: 40, css: false},
-    {id: 'display', name: 'Display', group: 'Settings', enabled: true, order: 50},
-    {id: 'system', name: 'System', group: 'Settings', enabled: true, order: 60, css: false},
-    {id: 'log', name: 'Recent Activity', group: 'Help', enabled: true, order: 70}
+    {id: 'dashboard', name: 'Home', group: 'Everyday', default: true, icon: 'home'},
+    {id: 'alarms', name: 'Alarms', group: 'Everyday', icon: 'bell'},
+    {id: 'music', name: 'Music', group: 'Everyday', icon: 'music'},
+    {id: 'weather', name: 'Weather', group: 'Settings', icon: 'cloud'},
+    {id: 'display', name: 'Display', group: 'Settings', icon: 'display'},
+    {id: 'system', name: 'System', group: 'Settings', icon: 'settings'},
+    {id: 'log', name: 'Recent activity', group: 'Help', icon: 'activity'}
 ]);
 let current = null;
 let status = null;
@@ -28,8 +27,8 @@ let authPromise = null;
 let authResolve = null;
 let noticeTimer = null;
 const statusListeners = new Set();
-const GUI_VERSION = 'mk-clock-adult-2.3.22-bpi-m2-zero-r1';
-const REQUIRED_API_VERSION = '1.48';
+const GUI_VERSION = 'mk-clock-adult-2.3.50-preview42-bpi-m2-zero-r1';
+const REQUIRED_API_VERSION = '1.59';
 const oledPreviewIntensity = Array.from({length: 16}, (_, level) =>
     level === 0 ? 0 : Math.pow(level / 15, 0.48));
 const oledPreviewColours = Object.freeze({
@@ -336,8 +335,7 @@ function makeMenuButton(menu, definition) {
     button.type = 'button';
     button.className = menu.id === 'mobile-menu' ? 'nav-item mobile-nav-item' : 'nav-item';
     button.dataset.moduleId = definition.id;
-    button.dataset.moduleGroup = definition.group || '';
-    button.textContent = definition.name;
+    button.innerHTML = `<svg class="nav-icon" aria-hidden="true"><use href="#icon-${definition.icon || 'settings'}"></use></svg><span>${definition.name}</span>`;
     button.addEventListener('click', () => navigate(definition.id));
     return button;
 }
@@ -384,7 +382,6 @@ function moduleContext(controller) {
     };
 
     return Object.freeze({
-        root: host,
         signal: controller.signal,
         $,
         on,
@@ -413,17 +410,9 @@ async function loadModule(id) {
     if (!definition || current?.id === definition.id) return;
 
     current?.controller.abort();
-    current?.css?.remove();
-
     const controller = new AbortController();
     const base = `/modules/${encodeURIComponent(definition.id)}`;
-    const css = definition.css === false ? null : document.createElement('link');
-    if (css) {
-        css.rel = 'stylesheet';
-        css.href = `${base}/module.css?v=${GUI_VERSION}`;
-        document.head.appendChild(css);
-    }
-    current = {id: definition.id, controller, css, refresh: null};
+    current = {id: definition.id, controller, refresh: null};
 
     setActiveMenu(definition.id);
     host.innerHTML = `<div class="card module-loading empty-state">Opening ${escapeHtml(definition.name)}...</div>`;
@@ -441,7 +430,6 @@ async function loadModule(id) {
         if (!controller.signal.aborted) current.refresh = mounted?.refresh || null;
     } catch (error) {
         if (controller.signal.aborted) return;
-        css?.remove();
         current = null;
         host.innerHTML = `<div class="card module-error"><h2>This page could not open</h2><p class="no-margin">${escapeHtml(error.message)}</p></div>`;
         notice(`${definition.name} could not open`, 'warn', 3500);

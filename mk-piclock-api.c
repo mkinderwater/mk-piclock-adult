@@ -33,6 +33,7 @@
 #include <sys/timex.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <sys/un.h>
 #include <sys/utsname.h>
 #include <time.h>
@@ -42,6 +43,7 @@
 #include FT_FREETYPE_H
 
 #include "hardware_profile.h"
+#include "interaction_profile.h"
 #include "asset_store.h"
 #include "font_catalog.h"
 #include "ipc_protocol.h"
@@ -54,17 +56,19 @@
 #include "weather_frames.h"
 #include "weather_version.h"
 #define API_NAME "mk-clock-adult-api"
-#define API_VERSION "1.48"
+#define API_VERSION "1.59"
 #define PRODUCT_VERSION MP_PRODUCT_VERSION
 #define BUILD_TIMESTAMP __DATE__ " " __TIME__
 #define DEFAULT_PUBLIC_BIND "0.0.0.0"
 #define DEFAULT_PUBLIC_PORT 8080
 #define CORE_SOCKET_PATH "/run/mk-piclock/core.sock"
-#define BLUETOOTH_CONTROL_SOCKET "/run/mk-clock-bluetooth/control.sock"
 #define WEB_DIR "/opt/mk-piclock/web"
 #define WEB_PASSWORD_FILE "/opt/mk-piclock/config/web-password.txt"
 #define WEB_PASSWORD_TEMP "/opt/mk-piclock/config/.web-password.tmp"
 #define WEB_PASSWORD_MAX 64
+#define SYSTEM_REQUEST_FILE "/run/mk-piclock/system-request"
+#define SYSTEM_REQUEST_TEMP "/run/mk-piclock/.system-request.tmp"
+#define NTP_OVERRIDE_FILE "/etc/systemd/timesyncd.conf.d/50-mk-clock-adult.conf"
 #define AUTH_COOKIE_NAME "mkpiclock_auth"
 #define MAX_REQUEST_BODY (128U * 1024U * 1024U)
 #define MAX_STATIC_FILE (64U * 1024U * 1024U)
@@ -74,19 +78,18 @@
 #define DEFAULT_MUSIC_QUOTA_BYTES (1024ULL * 1024ULL * 1024ULL)
 #define SOCKET_TIMEOUT_SEC 15
 #define HTTP_CONNECTION_TIMEOUT_SEC 40
-#define BLUETOOTH_STATUS_TIMEOUT_SEC 4
-#define BLUETOOTH_PAIRING_TIMEOUT_SEC 30
-#define BLUETOOTH_DEVICE_TIMEOUT_SEC 35
 #define MHD_THREAD_POOL_SIZE 2
-#define MHD_CONNECTION_LIMIT 12
+#define MHD_CONNECTION_LIMIT 32
 #define FORM_FIELDS_MAX 64
 #define FORM_KEY_MAX 64
-#define FORM_VALUE_MAX 512
+#define FORM_VALUE_MAX 16385
 #define UPLOAD_FILES_MAX 256
 #define MAX_BACKUP_BYTES (64ULL * 1024ULL * 1024ULL)
 #define BACKUP_ENTRY_MAX 512
 
 static volatile sig_atomic_t g_running = 1;
+static pthread_mutex_t g_music_upload_gate_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_music_upload_in_progress = 0;
 static char g_allowed_origin[ALLOWED_ORIGIN_MAX];
 static uid_t g_expected_core_uid = (uid_t)-1;
 static uint64_t g_music_quota_bytes = DEFAULT_MUSIC_QUOTA_BYTES;
@@ -101,6 +104,11 @@ enum route_id {
     ROUTE_HEALTH,
     ROUTE_DIAGNOSTICS,
     ROUTE_DIAGNOSTIC_REPORT,
+    ROUTE_SYSTEM_TIMEZONE_GET,
+    ROUTE_SYSTEM_TIMEZONE_SET,
+    ROUTE_SYSTEM_SETTINGS_GET,
+    ROUTE_SYSTEM_HOSTNAME_SET,
+    ROUTE_SYSTEM_NTP_SET,
     ROUTE_BACKUP_DOWNLOAD,
     ROUTE_BACKUP_RESTORE,
     ROUTE_FONTS_LIST,
@@ -120,9 +128,6 @@ enum route_id {
     ROUTE_CONFIG_AUDIO,
     ROUTE_CONFIG_PERSONALIZATION,
     ROUTE_CONFIG_DISPLAY,
-    ROUTE_BLUETOOTH_STATUS,
-    ROUTE_BLUETOOTH_PAIRING,
-    ROUTE_BLUETOOTH_DEVICE,
     ROUTE_WEATHER_ACTIVITY_GET,
     ROUTE_WEATHER_FRAMES_GET,
     ROUTE_WEATHER_FRAMES_SET,
@@ -147,6 +152,11 @@ static const struct api_route g_routes[] = {
     {"GET",  "/api/v1/health",                         ROUTE_HEALTH},
     {"GET",  "/api/v1/diagnostics",                    ROUTE_DIAGNOSTICS},
     {"GET",  "/api/v1/diagnostics/report",             ROUTE_DIAGNOSTIC_REPORT},
+    {"GET",  "/api/v1/system/timezone",                ROUTE_SYSTEM_TIMEZONE_GET},
+    {"POST", "/api/v1/system/timezone",                ROUTE_SYSTEM_TIMEZONE_SET},
+    {"GET",  "/api/v1/system/settings",                ROUTE_SYSTEM_SETTINGS_GET},
+    {"POST", "/api/v1/system/hostname",                ROUTE_SYSTEM_HOSTNAME_SET},
+    {"POST", "/api/v1/system/ntp",                     ROUTE_SYSTEM_NTP_SET},
     {"GET",  "/api/v1/backup/download",                 ROUTE_BACKUP_DOWNLOAD},
     {"POST", "/api/v1/backup/restore",                  ROUTE_BACKUP_RESTORE},
     {"GET",  "/api/v1/assets/fonts",                    ROUTE_FONTS_LIST},
@@ -166,9 +176,6 @@ static const struct api_route g_routes[] = {
     {"POST", "/api/v1/config/audio",                    ROUTE_CONFIG_AUDIO},
     {"POST", "/api/v1/config/personalization",          ROUTE_CONFIG_PERSONALIZATION},
     {"POST", "/api/v1/config/display",                  ROUTE_CONFIG_DISPLAY},
-    {"GET",  "/api/v1/bluetooth",                       ROUTE_BLUETOOTH_STATUS},
-    {"POST", "/api/v1/bluetooth/pairing",               ROUTE_BLUETOOTH_PAIRING},
-    {"POST", "/api/v1/bluetooth/device",                ROUTE_BLUETOOTH_DEVICE},
     {"GET",  "/api/v1/weather/activity",              ROUTE_WEATHER_ACTIVITY_GET},
     {"GET",  "/api/v1/config/weather-frames",          ROUTE_WEATHER_FRAMES_GET},
     {"POST", "/api/v1/config/weather-frames",          ROUTE_WEATHER_FRAMES_SET},
@@ -208,6 +215,8 @@ struct request_context {
     int body_too_large;
     int response_queued;
     size_t upload_limit;
+    int music_upload_reserved;
+    int music_upload_rejected;
 };
 
 struct ipc_result {
@@ -219,6 +228,32 @@ struct ipc_result {
 
 static int ipc_call(uint16_t opcode, const void *payload, size_t payload_len, struct ipc_result *result);
 static void ipc_result_free(struct ipc_result *result);
+
+static int music_upload_try_reserve(void) {
+    pthread_mutex_lock(&g_music_upload_gate_lock);
+    if (g_music_upload_in_progress) {
+        pthread_mutex_unlock(&g_music_upload_gate_lock);
+        return 0;
+    }
+    g_music_upload_in_progress = 1;
+    pthread_mutex_unlock(&g_music_upload_gate_lock);
+
+    if (mp_music_jobs_active() > 0) {
+        pthread_mutex_lock(&g_music_upload_gate_lock);
+        g_music_upload_in_progress = 0;
+        pthread_mutex_unlock(&g_music_upload_gate_lock);
+        return 0;
+    }
+    return 1;
+}
+
+static void music_upload_release(struct request_context *context) {
+    if (!context || !context->music_upload_reserved) return;
+    pthread_mutex_lock(&g_music_upload_gate_lock);
+    g_music_upload_in_progress = 0;
+    pthread_mutex_unlock(&g_music_upload_gate_lock);
+    context->music_upload_reserved = 0;
+}
 
 static void on_signal(int sig) {
     (void)sig;
@@ -2202,92 +2237,6 @@ static int form_int(const struct request_context *context, const char *key, int 
     return parse_int_value(form_value(context, key), fallback);
 }
 
-static int valid_bluetooth_mac(const char *value) {
-    if (!value || strlen(value) != 17) return 0;
-    for (size_t i = 0; i < 17; i++) {
-        if ((i + 1) % 3 == 0) {
-            if (value[i] != ':') return 0;
-        } else if (!isxdigit((unsigned char)value[i])) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-static int bluetooth_control_request(const char *command, char *response, size_t response_len,
-                                     int timeout_sec) {
-    if (!command || !*command || !response || response_len < 2 || timeout_sec < 1) return -1;
-    response[0] = '\0';
-
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) return -1;
-
-    struct timeval timeout = {.tv_sec = timeout_sec, .tv_usec = 0};
-    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-
-    struct sockaddr_un address;
-    memset(&address, 0, sizeof(address));
-    address.sun_family = AF_UNIX;
-    mp_safe_str(address.sun_path, sizeof(address.sun_path), BLUETOOTH_CONTROL_SOCKET);
-    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
-        close(fd);
-        return -1;
-    }
-
-    char request[128];
-    int request_len = snprintf(request, sizeof(request), "%s\n", command);
-    if (request_len <= 0 || (size_t)request_len >= sizeof(request)) {
-        close(fd);
-        return -1;
-    }
-    size_t sent = 0;
-    while (sent < (size_t)request_len) {
-        ssize_t wrote = send(fd, request + sent, (size_t)request_len - sent, MSG_NOSIGNAL);
-        if (wrote <= 0) {
-            close(fd);
-            return -1;
-        }
-        sent += (size_t)wrote;
-    }
-
-    size_t used = 0;
-    while (used + 1 < response_len) {
-        ssize_t got = recv(fd, response + used, response_len - used - 1, 0);
-        if (got < 0) {
-            if (errno == EINTR) continue;
-            close(fd);
-            return -1;
-        }
-        if (got == 0) break;
-        used += (size_t)got;
-        if (memchr(response, '\n', used)) break;
-    }
-    close(fd);
-    if (used == 0) return -1;
-    response[used] = '\0';
-    char *newline = strchr(response, '\n');
-    if (newline) *newline = '\0';
-    return 0;
-}
-
-static enum MHD_Result serve_bluetooth_command_timeout(struct MHD_Connection *connection,
-                                                        const char *command, int error_status,
-                                                        int timeout_sec) {
-    char response[65536];
-    if (bluetooth_control_request(command, response, sizeof(response), timeout_sec) != 0)
-        return queue_json(connection, 503,
-            "{\"ok\":false,\"available\":false,\"error\":\"Bluetooth control service unavailable\"}");
-    int status = strstr(response, "\"ok\":false") ? error_status : 200;
-    return queue_json(connection, status, response);
-}
-
-static enum MHD_Result serve_bluetooth_command(struct MHD_Connection *connection,
-                                                const char *command, int error_status) {
-    return serve_bluetooth_command_timeout(connection, command, error_status,
-                                           BLUETOOTH_STATUS_TIMEOUT_SEC);
-}
-
 static uint64_t form_u64(const struct request_context *context, const char *key, uint64_t fallback) {
     const char *value = form_value(context, key);
     if (!value || !*value) return fallback;
@@ -2349,6 +2298,304 @@ static enum MHD_Result configure_web_password(struct MHD_Connection *connection,
         "{\"ok\":true,\"password_required\":true}", cookie);
 }
 
+
+static int current_timezone_name(char *output, size_t output_len) {
+    if (!output || output_len == 0) return -1;
+    output[0] = '\0';
+    char resolved[PATH_MAX];
+    if (realpath("/etc/localtime", resolved)) {
+        static const char prefix[] = "/usr/share/zoneinfo/";
+        if (strncmp(resolved, prefix, sizeof(prefix) - 1) == 0) {
+            mp_safe_str(output, output_len, resolved + sizeof(prefix) - 1);
+            if (strcmp(output, "Etc/UTC") == 0) mp_safe_str(output, output_len, "UTC");
+            return output[0] ? 0 : -1;
+        }
+    }
+    FILE *f = fopen("/etc/timezone", "r");
+    if (!f) return -1;
+    if (!fgets(output, (int)output_len, f)) {
+        fclose(f);
+        output[0] = '\0';
+        return -1;
+    }
+    fclose(f);
+    output[strcspn(output, "\r\n")] = '\0';
+    return output[0] ? 0 : -1;
+}
+
+static int timezone_table_contains(const char *timezone) {
+    if (!timezone || !*timezone) return 0;
+    if (strcmp(timezone, "UTC") == 0) return 1;
+    const char *tables[] = {"/usr/share/zoneinfo/zone1970.tab", "/usr/share/zoneinfo/zone.tab"};
+    for (size_t table = 0; table < sizeof(tables) / sizeof(tables[0]); table++) {
+        FILE *f = fopen(tables[table], "r");
+        if (!f) continue;
+        char line[1024];
+        while (fgets(line, sizeof(line), f)) {
+            if (line[0] == '#') continue;
+            char *save = NULL;
+            (void)strtok_r(line, "\t", &save);
+            (void)strtok_r(NULL, "\t", &save);
+            char *zone = strtok_r(NULL, "\t", &save);
+            if (!zone) continue;
+            zone[strcspn(zone, "\r\n\t")] = '\0';
+            if (strcmp(zone, timezone) == 0) {
+                fclose(f);
+                return 1;
+            }
+        }
+        fclose(f);
+    }
+    return 0;
+}
+
+static int run_timedatectl_timezone(const char *timezone) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        execl("/usr/bin/timedatectl", "timedatectl", "set-timezone", timezone, (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR) continue;
+        return -1;
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+}
+
+static enum MHD_Result serve_system_timezone(struct MHD_Connection *connection) {
+    char current[PATH_MAX] = "";
+    if (current_timezone_name(current, sizeof(current)) != 0)
+        mp_safe_str(current, sizeof(current), "UTC");
+
+    const char *table_path = access("/usr/share/zoneinfo/zone1970.tab", R_OK) == 0
+        ? "/usr/share/zoneinfo/zone1970.tab" : "/usr/share/zoneinfo/zone.tab";
+    FILE *f = fopen(table_path, "r");
+    if (!f)
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"timezone database is unavailable\"}");
+
+    struct mp_buffer body;
+    if (mp_buffer_init(&body, 8192, 256U * 1024U) != 0) {
+        fclose(f);
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"allocation failed\"}");
+    }
+    mp_buffer_append(&body, "{\"ok\":true,\"timezone\":\"");
+    mp_buffer_append_json_string(&body, current);
+    mp_buffer_append(&body, "\",\"zones\":[\"UTC\"");
+    char line[1024];
+    while (fgets(line, sizeof(line), f) && !body.failed) {
+        if (line[0] == '#') continue;
+        char *save = NULL;
+        (void)strtok_r(line, "\t", &save);
+        (void)strtok_r(NULL, "\t", &save);
+        char *zone = strtok_r(NULL, "\t", &save);
+        if (!zone) continue;
+        zone[strcspn(zone, "\r\n\t")] = '\0';
+        if (!*zone || strcmp(zone, "UTC") == 0) continue;
+        mp_buffer_append(&body, ",\"");
+        mp_buffer_append_json_string(&body, zone);
+        mp_buffer_append(&body, "\"");
+    }
+    fclose(f);
+    mp_buffer_append(&body, "]}");
+    return queue_json_builder(connection, 200, &body);
+}
+
+static enum MHD_Result configure_system_timezone(struct MHD_Connection *connection,
+                                                  const struct request_context *context) {
+    const char *timezone = form_value(context, "timezone");
+    if (!timezone || !timezone_table_contains(timezone))
+        return queue_json(connection, 400, "{\"ok\":false,\"error\":\"select a valid IANA timezone\"}");
+
+    char current[PATH_MAX] = "";
+    if (current_timezone_name(current, sizeof(current)) == 0 && strcmp(current, timezone) == 0)
+        return queue_json(connection, 200, "{\"ok\":true,\"changed\":false}");
+
+    if (run_timedatectl_timezone(timezone) != 0)
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"system timezone could not be changed\"}");
+
+    tzset();
+    struct ipc_result result;
+    int core_reloaded = ipc_call(MP_IPC_OP_TIMEZONE_RELOAD, NULL, 0, &result) == 0;
+    if (core_reloaded) {
+        core_reloaded = result.status == 200;
+        ipc_result_free(&result);
+    }
+
+    struct mp_buffer body;
+    if (mp_buffer_init(&body, 128, 4096) != 0)
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"allocation failed\"}");
+    mp_buffer_append(&body, "{\"ok\":true,\"changed\":true,\"timezone\":\"");
+    mp_buffer_append_json_string(&body, timezone);
+    mp_buffer_appendf(&body, "\",\"core_reloaded\":%s}", core_reloaded ? "true" : "false");
+    return queue_json_builder(connection, 200, &body);
+}
+
+
+
+static int system_value_has_control(const char *value) {
+    if (!value) return 1;
+    for (const unsigned char *p = (const unsigned char *)value; *p; p++)
+        if (*p < 0x20 || *p == 0x7f) return 1;
+    return 0;
+}
+
+static int valid_system_hostname(const char *value) {
+    if (!value) return 0;
+    size_t len = strlen(value);
+    if (len < 1 || len > 253) return 0;
+    if (!isalnum((unsigned char)value[0]) || !isalnum((unsigned char)value[len - 1])) return 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)value[i];
+        if (!(isalnum(ch) || ch == '-' || ch == '.')) return 0;
+        if (ch == '.' && i + 1 < len && value[i + 1] == '.') return 0;
+    }
+    return 1;
+}
+
+static int valid_ntp_server(const char *value) {
+    if (!value) return 0;
+    size_t len = strlen(value);
+    if (len == 0) return 1;
+    if (len > 253 || system_value_has_control(value)) return 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)value[i];
+        if (!(isalnum(ch) || ch == '.' || ch == '-' || ch == '_' || ch == ':')) return 0;
+    }
+    return 1;
+}
+
+
+static void file_write_hex(FILE *f, const char *key, const char *value) {
+    if (!f || !key) return;
+    fprintf(f, "%s=", key);
+    if (value) {
+        const unsigned char *p = (const unsigned char *)value;
+        while (*p) fprintf(f, "%02x", (unsigned int)*p++);
+    }
+    fputc('\n', f);
+}
+
+static int write_system_request(const char *action,
+                                const char *value,
+                                const char *value2,
+                                const char *value3) {
+    if (!action || !*action) return -1;
+    FILE *f = fopen(SYSTEM_REQUEST_TEMP, "w");
+    if (!f) return -1;
+    fprintf(f, "action=%s\n", action);
+    file_write_hex(f, "value_hex", value ? value : "");
+    file_write_hex(f, "value2_hex", value2 ? value2 : "");
+    file_write_hex(f, "value3_hex", value3 ? value3 : "");
+    int failed = 0;
+    if (fflush(f) != 0) failed = 1;
+    if (!failed && fsync(fileno(f)) != 0) failed = 1;
+    if (fclose(f) != 0) failed = 1;
+    if (failed) {
+        unlink(SYSTEM_REQUEST_TEMP);
+        return -1;
+    }
+    chmod(SYSTEM_REQUEST_TEMP, 0600);
+    if (rename(SYSTEM_REQUEST_TEMP, SYSTEM_REQUEST_FILE) != 0) {
+        unlink(SYSTEM_REQUEST_TEMP);
+        return -1;
+    }
+    return 0;
+}
+
+static int run_system_helper(void) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        execl("/usr/bin/systemctl", "systemctl", "start", "mk-clock-system-config.service", (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR) continue;
+        return -1;
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+}
+
+static int request_system_helper(const char *action,
+                                 const char *value,
+                                 const char *value2,
+                                 const char *value3) {
+    if (write_system_request(action, value, value2, value3) != 0) return -1;
+    int rc = run_system_helper();
+    if (rc != 0) unlink(SYSTEM_REQUEST_FILE);
+    return rc;
+}
+
+static int read_ntp_override(char *output, size_t output_len) {
+    if (!output || output_len == 0) return -1;
+    output[0] = '\0';
+    FILE *f = fopen(NTP_OVERRIDE_FILE, "r");
+    if (!f) return errno == ENOENT ? 0 : -1;
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "NTP=", 4) != 0) continue;
+        char *value = line + 4;
+        value[strcspn(value, "\r\n")] = '\0';
+        mp_safe_str(output, output_len, value);
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    return 0;
+}
+
+
+static enum MHD_Result serve_system_settings(struct MHD_Connection *connection) {
+    char hostname[256] = "";
+    char ntp[256] = "";
+    if (gethostname(hostname, sizeof(hostname) - 1) != 0) mp_safe_str(hostname, sizeof(hostname), "unknown");
+    (void)read_ntp_override(ntp, sizeof(ntp));
+    struct network_diagnostics network;
+    collect_network_diagnostics(&network);
+
+    struct mp_buffer body;
+    if (mp_buffer_init(&body, 512, 8192) != 0)
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"allocation failed\"}");
+    mp_buffer_append(&body, "{\"ok\":true,\"hostname\":\"");
+    mp_buffer_append_json_string(&body, hostname);
+    mp_buffer_append(&body, "\",\"ntp_server\":\"");
+    mp_buffer_append_json_string(&body, ntp);
+    mp_buffer_append(&body, "\",\"ssid\":\"");
+    mp_buffer_append_json_string(&body, network.ssid);
+    mp_buffer_appendf(&body, "\",\"wifi_signal_available\":%s,\"wifi_signal_percent\":%d,\"wifi_signal_dbm\":%d}",
+                      network.wifi_signal_available ? "true" : "false",
+                      network.wifi_signal_percent, network.wifi_signal_dbm);
+    return queue_json_builder(connection, 200, &body);
+}
+
+static enum MHD_Result configure_system_hostname(struct MHD_Connection *connection,
+                                                  const struct request_context *context) {
+    const char *hostname = form_value(context, "hostname");
+    if (!hostname || !valid_system_hostname(hostname))
+        return queue_json(connection, 400, "{\"ok\":false,\"error\":\"enter a valid hostname\"}");
+    char current[256] = "";
+    if (gethostname(current, sizeof(current) - 1) == 0 && strcmp(current, hostname) == 0)
+        return queue_json(connection, 200, "{\"ok\":true,\"changed\":false}");
+    if (request_system_helper("hostname", hostname, "", "") != 0)
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"hostname could not be changed\"}");
+    return queue_json(connection, 200, "{\"ok\":true,\"changed\":true}");
+}
+
+static enum MHD_Result configure_system_ntp(struct MHD_Connection *connection,
+                                             const struct request_context *context) {
+    const char *server = form_value(context, "server");
+    if (!server) server = "";
+    if (!valid_ntp_server(server))
+        return queue_json(connection, 400, "{\"ok\":false,\"error\":\"enter a valid NTP hostname or IP address\"}");
+    if (request_system_helper("ntp", server, "", "") != 0)
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"NTP source could not be changed\"}");
+    return queue_json(connection, 200, "{\"ok\":true}");
+}
+
+
 static int parse_weather_slot_kind(const char *value, int fallback) {
     if (!value || !*value) return fallback;
     if (strcasecmp(value, "room") == 0) return MP_WEATHER_SLOT_ROOM;
@@ -2396,6 +2643,7 @@ static void close_uploads(struct request_context *context) {
 
 static void cleanup_context(struct request_context *context) {
     if (!context) return;
+    music_upload_release(context);
     if (context->post) MHD_destroy_post_processor(context->post);
     close_uploads(context);
     for (size_t i = 0; i < context->upload_count; i++) {
@@ -2637,9 +2885,9 @@ static enum MHD_Result upload_music(struct MHD_Connection *connection, struct re
     if (mp_music_jobs_active() > 0)
         return queue_json(connection, 409,
                           "{\"ok\":false,\"error\":\"wait for all selected songs to finish before uploading more\"}");
-    if (context->upload_count == 0 || context->upload_count > MP_MUSIC_JOB_MAX)
+    if (context->upload_count == 0 || context->upload_count > MP_MUSIC_UPLOAD_MAX)
         return queue_json(connection, 400,
-                          "{\"ok\":false,\"error\":\"upload between 1 and 32 MP3 files at a time\"}");
+                          "{\"ok\":false,\"error\":\"upload between 1 and 14 MP3 files at a time\"}");
 
     struct mp_audio_optimize_settings settings = {
         .bitrate_kbps = form_int(context, "bitrate_kbps", 96),
@@ -2796,6 +3044,8 @@ static enum MHD_Result delete_font(struct MHD_Connection *connection, const stru
     return queue_json(connection, 200, "{\"ok\":true,\"deleted\":true}");
 }
 
+
+static void weather_source_json_escape(char *output, size_t output_size, const char *input);
 
 static void weather_source_json_escape(char *output, size_t output_size, const char *input) {
     if (!output || output_size == 0) return;
@@ -3127,6 +3377,10 @@ static enum MHD_Result serve_diagnostic_report(struct MHD_Connection *connection
         time_t value = (time_t)info.last_successful_alarm; struct tm alarm_tm;
         localtime_r(&value, &alarm_tm); strftime(last_alarm, sizeof(last_alarm), "%Y-%m-%d %H:%M:%S %Z", &alarm_tm);
     }
+    char wifi_signal[64] = "Unavailable";
+    if (info.network.wifi_signal_available)
+        snprintf(wifi_signal, sizeof(wifi_signal), "%d%% (%d dBm)",
+                 info.network.wifi_signal_percent, info.network.wifi_signal_dbm);
     mp_buffer_appendf(&report,
         "mk-clock-adult Diagnostic Report\nGenerated: %s\nProduct: %s\nAPI: %s\nWeather: %s\nCompiled: %s\n\n"
         "Platform\nHardware: %s\nOperating system: %s\nOS version: %s\nOS codename: %s\nKernel: %s\nArchitecture: %s\nUptime: %llu seconds\n\n"
@@ -3148,7 +3402,7 @@ static enum MHD_Result serve_diagnostic_report(struct MHD_Connection *connection
         info.machine_id[0]?info.machine_id:"Unavailable", info.cpu_signature[0]?info.cpu_signature:"Unavailable",
         info.network.hostname, info.network.interface_name[0]?info.network.interface_name:"Unavailable",
         info.network.ip_address[0]?info.network.ip_address:"Unavailable", info.network.ssid[0]?info.network.ssid:"Unavailable",
-        info.network.wifi_signal_available ? "Available" : "Unavailable",
+        wifi_signal,
         info.network.ntp_synchronized?"Yes":"No", info.network.system_time_valid?"Yes":"No",
         info.root_disk[0]?info.root_disk:"Unavailable", info.root_device[0]?info.root_device:"Unavailable",
         info.root_filesystem[0]?info.root_filesystem:"Unavailable", info.root_device[0]?(info.root_read_only?"Read-only":"Read/write"):"Unavailable",
@@ -3193,6 +3447,16 @@ static enum MHD_Result dispatch_route(struct MHD_Connection *connection,
             return serve_network_diagnostics(connection);
         case ROUTE_DIAGNOSTIC_REPORT:
             return serve_diagnostic_report(connection);
+        case ROUTE_SYSTEM_TIMEZONE_GET:
+            return serve_system_timezone(connection);
+        case ROUTE_SYSTEM_TIMEZONE_SET:
+            return configure_system_timezone(connection, context);
+        case ROUTE_SYSTEM_SETTINGS_GET:
+            return serve_system_settings(connection);
+        case ROUTE_SYSTEM_HOSTNAME_SET:
+            return configure_system_hostname(connection, context);
+        case ROUTE_SYSTEM_NTP_SET:
+            return configure_system_ntp(connection, context);
         case ROUTE_BACKUP_DOWNLOAD:
             return download_backup(connection);
         case ROUTE_BACKUP_RESTORE:
@@ -3338,34 +3602,6 @@ static enum MHD_Result dispatch_route(struct MHD_Connection *connection,
             }
             return call_core(connection, MP_IPC_OP_CONFIG_DISPLAY, &request, sizeof(request));
         }
-        case ROUTE_BLUETOOTH_STATUS:
-            return serve_bluetooth_command(connection, "status", 503);
-        case ROUTE_BLUETOOTH_PAIRING: {
-            int enabled = form_int(context, "enabled", -1);
-            if (enabled != 0 && enabled != 1)
-                return queue_json(connection, 400,
-                    "{\"ok\":false,\"error\":\"enabled must be 0 or 1\"}");
-            return serve_bluetooth_command_timeout(connection,
-                enabled ? "pairing on" : "pairing off", 503,
-                BLUETOOTH_PAIRING_TIMEOUT_SEC);
-        }
-        case ROUTE_BLUETOOTH_DEVICE: {
-            const char *action = form_value(context, "action");
-            const char *address = form_value(context, "address");
-            if (!action || (strcmp(action, "connect") != 0 &&
-                            strcmp(action, "disconnect") != 0 &&
-                            strcmp(action, "forget") != 0 &&
-                            strcmp(action, "trust") != 0))
-                return queue_json(connection, 400,
-                    "{\"ok\":false,\"error\":\"invalid Bluetooth action\"}");
-            if (!valid_bluetooth_mac(address))
-                return queue_json(connection, 400,
-                    "{\"ok\":false,\"error\":\"invalid Bluetooth address\"}");
-            char command[96];
-            snprintf(command, sizeof(command), "device %.10s %.17s", action, address);
-            return serve_bluetooth_command_timeout(connection, command, 503,
-                                                     BLUETOOTH_DEVICE_TIMEOUT_SEC);
-        }
         case ROUTE_WEATHER_ACTIVITY_GET:
             return weather_activity_get(connection);
         case ROUTE_WEATHER_FRAMES_GET:
@@ -3509,9 +3745,9 @@ static enum MHD_Result dispatch_route(struct MHD_Connection *connection,
                 if (slot_low_temperatures[i] < -99 || slot_low_temperatures[i] > 99 ||
                     slot_high_temperatures[i] < -99 || slot_high_temperatures[i] > 99)
                     return queue_json(connection, 400, "{\"ok\":false,\"error\":\"daily low and high temperatures must be between -99 and 99\"}");
-                if (slot_low_hours[i] < 0 || slot_low_hours[i] > 23 ||
-                    slot_high_hours[i] < 0 || slot_high_hours[i] > 23)
-                    return queue_json(connection, 400, "{\"ok\":false,\"error\":\"daily low and high hours must be between 0 and 23\"}");
+                if (slot_low_hours[i] < 0 || slot_low_hours[i] > 24 ||
+                    slot_high_hours[i] < 0 || slot_high_hours[i] > 24)
+                    return queue_json(connection, 400, "{\"ok\":false,\"error\":\"daily low and high hours must be 0..23, or 24 when unavailable\"}");
                 if (slot_precipitation[i] < 0 || slot_precipitation[i] > 100)
                     return queue_json(connection, 400, "{\"ok\":false,\"error\":\"forecast precipitation must be between 0 and 100\"}");
                 request.slots[i].temperature_c = (int16_t)slot_temperatures[i];
@@ -3549,7 +3785,15 @@ static enum MHD_Result request_handler(void *cls, struct MHD_Connection *connect
         if (!context) return MHD_NO;
         context->route = find_route(method, url);
         context->upload_limit = route_upload_limit(context->route);
-        if (context->route && strcmp(method, MHD_HTTP_METHOD_POST) == 0) {
+        if (context->route && context->route->id == ROUTE_UPLOAD_MUSIC &&
+            strcmp(method, MHD_HTTP_METHOD_POST) == 0) {
+            if (music_upload_try_reserve())
+                context->music_upload_reserved = 1;
+            else
+                context->music_upload_rejected = 1;
+        }
+        if (context->route && strcmp(method, MHD_HTTP_METHOD_POST) == 0 &&
+            !context->music_upload_rejected) {
             const char *content_type = MHD_lookup_connection_value(
                 connection, MHD_HEADER_KIND, MHD_HTTP_HEADER_CONTENT_TYPE);
             int form_body = content_type &&
@@ -3563,7 +3807,16 @@ static enum MHD_Result request_handler(void *cls, struct MHD_Connection *connect
         *con_cls = context;
         return MHD_YES;
     }
-    if (context->response_queued) return MHD_YES;
+    if (context->response_queued) {
+        *upload_data_size = 0;
+        return MHD_YES;
+    }
+    if (context->music_upload_rejected) {
+        *upload_data_size = 0;
+        context->response_queued = 1;
+        return queue_json(connection, 409,
+                          "{\"ok\":false,\"error\":\"music upload or processing is already in progress\"}");
+    }
     if (*upload_data_size > 0) {
         if (*upload_data_size > MAX_REQUEST_BODY - context->received_bytes) {
             context->body_too_large = 1;

@@ -1,151 +1,183 @@
-# PINOUT.MD — mk-clock-adult 2.3.24
+# mk-clock-adult 2.3.50-preview42 BPI-M2 Zero pinouts
 
-Production wiring reference for the **Banana Pi M2 Zero** adult clock running `bpi-zero-clock 1.0.3`.
+This document covers the Banana Pi M2 Zero 40-pin CON2 header used by the adult clock with `bpi-zero-clock 1.0.4-preview36`. Physical pin 38 / PA21 is unassigned and free. Touch is physical pin 37 / PA17.
 
-Physical pin numbers refer to the 40-pin Banana Pi header.
+Paired kernel ABI: `6.12.101+deb13-armmp`.
 
-## SSD1322 OLED — SPI0
+The application uses `/dev/gpiochip0` line offsets, not Raspberry Pi BCM numbers.
 
-| OLED pin | Function | BPI M2 Zero | Physical pin |
-|---|---|---|---:|
-| VSS / GND | Ground | GND | 6 |
-| VCC_IN | 3.3 V | 3.3 V | 1 |
-| D0 / CLK | SPI clock | SPI0-CLK / PC2 | 23 |
-| D1 / DIN | SPI MOSI | SPI0-MOSI / PC0 | 19 |
-| D/C | Data / Command | PA2 | 22 |
-| RES | Reset | PA0 | 13 |
-| CS | Chip Select | SPI0-CS / PC3 | 24 |
+## Touch wiring revision
 
-Software device:
+The current touch mapping differs from older Banana Pi adult-clock wiring:
+
+| Wiring generation | TTP223B OUT | Physical pin 38 / PA21 |
+|:--|:--|:--|
+| Older builds through `2.3.50-preview1` | **PA21 / pin 38** | Touch input |
+| Microphone-era previews beginning with `2.3.50-preview2` | **PA17 / pin 37** | Reserved for I2S receive data |
+| Current playback-only build | **PA17 / pin 37** | **Free / unassigned** |
+
+Touch deliberately stays on PA17 / physical pin 37 to avoid requiring another hardware rewiring change. **Do not move the touch wire back to pin 38.**
+
+To upgrade an older unit, power it off and move only TTP223B `OUT` / `SIG` from physical pin 38 to physical pin 37. Leave TTP223B VCC on pin 17 and GND on pin 39. Leave pin 38 disconnected. See `HARDWARE_MIGRATION.md` for the complete migration note.
+
+## Complete wiring
+
+| Physical pin | Device / signal | BPI signal | gpiochip0 line | Direction / use |
+|--:|:--|:--|--:|:--|
+| 1 | SSD1322 VCC_IN | 3.3 V | - | Board to OLED |
+| 2 | MAX98357A VIN | 5 V | - | Board to amplifier |
+| 3 | AHT10 SDA | PA12 / TWI0 SDA | 12, I2C-owned | Bidirectional |
+| 4 | Clock power input | 5 V | - | Regulated external +5 V |
+| 5 | AHT10 SCL | PA11 / TWI0 SCL | 11, I2C-owned | Board to sensor |
+| 6 | Clock / OLED ground | GND | - | Common ground |
+| 9 | AHT10 ground | GND | - | Common ground |
+| 11 | MAX98357A SD / EN | PA1 | 1, codec-owned | Board to amplifier |
+| 13 | SSD1322 RES# | PA0 | 0 | Board to OLED |
+| 14 | MAX98357A GND | GND | - | Common ground |
+| 17 | AHT10 + TTP223B VCC | 3.3 V | - | Shared 3.3 V branch |
+| 19 | SSD1322 D1 / DIN | PC0 / SPI0 MOSI | 64, SPI-owned | Board to OLED |
+| 22 | SSD1322 D/C# | PA2 | 2 | Board to OLED |
+| 23 | SSD1322 D0 / CLK | PC2 / SPI0 CLK | 66, SPI-owned | Board to OLED |
+| 24 | SSD1322 CS# | PC3 / SPI0 CS0 | 67, SPI-owned | Board to OLED |
+| 27 | MAX98357A BCLK | PA19 / I2S0 BCLK | 19, I2S-owned | Board to amplifier |
+| 28 | MAX98357A LRC / LRCLK / WS | PA18 / I2S0 LRCLK | 18, I2S-owned | Board to amplifier |
+| 37 | TTP223B OUT | PA17 | 17 | Sensor to board |
+| 38 | **FREE** | PA21 | 21 | Unassigned |
+| 39 | TTP223B GND | GND | - | Common ground |
+| 40 | MAX98357A DIN | PA20 / I2S0 DOUT | 20, I2S-owned | Board to amplifier |
+| - | Speaker + | MAX98357A SPK+ | - | Amplifier to speaker |
+| - | Speaker - | MAX98357A SPK- | - | Amplifier to speaker |
+
+## Header map
 
 ```text
-/dev/spidev0.0
+                              BPI-M2 Zero CON2
+
+OLED VCC       <- 3.3 V       (1)  (2)  5 V          -> MAX98357A VIN
+AHT10 SDA      <- PA12        (3)  (4)  5 V          <- EXTERNAL +5 V INPUT
+AHT10 SCL      <- PA11        (5)  (6)  GND          <- CLOCK/OLED GND
+                              (7)  (8)
+AHT10 GND      <- GND         (9) (10)
+MAX98357A EN   <- PA1        (11) (12)
+OLED RST       <- PA0        (13) (14) GND           -> MAX98357A GND
+                             (15) (16)
+AHT10/TOUCH VCC<- 3.3 V      (17) (18)
+OLED MOSI      <- PC0        (19) (20) GND
+OLED MISO unused, PC1        (21) (22) PA2           -> OLED DC
+OLED SCLK      <- PC2        (23) (24) PC3           -> OLED CS
+GND                          (25) (26)
+MAX98357A BCLK <- PA19       (27) (28) PA18          -> MAX98357A LRC
+                             (29) (30) GND
+                             (31) (32)
+                             (33) (34) GND
+                             (35) (36)
+TTP223B OUT    <- PA17       (37) (38) PA21          -> FREE
+TTP223B GND    <- GND        (39) (40) PA20          -> MAX98357A DIN
 ```
 
-Application GPIO assignments:
+## SSD1322 OLED
+
+Confirmed 3.12-inch 256x64 SSD1322 module, 4-wire SPI:
 
 ```text
-OLED RESET = PA0  / gpiochip0 offset 0  / physical pin 13
-OLED D/C   = PA2  / gpiochip0 offset 2  / physical pin 22
+OLED pin 1  VSS      -> GND, physical pin 6
+OLED pin 2  VCC_IN   -> 3.3 V, physical pin 1
+OLED pin 4  D0/CLK   -> PC2 / SPI0 SCLK, physical pin 23
+OLED pin 5  D1/DIN   -> PC0 / SPI0 MOSI, physical pin 19
+OLED pin 14 D/C#     -> PA2, physical pin 22
+OLED pin 15 RES#     -> PA0, physical pin 13
+OLED pin 16 CS#      -> PC3 / SPI0 CS0, physical pin 24
 ```
 
-## AHT10 inside temperature / humidity sensor — I2C0
+OLED pins 3 and 6 through 13 are disconnected. The core opens `/dev/spidev0.0`; MISO/pin 21 is unused by the OLED.
 
-| AHT10 pin | Function | BPI M2 Zero | Physical pin |
-|---|---|---|---:|
-| VIN / VCC | 3.3 V | 3.3 V | 17 |
-| GND | Ground | GND | 9 |
-| SDA | I2C data | TWI0-SDA / PA12 | 3 |
-| SCL | I2C clock | TWI0-SCK / PA11 | 5 |
-
-Software:
+## AHT10
 
 ```text
-Device:  /dev/i2c-0
-Address: 0x38
+VCC -> 3.3 V, physical pin 17
+GND -> GND, physical pin 9
+SDA -> PA12 / TWI0 SDA, physical pin 3
+SCL -> PA11 / TWI0 SCL, physical pin 5
 ```
+
+Software device: `/dev/i2c-0`, address `0x38`.
+
+## MAX98357A amplifier
+
+```text
+VIN   -> 5 V, physical pin 2
+GND   -> GND, physical pin 14
+BCLK  -> PA19, physical pin 27
+LRC   -> PA18, physical pin 28
+DIN   -> PA20, physical pin 40
+SD/EN -> PA1, physical pin 11
+```
+
+The playback-only image owns I2S0 and PA1. The codec driver enables the amplifier after clock stabilization. `mclk-fs = 256`; SD/EN delay is 5 ms. The application does not drive PA1 directly.
+
+The speaker output is differential. Connect the speaker only between `SPK+` and `SPK-`; neither speaker terminal goes to ground.
 
 ## TTP223B touch sensor
 
-| TTP223B pin | Function | BPI M2 Zero | Physical pin |
-|---|---|---|---:|
-| VCC | 3.3 V | 3.3 V | 17 |
-| GND | Ground | GND | 39 |
-| OUT | Touch signal | PA21 | 38 |
-
-Application GPIO assignment:
-
 ```text
-TOUCH = PA21 / gpiochip0 offset 21 / physical pin 38
+VCC -> 3.3 V, physical pin 17
+GND -> GND, physical pin 39
+OUT -> PA17, physical pin 37, gpiochip0 line 17
 ```
 
-## MAX98357A I2S amplifier
-
-The MAX98357A hardware path is owned by the `bpi-zero-clock 1.0.3` image and its validated Device Tree / codec driver.
-
-| MAX98357A pin | Function | BPI M2 Zero | Physical pin |
-|---|---|---|---:|
-| VIN | Amplifier power | 5 V | 2 |
-| GND | Ground | GND | 14 |
-| BCLK | I2S bit clock | PA19 | 27 |
-| LRC / WS | I2S word / frame clock | PA18 | 28 |
-| DIN | I2S audio data | PA20 | 40 |
-| SD / EN | Codec-driver shutdown / enable | PA1 | 11 |
-
-Audio device:
-
 ```text
-hw:MAX98357A,0
+Short press during audio: stop current audio
+Hold 3 seconds, release:  play random uploaded music
+Hold 15 seconds:           show network diagnostics
 ```
 
-Image-owned audio behavior:
+Physical pin 38 / PA21 is intentionally free. Older releases used this pin for touch; the current application reads PA17 / pin 37 instead.
 
-```text
-Codec driver:  snd-soc-max98357a
-Compatible:    maxim,max98357a
-SD / EN GPIO:  PA1
-SD delay:      5 ms
-MCLK-FS:       256
+## Power
+
+Use a regulated 5 V supply suitable for the Banana Pi, OLED and amplifier load. Header power input is physical pin 4. Clock ground is physical pin 6. All header ground pins are common. Do not connect USB power at the same time as header power.
+
+## Pre-power checklist
+
+- Confirm CON2 pin 1 orientation.
+- Confirm external +5 V is on physical pin 4 and ground on pin 6.
+- Confirm all modules share ground.
+- Confirm OLED pin 1 is ground and pin 2 is 3.3 V.
+- Confirm OLED CLK/MOSI/D-C/RST/CS are physical pins 23/19/22/13/24.
+- Confirm AHT10 SDA/SCL are physical pins 3/5.
+- Confirm MAX98357A BCLK/LRC/DIN are physical pins 27/28/40.
+- Confirm MAX98357A SD/EN is physical pin 11 / PA1.
+- Confirm touch OUT is physical pin 37 / PA17.
+- If upgrading older wiring, confirm TTP223B OUT was moved from physical pin 38 to pin 37.
+- Confirm physical pin 38 / PA21 is not connected.
+- Confirm the speaker is connected only to `SPK+` and `SPK-`.
+- After install/reboot, confirm `/dev/spidev0.0`, `/dev/i2c-0`, `/dev/gpiochip0` and MAX98357A playback.
+
+## Post-install hardware verification
+
+Confirm the paired base-image hardware metadata:
+
+```bash
+grep -E '^(VERSION|KERNEL_ABI|AUDIO_MODE|AUDIO_CAPTURE|I2S_RX_GPIO|I2S_RX_HEADER_PIN|TOUCH_GPIO|TOUCH_HEADER_PIN)=' \
+    /etc/bpi-zero-clock-release
 ```
 
-The application does **not** drive PA1 directly.
-
-Local MP3/alarm playback retains forced stereo output (`MPG123_FORCE_STEREO`) so mono material fills both I2S slots.
-
-## 40-pin header summary
+Expected touch/free-pin values:
 
 ```text
- 3.3V  (1) (2)  5V ---------------- MAX98357A VIN
- SDA0  (3) (4)  5V
- SCL0  (5) (6)  GND --------------- OLED GND
-       (7) (8)
- GND   (9) (10)
- PA1  (11) (12) -------------------- MAX98357A SD/EN
- PA0  (13) (14) GND ---------------- MAX98357A GND
-      (15) (16)
- 3.3V (17) (18) -------------------- AHT10 / touch VCC
- MOSI (19) (20) GND ---------------- OLED D1
- MISO (21) (22) PA2 ---------------- OLED D/C
- SCLK (23) (24) CS0 ---------------- OLED D0 / CS
- GND  (25) (26)
- PA19 (27) (28) PA18 --------------- MAX98357A BCLK / LRC
-      (29) (30) GND
-      (31) (32)
-      (33) (34) GND
-      (35) (36)
-      (37) (38) PA21 --------------- TTP223B OUT
- GND  (39) (40) PA20 --------------- Touch GND / MAX98357A DIN
+I2S_RX_GPIO=unassigned
+I2S_RX_HEADER_PIN=38-free
+TOUCH_GPIO=PA17
+TOUCH_HEADER_PIN=37
 ```
 
-## Application-owned vs. image-owned hardware
+Confirm playback exists and no capture PCM is exposed:
 
-### Application-owned
+```bash
+cat /proc/asound/cards
+cat /proc/asound/pcm
+```
 
-- SSD1322 rendering and SPI transactions
-- OLED RESET on PA0
-- OLED D/C on PA2
-- TTP223B input on PA21
-- AHT10 reads on `/dev/i2c-0`
-- local MP3/alarm PCM playback
+The ALSA card should include `MAX98357A`; the I2S PCM should expose playback and no capture endpoint.
 
-### `bpi-zero-clock 1.0.3` image-owned
-
-- SPI0 / I2C0 / I2S0 hardware enablement
-- `/dev/spidev0.0` binding
-- MAX98357A kernel codec module
-- MAX98357A Device Tree definition
-- PA1 SD/EN codec-driver control
-- AP6212 Wi-Fi / Bluetooth kernel and firmware capability
-
-The 2.3.24 application does not remove or modify image-owned hardware capability.
-
-## Not present in mk-clock-adult 2.3.24
-
-- application Bluetooth GUI
-- Bluetooth API / IPC
-- BlueALSA
-- Bluetooth audio routing
-- Bluetooth stereo-to-mono matrix
-- Bluetooth metadata
-- LED control
-- Story Mode
+Finally test the physical touch sensor. A short press while audio is playing must stop the current audio. If touch does not respond after upgrading an older unit, power off and verify that TTP223B `OUT` is on physical pin 37 rather than the legacy physical pin 38.

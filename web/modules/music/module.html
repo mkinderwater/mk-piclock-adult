@@ -20,7 +20,7 @@
 
     <div class="card">
         <h2>Add music</h2>
-        <p class="page-intro">Choose one or more MP3 files. Wait for the full batch to finish before adding more.</p>
+        <p class="page-intro">Choose up to 14 MP3 files at once. The upload completes first, then songs are prepared one at a time. Add another batch after processing finishes.</p>
         <form id="music-upload-form" method="POST" action="/api/v1/assets/music/upload" enctype="multipart/form-data" data-module-handles-submit="true">
             <label for="music-files">Choose songs</label>
             <input id="music-files" type="file" name="file" accept="audio/mpeg,.mp3" multiple required>
@@ -49,7 +49,7 @@
                     <div>
                         <label for="music-lowpass">Frequency range</label>
                         <select id="music-lowpass" name="lowpass_hz">
-                            <option value="12000">Voice</option>
+                            <option value="12000">Narrow</option>
                             <option value="16000" selected>Recommended</option>
                             <option value="18000">More detail</option>
                         </select>

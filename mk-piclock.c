@@ -49,6 +49,8 @@
 #include <gpiod.h>
 
 #include "hardware_profile.h"
+#include "interaction_profile.h"
+#include "service_watchdog.h"
 #include "aht10_sensor.h"
 #include "compiler_attrs.h"
 #include "font_catalog.h"
@@ -100,7 +102,7 @@
 #define TOUCH_POLL_MS 20u
 #define TOUCH_DEBOUNCE_MS 50u
 #define TOUCH_LONG_PRESS_MS 3000u
-#define TOUCH_DIAGNOSTIC_PRESS_MS 8000u
+#define TOUCH_DIAGNOSTIC_PRESS_MS MP_TOUCH_DIAGNOSTIC_PRESS_MS
 #define DIAGNOSTIC_SCREEN_SECONDS 30u
 #define DIAGNOSTIC_REFRESH_MS 2000u
 
@@ -153,12 +155,6 @@ struct app_state {
     char audio_title[MP_ID3_TEXT_MAX];
     char audio_artist[MP_ID3_TEXT_MAX];
     uint64_t audio_scroll_started_ms;
-    int bluetooth_audio_playing;
-    char bluetooth_audio_title[MP_ID3_TEXT_MAX];
-    char bluetooth_audio_artist[MP_ID3_TEXT_MAX];
-    uint64_t bluetooth_audio_scroll_started_ms;
-    int bluetooth_pairing_passkey_active;
-    char bluetooth_pairing_passkey[MP_IPC_BLUETOOTH_PASSKEY_MAX];
     int alarm_active;             /* 1 only while an alarm MP3 is currently playing */
     int alarm_volume_percent;     /* current alarm ramp volume, 0..100 */
     long long last_successful_alarm; /* epoch when alarm audio last opened successfully */
@@ -200,12 +196,6 @@ static struct app_state g_state = {
     .audio_title = "",
     .audio_artist = "",
     .audio_scroll_started_ms = 0,
-    .bluetooth_audio_playing = 0,
-    .bluetooth_audio_title = "",
-    .bluetooth_audio_artist = "",
-    .bluetooth_audio_scroll_started_ms = 0,
-    .bluetooth_pairing_passkey_active = 0,
-    .bluetooth_pairing_passkey = "",
     .alarm_active = 0,
     .alarm_volume_percent = 0,
     .last_successful_alarm = 0,
@@ -2195,6 +2185,19 @@ static void draw_weather_temperature_precip_centered(
 #define WEATHER_TODAY_LOW_ROW_Y \
     (WEATHER_TODAY_HIGH_ROW_Y - WEATHER_TODAY_ROW_SPACING)
 
+static void weather_full_date_label(const struct tm *tmv, char output[16])
+{
+    static const char *months[] = {
+        "JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE",
+        "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER"
+    };
+    if (!output) return;
+    output[0] = '\0';
+    if (!tmv) return;
+    int month = tmv->tm_mon >= 0 && tmv->tm_mon <= 11 ? tmv->tm_mon : 0;
+    snprintf(output, 16, "%s %d", months[month], tmv->tm_mday);
+}
+
 static void draw_weather_today_panel(
     int x0,
     int x1,
@@ -2204,9 +2207,11 @@ static void draw_weather_today_panel(
 
     char low_value[16];
     char high_value[16];
+    char low_time[8];
+    char high_time[8];
     char precipitation_value[16];
-    const int label_x = x0 + 5;
-    const int value_x1 = x1 - 5;
+    const int label_x = x0 + 3;
+    const int value_x1 = x1 - 4;
 
     if (slot->low_temperature_available)
         snprintf(low_value, sizeof(low_value), "%d^",
@@ -2223,10 +2228,32 @@ static void draw_weather_today_panel(
     snprintf(precipitation_value, sizeof(precipitation_value), "%d%%",
              clamp_int(slot->precipitation_probability_percent, 0, 100));
 
-    draw_weather_compact_text(label_x, WEATHER_TODAY_LOW_ROW_Y, "L", 13);
+    if (slot->low_hour >= 0 && slot->low_hour <= 23) {
+        int hour = slot->low_hour % 12;
+        if (hour == 0) hour = 12;
+        snprintf(low_time, sizeof(low_time), "%d%s", hour,
+                 slot->low_hour < 12 ? "AM" : "PM");
+    } else {
+        snprintf(low_time, sizeof(low_time), "--");
+    }
+    if (slot->high_hour >= 0 && slot->high_hour <= 23) {
+        int hour = slot->high_hour % 12;
+        if (hour == 0) hour = 12;
+        snprintf(high_time, sizeof(high_time), "%d%s", hour,
+                 slot->high_hour < 12 ? "AM" : "PM");
+    } else if (slot->high_temperature_available) {
+        /* The daily forecast can provide an official high before the hourly
+         * forecast extends far enough to support a specific time. Preserve
+         * the sourced HIGH classification rather than inventing an hour. */
+        snprintf(high_time, sizeof(high_time), "HIGH");
+    } else {
+        snprintf(high_time, sizeof(high_time), "--");
+    }
+
+    draw_weather_compact_text(label_x, WEATHER_TODAY_LOW_ROW_Y, low_time, 13);
     draw_weather_compact_text_right_aligned(
         value_x1, WEATHER_TODAY_LOW_ROW_Y, low_value, 13);
-    draw_weather_compact_text(label_x, WEATHER_TODAY_HIGH_ROW_Y, "H", 13);
+    draw_weather_compact_text(label_x, WEATHER_TODAY_HIGH_ROW_Y, high_time, 13);
     draw_weather_compact_text_right_aligned(
         value_x1, WEATHER_TODAY_HIGH_ROW_Y, high_value, 13);
     draw_weather_compact_text(label_x, WEATHER_PANEL_LOWER_ROW_Y, "POP", 11);
@@ -3319,38 +3346,17 @@ static int dashboard_footer_state(char *text, size_t text_len,
     char audio_title[MP_ID3_TEXT_MAX];
     char audio_artist[MP_ID3_TEXT_MAX];
     uint64_t audio_started_ms;
-    int bluetooth_audio_playing;
-    char bluetooth_audio_title[MP_ID3_TEXT_MAX];
-    char bluetooth_audio_artist[MP_ID3_TEXT_MAX];
-    uint64_t bluetooth_audio_started_ms;
-    int bluetooth_pairing_passkey_active;
-    char bluetooth_pairing_passkey[MP_IPC_BLUETOOTH_PASSKEY_MAX];
     pthread_mutex_lock(&g_state.lock);
     audio_playing = g_state.audio_playing;
     safe_str(audio_file, sizeof(audio_file), g_state.audio_file);
     safe_str(audio_title, sizeof(audio_title), g_state.audio_title);
     safe_str(audio_artist, sizeof(audio_artist), g_state.audio_artist);
     audio_started_ms = g_state.audio_scroll_started_ms;
-    bluetooth_audio_playing = g_state.bluetooth_audio_playing;
-    safe_str(bluetooth_audio_title, sizeof(bluetooth_audio_title), g_state.bluetooth_audio_title);
-    safe_str(bluetooth_audio_artist, sizeof(bluetooth_audio_artist), g_state.bluetooth_audio_artist);
-    bluetooth_audio_started_ms = g_state.bluetooth_audio_scroll_started_ms;
-    bluetooth_pairing_passkey_active = g_state.bluetooth_pairing_passkey_active;
-    safe_str(bluetooth_pairing_passkey, sizeof(bluetooth_pairing_passkey),
-             g_state.bluetooth_pairing_passkey);
     pthread_mutex_unlock(&g_state.lock);
 
-    /* Pairing confirmation is time-sensitive and temporarily owns the footer. */
-    if (bluetooth_pairing_passkey_active && bluetooth_pairing_passkey[0]) {
-        snprintf(text, text_len, "PAIR %s", bluetooth_pairing_passkey);
-    } else if (audio_playing) {
+    if (audio_playing) {
         dashboard_audio_display(text, text_len, audio_title, audio_artist, audio_file);
         if (started_ms) *started_ms = audio_started_ms;
-    } else if (bluetooth_audio_playing) {
-        /* Use the exact local-MP3 title/artist formatter and marquee rules. */
-        dashboard_audio_display(text, text_len, bluetooth_audio_title,
-                                bluetooth_audio_artist, "");
-        if (started_ms) *started_ms = bluetooth_audio_started_ms;
     } else {
         struct weather_dashboard_snapshot weather;
         memset(&weather, 0, sizeof(weather));
@@ -3481,9 +3487,18 @@ static void draw_weather_dashboard_screen(void) {
         uint8_t label_level = is_room ? 15 : 11;
         uint8_t temperature_level = is_room ? 15 : 13;
 
+        char current_date_label[16];
+        weather_full_date_label(&tmv, current_date_label);
+        int tomorrow_became_today = is_today &&
+            strcmp(weather.slots[i].label, "TMORROW") == 0 &&
+            weather.slots[i].date_label[0] &&
+            strcmp(weather.slots[i].date_label, current_date_label) == 0;
+
         char label[8];
         if (is_room) {
             safe_str(label, sizeof(label), "INSIDE");
+        } else if (tomorrow_became_today) {
+            safe_str(label, sizeof(label), "TODAY");
         } else {
             safe_str(label, sizeof(label), weather.slots[i].label);
             if (!label[0])
@@ -3503,6 +3518,11 @@ static void draw_weather_dashboard_screen(void) {
             );
         } else if (is_today) {
             draw_weather_today_panel(x0, x1, &weather.slots[i]);
+            if (weather.slots[i].date_label[0] && !tomorrow_became_today) {
+                int date_width = weather_compact_text_width(weather.slots[i].date_label);
+                int date_x = x0 + ((x1 - x0 + 1 - date_width) / 2);
+                draw_weather_compact_text(date_x, 56, weather.slots[i].date_label, 10);
+            }
         } else {
             if (draw_weather_icon_asset(i, cx, WEATHER_ICON_CENTER_Y) != 0)
                 draw_weather_icon_missing(cx, WEATHER_ICON_CENTER_Y);
@@ -3624,18 +3644,60 @@ static int audio_write_pcm(snd_pcm_t *pcm, unsigned char *buf, size_t bytes, int
 
 static void clear_audio_metadata_locked(void);
 
-static int open_audio_pcm(snd_pcm_t **pcm, char *device_name, size_t device_name_len) {
-    if (!pcm || !device_name || device_name_len == 0) return -EINVAL;
+static int audio_try_pcm_device(snd_pcm_t **pcm, const char *device,
+                                long rate, int channels,
+                                char *device_name, size_t device_name_len) {
+    if (!pcm || !device || !device[0] || !device_name || device_name_len == 0)
+        return -EINVAL;
+
+    *pcm = NULL;
+    int rc = snd_pcm_open(pcm, device, SND_PCM_STREAM_PLAYBACK, 0);
+    if (rc < 0) return rc;
+
+    rc = snd_pcm_set_params(*pcm,
+                            SND_PCM_FORMAT_S16_LE,
+                            SND_PCM_ACCESS_RW_INTERLEAVED,
+                            (unsigned int)channels,
+                            (unsigned int)rate,
+                            1,
+                            300000);
+    if (rc < 0) {
+        snd_pcm_close(*pcm);
+        *pcm = NULL;
+        return rc;
+    }
+
+    safe_str(device_name, device_name_len, device);
+    return 0;
+}
+
+static int open_audio_pcm(snd_pcm_t **pcm, char *device_name, size_t device_name_len,
+                          long rate, int channels) {
+    if (!pcm || !device_name || device_name_len == 0 || rate <= 0 || channels < 1)
+        return -EINVAL;
     *pcm = NULL;
     device_name[0] = '\0';
 
+    /*
+     * Local MP3/alarm playback normally reaches the MAX98357A at the decoder's
+     * native sample rate. If the hardware PCM cannot accept the decoded format,
+     * the configured plughw fallback may perform only the conversion required
+     * by the codec.
+     */
+    const char *direct = getenv("MK_PICLOCK_ALSA_DIRECT_DEVICE");
+    if (direct && direct[0]) {
+        int rc = audio_try_pcm_device(pcm, direct, rate, channels,
+                                      device_name, device_name_len);
+        if (rc >= 0) return 0;
+        app_log("audio", "Native ALSA device %s unavailable at %ld Hz/%d ch: %s; trying format-compatible fallback",
+                direct, rate, channels, snd_strerror(rc));
+    }
+
     const char *configured = getenv("MK_PICLOCK_ALSA_DEVICE");
-    if (configured && configured[0]) {
-        int rc = snd_pcm_open(pcm, configured, SND_PCM_STREAM_PLAYBACK, 0);
-        if (rc >= 0) {
-            safe_str(device_name, device_name_len, configured);
-            return 0;
-        }
+    if (configured && configured[0] && (!direct || strcmp(configured, direct) != 0)) {
+        int rc = audio_try_pcm_device(pcm, configured, rate, channels,
+                                      device_name, device_name_len);
+        if (rc >= 0) return 0;
         app_log("audio", "Configured ALSA device %s failed: %s; searching for %s",
                 configured, snd_strerror(rc), MP_ALSA_CARD_MATCH);
     }
@@ -3662,18 +3724,21 @@ static int open_audio_pcm(snd_pcm_t **pcm, char *device_name, size_t device_name
 
         if (matched) {
             char candidate[32];
-            snprintf(candidate, sizeof(candidate), "plughw:%d,0", card);
-            int rc = snd_pcm_open(pcm, candidate, SND_PCM_STREAM_PLAYBACK, 0);
-            if (rc >= 0) {
-                safe_str(device_name, device_name_len, candidate);
+            snprintf(candidate, sizeof(candidate), "hw:%d,0", card);
+            if ((!direct || strcmp(candidate, direct) != 0) &&
+                audio_try_pcm_device(pcm, candidate, rate, channels,
+                                     device_name, device_name_len) >= 0)
                 return 0;
-            }
+
+            snprintf(candidate, sizeof(candidate), "plughw:%d,0", card);
+            if (audio_try_pcm_device(pcm, candidate, rate, channels,
+                                     device_name, device_name_len) >= 0)
+                return 0;
         }
     }
 
-    int rc = snd_pcm_open(pcm, "default", SND_PCM_STREAM_PLAYBACK, 0);
-    if (rc >= 0) safe_str(device_name, device_name_len, "default");
-    return rc;
+    return audio_try_pcm_device(pcm, "default", rate, channels,
+                                device_name, device_name_len);
 }
 
 static void *audio_thread_main(void *arg) {
@@ -3739,21 +3804,14 @@ static void *audio_thread_main(void *arg) {
     }
 
     char pcm_device[64];
-    int pcm_rc = open_audio_pcm(&pcm, pcm_device, sizeof(pcm_device));
+    int pcm_rc = open_audio_pcm(&pcm, pcm_device, sizeof(pcm_device), rate, channels);
     if (pcm_rc < 0) {
-        app_log("audio", "Unable to open an ALSA playback device: %s", snd_strerror(pcm_rc));
+        app_log("audio", "Unable to open an ALSA playback device at %ld Hz/%d ch: %s",
+                rate, channels, snd_strerror(pcm_rc));
         goto done;
     }
-    app_log("audio", "Using ALSA playback device %s", pcm_device);
-    if (snd_pcm_set_params(pcm,
-                           SND_PCM_FORMAT_S16_LE,
-                           SND_PCM_ACCESS_RW_INTERLEAVED,
-                           (unsigned int)channels,
-                           (unsigned int)rate,
-                           1,
-                           300000) < 0) {
-        goto done;
-    }
+    app_log("audio", "Using ALSA playback device %s at native %ld Hz/%d ch",
+            pcm_device, rate, channels);
 
     const size_t buf_size = 8192;
     buf = malloc(buf_size);
@@ -4059,7 +4117,7 @@ static int audio_play_music_file(const char *music_file, int start_volume, int e
 
 /*
  * Start the protected Weather-warning chime without replacing music or an
- * alarm. This mirrors the kid-clock message notification behaviour: the
+ * alarm. The message notification uses the same playback request path: the
  * notification is skipped while any other audio session is active.
  */
 static int audio_play_weather_warning_chime(void) {
@@ -4266,7 +4324,7 @@ static int open_diagnostic_screen(void) {
         opened = 1;
     }
     pthread_mutex_unlock(&g_state.lock);
-    if (opened) app_log("touch", "Eight-second hold opened OLED diagnostics");
+    if (opened) app_log("touch", "Fifteen-second hold opened OLED diagnostics");
     return opened;
 }
 
@@ -4618,115 +4676,132 @@ static int ipc_bad_payload(int client) {
     return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"invalid IPC payload\"}");
 }
 
-static int ipc_status(int client) {
-    time_t now = time(NULL);
-    struct tm tmv;
-    localtime_r(&now, &tmv);
-
+struct mp_status_snapshot {
     char timestr[64];
     char datestr[96];
-    strftime(timestr, sizeof(timestr), "%I:%M %p", &tmv);
-    if (timestr[0] == '0') memmove(timestr, timestr + 1, strlen(timestr));
-    strftime(datestr, sizeof(datestr), "%A %B %e, %Y", &tmv);
-    long uptime_seconds = (g_start_time > 0 && now >= g_start_time) ? (long)(now - g_start_time) : 0;
-
-    pthread_mutex_lock(&g_state.lock);
-    int audio = g_state.audio_playing;
-    int alarm_active = g_state.alarm_active;
-    int alarm_volume_percent = g_state.alarm_volume_percent;
-    int mode = g_state.display_mode;
-    int oled_ok = g_state.oled_ok;
-    int font = g_state.oled_font;
-    int font_size = g_state.oled_font_size;
-    int global_volume = g_state.global_volume;
-    int bedtime_enabled = g_state.bedtime_enabled;
-    int bsh = g_state.bedtime_start_hour;
-    int bsm = g_state.bedtime_start_min;
-    int beh = g_state.bedtime_end_hour;
-    int bem = g_state.bedtime_end_min;
-    int bedtime_dim = g_state.bedtime_dim_percent;
-    long long last_successful_alarm = g_state.last_successful_alarm;
-    int weather_warning_chime_enabled = g_state.weather_warning_chime_enabled;
-    int weather_warning_chime_during_bedtime = g_state.weather_warning_chime_during_bedtime;
-    int clock_24h_mode = g_state.clock_24h_mode;
-    int oled_color = g_state.oled_color;
-    int oled_brightness = g_state.oled_brightness_current;
-    int touch_ok = 0;
-    int touch_pressed = 0;
+    long uptime_seconds;
+    int audio_playing;
+    int alarm_active;
+    int alarm_volume_percent;
+    int display_mode;
+    int oled_ok;
+    int oled_font;
+    int oled_font_size;
+    int global_volume;
+    int bedtime_enabled;
+    int bedtime_start_hour;
+    int bedtime_start_min;
+    int bedtime_end_hour;
+    int bedtime_end_min;
+    int bedtime_dim_percent;
+    int bedtime_active;
+    long long last_successful_alarm;
+    int weather_warning_chime_enabled;
+    int weather_warning_chime_during_bedtime;
+    int clock_24h_mode;
+    int oled_color;
+    int oled_brightness;
+    int touch_ok;
+    int touch_pressed;
     char font_file[128];
     char inside_font_file[128];
     char clock_name[64];
     char audio_file[MUSIC_FILE_MAX];
     char audio_title[MP_ID3_TEXT_MAX];
     char audio_artist[MP_ID3_TEXT_MAX];
-    int bluetooth_audio_playing = g_state.bluetooth_audio_playing;
-    char bluetooth_audio_title[MP_ID3_TEXT_MAX];
-    char bluetooth_audio_artist[MP_ID3_TEXT_MAX];
-    int bluetooth_pairing_passkey_active = g_state.bluetooth_pairing_passkey_active;
-    char bluetooth_pairing_passkey[MP_IPC_BLUETOOTH_PASSKEY_MAX];
     struct alarm_slot alarms[MAX_ALARMS];
-    mp_safe_str(font_file, sizeof(font_file), g_state.oled_font_file);
-    mp_safe_str(inside_font_file, sizeof(inside_font_file), g_state.inside_font_file);
-    mp_safe_str(clock_name, sizeof(clock_name), g_state.clock_name);
-    mp_safe_str(audio_file, sizeof(audio_file), g_state.audio_file);
-    mp_safe_str(audio_title, sizeof(audio_title), g_state.audio_title);
-    mp_safe_str(audio_artist, sizeof(audio_artist), g_state.audio_artist);
-    mp_safe_str(bluetooth_audio_title, sizeof(bluetooth_audio_title), g_state.bluetooth_audio_title);
-    mp_safe_str(bluetooth_audio_artist, sizeof(bluetooth_audio_artist), g_state.bluetooth_audio_artist);
-    mp_safe_str(bluetooth_pairing_passkey, sizeof(bluetooth_pairing_passkey),
-                g_state.bluetooth_pairing_passkey);
-    memcpy(alarms, g_state.alarms, sizeof(alarms));
-    pthread_mutex_unlock(&g_state.lock);
-    touch_get_state(&touch_ok, &touch_pressed);
-
-    int next_alarm_id = 0;
-    time_t next_alarm_at = next_alarm_time(alarms, now, &next_alarm_id);
+    int next_alarm_id;
+    time_t next_alarm_at;
     char next_alarm_text[96];
-    format_next_alarm(next_alarm_at, clock_24h_mode, next_alarm_text, sizeof(next_alarm_text));
-
     struct weather_dashboard_snapshot weather;
-    memset(&weather, 0, sizeof(weather));
-    weather_snapshot(&weather);
-
     struct room_sensor_snapshot room;
-    memset(&room, 0, sizeof(room));
-    room_sensor_snapshot(&room);
+};
 
+static void status_snapshot_capture(struct mp_status_snapshot *snapshot) {
+    memset(snapshot, 0, sizeof(*snapshot));
+    time_t now = time(NULL);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    strftime(snapshot->timestr, sizeof(snapshot->timestr), "%I:%M %p", &tmv);
+    if (snapshot->timestr[0] == '0')
+        memmove(snapshot->timestr, snapshot->timestr + 1, strlen(snapshot->timestr));
+    strftime(snapshot->datestr, sizeof(snapshot->datestr), "%A %B %e, %Y", &tmv);
+    snapshot->uptime_seconds = (g_start_time > 0 && now >= g_start_time)
+        ? (long)(now - g_start_time) : 0;
+
+    pthread_mutex_lock(&g_state.lock);
+    snapshot->audio_playing = g_state.audio_playing;
+    snapshot->alarm_active = g_state.alarm_active;
+    snapshot->alarm_volume_percent = g_state.alarm_volume_percent;
+    snapshot->display_mode = g_state.display_mode;
+    snapshot->oled_ok = g_state.oled_ok;
+    snapshot->oled_font = g_state.oled_font;
+    snapshot->oled_font_size = g_state.oled_font_size;
+    snapshot->global_volume = g_state.global_volume;
+    snapshot->bedtime_enabled = g_state.bedtime_enabled;
+    snapshot->bedtime_start_hour = g_state.bedtime_start_hour;
+    snapshot->bedtime_start_min = g_state.bedtime_start_min;
+    snapshot->bedtime_end_hour = g_state.bedtime_end_hour;
+    snapshot->bedtime_end_min = g_state.bedtime_end_min;
+    snapshot->bedtime_dim_percent = g_state.bedtime_dim_percent;
+    snapshot->last_successful_alarm = g_state.last_successful_alarm;
+    snapshot->weather_warning_chime_enabled = g_state.weather_warning_chime_enabled;
+    snapshot->weather_warning_chime_during_bedtime = g_state.weather_warning_chime_during_bedtime;
+    snapshot->clock_24h_mode = g_state.clock_24h_mode;
+    snapshot->oled_color = g_state.oled_color;
+    snapshot->oled_brightness = g_state.oled_brightness_current;
+    mp_safe_str(snapshot->font_file, sizeof(snapshot->font_file), g_state.oled_font_file);
+    mp_safe_str(snapshot->inside_font_file, sizeof(snapshot->inside_font_file), g_state.inside_font_file);
+    mp_safe_str(snapshot->clock_name, sizeof(snapshot->clock_name), g_state.clock_name);
+    mp_safe_str(snapshot->audio_file, sizeof(snapshot->audio_file), g_state.audio_file);
+    mp_safe_str(snapshot->audio_title, sizeof(snapshot->audio_title), g_state.audio_title);
+    mp_safe_str(snapshot->audio_artist, sizeof(snapshot->audio_artist), g_state.audio_artist);
+    memcpy(snapshot->alarms, g_state.alarms, sizeof(snapshot->alarms));
+    pthread_mutex_unlock(&g_state.lock);
+
+    int now_min = tmv.tm_hour * 60 + tmv.tm_min;
+    snapshot->bedtime_active = snapshot->bedtime_enabled &&
+        time_in_window_minutes(now_min,
+                               snapshot->bedtime_start_hour * 60 + snapshot->bedtime_start_min,
+                               snapshot->bedtime_end_hour * 60 + snapshot->bedtime_end_min);
+    touch_get_state(&snapshot->touch_ok, &snapshot->touch_pressed);
+    snapshot->next_alarm_at = next_alarm_time(snapshot->alarms, now, &snapshot->next_alarm_id);
+    format_next_alarm(snapshot->next_alarm_at, snapshot->clock_24h_mode,
+                      snapshot->next_alarm_text, sizeof(snapshot->next_alarm_text));
+    weather_snapshot(&snapshot->weather);
+    room_sensor_snapshot(&snapshot->room);
+}
+
+static int ipc_status_serialize(int client, const struct mp_status_snapshot *snapshot) {
     char e_time[128], e_date[192], e_clock_name[160], e_audio_file[512];
     char e_audio_title[384], e_audio_artist[384], e_weather_location[192];
-    char e_bluetooth_audio_title[384], e_bluetooth_audio_artist[384];
-    char e_bluetooth_pairing_passkey[64];
     char e_weather_warning[(MP_WEATHER_WARNING_TEXT_MAX * 6) + 1];
     char e_weather_warnings[MP_WEATHER_WARNING_SLOTS][(MP_WEATHER_WARNING_TEXT_MAX * 6) + 1];
     char e_font_file[256], e_font_name[256], e_inside_font_file[256];
     char e_room_device[256], e_room_error[384], e_next_alarm[192];
     char font_choice_name[256];
-    oled_font_choice_name(font_file, font, font_choice_name, sizeof(font_choice_name));
-    mp_json_escape(e_time, sizeof(e_time), timestr);
-    mp_json_escape(e_date, sizeof(e_date), datestr);
-    mp_json_escape(e_clock_name, sizeof(e_clock_name), clock_name);
-    mp_json_escape(e_audio_file, sizeof(e_audio_file), audio_file);
-    mp_json_escape(e_audio_title, sizeof(e_audio_title), audio_title);
-    mp_json_escape(e_audio_artist, sizeof(e_audio_artist), audio_artist);
-    mp_json_escape(e_bluetooth_audio_title, sizeof(e_bluetooth_audio_title), bluetooth_audio_title);
-    mp_json_escape(e_bluetooth_audio_artist, sizeof(e_bluetooth_audio_artist), bluetooth_audio_artist);
-    mp_json_escape(e_bluetooth_pairing_passkey, sizeof(e_bluetooth_pairing_passkey),
-                   bluetooth_pairing_passkey);
-    mp_json_escape(e_weather_location, sizeof(e_weather_location), weather.location);
-    const char *primary_weather_warning = weather.warning_count > 0
-        ? weather.warning_descriptions[0] : "";
+    oled_font_choice_name(snapshot->font_file, snapshot->oled_font, font_choice_name, sizeof(font_choice_name));
+    mp_json_escape(e_time, sizeof(e_time), snapshot->timestr);
+    mp_json_escape(e_date, sizeof(e_date), snapshot->datestr);
+    mp_json_escape(e_clock_name, sizeof(e_clock_name), snapshot->clock_name);
+    mp_json_escape(e_audio_file, sizeof(e_audio_file), snapshot->audio_file);
+    mp_json_escape(e_audio_title, sizeof(e_audio_title), snapshot->audio_title);
+    mp_json_escape(e_audio_artist, sizeof(e_audio_artist), snapshot->audio_artist);
+    mp_json_escape(e_weather_location, sizeof(e_weather_location), snapshot->weather.location);
+    const char *primary_weather_warning = snapshot->weather.warning_count > 0
+        ? snapshot->weather.warning_descriptions[0] : "";
     mp_json_escape(e_weather_warning, sizeof(e_weather_warning), primary_weather_warning);
     for (int i = 0; i < MP_WEATHER_WARNING_SLOTS; i++)
         mp_json_escape(
             e_weather_warnings[i], sizeof(e_weather_warnings[i]),
-            i < weather.warning_count ? weather.warning_descriptions[i] : ""
+            i < snapshot->weather.warning_count ? snapshot->weather.warning_descriptions[i] : ""
         );
-    mp_json_escape(e_font_file, sizeof(e_font_file), font_file);
+    mp_json_escape(e_font_file, sizeof(e_font_file), snapshot->font_file);
     mp_json_escape(e_font_name, sizeof(e_font_name), font_choice_name);
-    mp_json_escape(e_inside_font_file, sizeof(e_inside_font_file), inside_font_file);
-    mp_json_escape(e_room_device, sizeof(e_room_device), room.device);
-    mp_json_escape(e_room_error, sizeof(e_room_error), room.error);
-    mp_json_escape(e_next_alarm, sizeof(e_next_alarm), next_alarm_text);
+    mp_json_escape(e_inside_font_file, sizeof(e_inside_font_file), snapshot->inside_font_file);
+    mp_json_escape(e_room_device, sizeof(e_room_device), snapshot->room.device);
+    mp_json_escape(e_room_error, sizeof(e_room_error), snapshot->room.error);
+    mp_json_escape(e_next_alarm, sizeof(e_next_alarm), snapshot->next_alarm_text);
 
     struct mp_buffer body;
     if (mp_buffer_init(&body, 4608, MP_IPC_MAX_PAYLOAD) != 0)
@@ -4734,8 +4809,6 @@ static int ipc_status(int client) {
     mp_buffer_appendf(&body,
         "{\"time\":\"%s\",\"date\":\"%s\",\"clock_name\":\"%s\",\"app_version\":\"%s\","
         "\"uptime_seconds\":%ld,\"audio_file\":\"%s\",\"audio_title\":\"%s\",\"audio_artist\":\"%s\","
-        "\"bluetooth_audio_playing\":%d,\"bluetooth_audio_title\":\"%s\",\"bluetooth_audio_artist\":\"%s\","
-        "\"bluetooth_pairing_passkey_active\":%d,\"bluetooth_pairing_passkey\":\"%s\","
         "\"global_volume\":%d,"
         "\"bedtime_enabled\":%d,"
         "\"bedtime_start_hour\":%d,\"bedtime_start_min\":%d,\"bedtime_end_hour\":%d,\"bedtime_end_min\":%d,"
@@ -4746,35 +4819,37 @@ static int ipc_status(int client) {
         "\"touch_ok\":%d,\"touch_pressed\":%d,\"touch_gpio\":%d,"
         "\"oled_font\":%d,\"oled_font_size\":%d,\"oled_font_file\":\"%s\",\"oled_font_name\":\"%s\","
         "\"inside_font_file\":\"%s\",\"weather\":{",
-        e_time, e_date, e_clock_name, APP_VERSION, uptime_seconds, e_audio_file,
-        e_audio_title, e_audio_artist, bluetooth_audio_playing,
-        e_bluetooth_audio_title, e_bluetooth_audio_artist,
-        bluetooth_pairing_passkey_active, e_bluetooth_pairing_passkey, global_volume,
-        bedtime_enabled,
-        bsh, bsm, beh, bem, bedtime_dim, weather_warning_chime_enabled,
-        weather_warning_chime_during_bedtime, clock_24h_mode, oled_color_name_for_id(oled_color),
-        is_bedtime_now(), oled_brightness, next_alarm_id, (long long)next_alarm_at, e_next_alarm,
-        last_successful_alarm, audio, alarm_active, alarm_volume_percent,
-        display_mode_name(mode), oled_ok, touch_ok, touch_pressed, GPIO_TOUCH,
-        font, font_size, e_font_file, e_font_name, e_inside_font_file);
+        e_time, e_date, e_clock_name, APP_VERSION, snapshot->uptime_seconds, e_audio_file,
+        e_audio_title, e_audio_artist, snapshot->global_volume,
+        snapshot->bedtime_enabled,
+        snapshot->bedtime_start_hour, snapshot->bedtime_start_min,
+        snapshot->bedtime_end_hour, snapshot->bedtime_end_min,
+        snapshot->bedtime_dim_percent, snapshot->weather_warning_chime_enabled,
+        snapshot->weather_warning_chime_during_bedtime, snapshot->clock_24h_mode,
+        oled_color_name_for_id(snapshot->oled_color), snapshot->bedtime_active, snapshot->oled_brightness,
+        snapshot->next_alarm_id, (long long)snapshot->next_alarm_at, e_next_alarm,
+        snapshot->last_successful_alarm, snapshot->audio_playing, snapshot->alarm_active,
+        snapshot->alarm_volume_percent, display_mode_name(snapshot->display_mode), snapshot->oled_ok,
+        snapshot->touch_ok, snapshot->touch_pressed, GPIO_TOUCH,
+        snapshot->oled_font, snapshot->oled_font_size, e_font_file, e_font_name, e_inside_font_file);
 
     mp_buffer_appendf(&body,
         "\"location\":\"%s\",\"warning_type\":\"%s\",\"warning_count\":%d,\"warnings\":[",
-        e_weather_location, e_weather_warning, weather.warning_count);
-    for (int i = 0; i < weather.warning_count && !body.failed; i++)
+        e_weather_location, e_weather_warning, snapshot->weather.warning_count);
+    for (int i = 0; i < snapshot->weather.warning_count && !body.failed; i++)
         mp_buffer_appendf(&body, "%s\"%s\"", i ? "," : "", e_weather_warnings[i]);
     mp_buffer_appendf(&body,
         "],\"current_temperature_c\":%d,\"current_temperature_available\":%s,\"current_temperature_is_forecast\":%s,\"humidity_percent\":%d,\"humidity_available\":%s,\"precipitation_probability_percent\":%d,\"uv_index\":%d,"
         "\"observed_at\":%lld,\"slots\":[",
-        weather.current_temperature_c,
-        weather.current_temperature_available ? "true" : "false",
-        weather.current_temperature_is_forecast ? "true" : "false",
-        weather.humidity_percent, weather.humidity_available ? "true" : "false",
-        weather.precipitation_probability_percent, weather.uv_index,
-        (long long)weather.observed_at);
+        snapshot->weather.current_temperature_c,
+        snapshot->weather.current_temperature_available ? "true" : "false",
+        snapshot->weather.current_temperature_is_forecast ? "true" : "false",
+        snapshot->weather.humidity_percent, snapshot->weather.humidity_available ? "true" : "false",
+        snapshot->weather.precipitation_probability_percent, snapshot->weather.uv_index,
+        (long long)snapshot->weather.observed_at);
 
     for (int i = 0; i < MP_WEATHER_FORECAST_SLOTS && !body.failed; i++) {
-        const struct weather_slot_state *slot = &weather.slots[i];
+        const struct weather_slot_state *slot = &snapshot->weather.slots[i];
         mp_buffer_appendf(&body,
             "%s{\"kind\":\"%s\",\"label\":\"%s\",\"date_label\":\"%s\","
             "\"temperature_c\":%d,\"temperature_available\":%s,"
@@ -4794,23 +4869,31 @@ static int ipc_status(int client) {
     mp_buffer_appendf(&body,
         "]},\"room_sensor\":{\"type\":\"AHT10\",\"enabled\":%s,\"status\":\"%s\","
         "\"device\":\"%s\",\"address\":\"0x%02X\",\"poll_seconds\":%d,\"stale_seconds\":%d,"
-        "\"temperature_c\":%.1f,\"humidity_percent\":%.1f,\"measured_at\":%lld,\"error\":\"%s\"},"
-        "\"alarms\":[",
-        room.enabled ? "true" : "false", room_sensor_status_name(room.status),
-        e_room_device, room.address, room.poll_seconds, room.stale_seconds,
-        room.temperature_c, room.humidity_percent, (long long)room.measured_at,
-        e_room_error);
+        "\"temperature_c\":%.1f,\"humidity_percent\":%.1f,\"measured_at\":%lld,\"error\":\"%s\"},",
+        snapshot->room.enabled ? "true" : "false", room_sensor_status_name(snapshot->room.status),
+        e_room_device, snapshot->room.address, snapshot->room.poll_seconds, snapshot->room.stale_seconds,
+        snapshot->room.temperature_c, snapshot->room.humidity_percent,
+        (long long)snapshot->room.measured_at, e_room_error);
+
+    mp_buffer_append(&body, "\"alarms\":[");
 
     for (int i = 0; i < MAX_ALARMS && !body.failed; i++) {
         mp_buffer_appendf(&body,
             "%s{\"id\":%d,\"enabled\":%d,\"hour\":%d,\"min\":%d,\"weekdays\":%d,\"start_volume\":%d,\"end_volume\":%d,\"music_file\":\"",
-            i ? "," : "", i + 1, alarms[i].enabled, alarms[i].hour, alarms[i].min,
-            alarms[i].weekdays, alarms[i].start_volume, alarms[i].end_volume);
-        mp_buffer_append_json_string(&body, alarms[i].music_file);
+            i ? "," : "", i + 1, snapshot->alarms[i].enabled, snapshot->alarms[i].hour,
+            snapshot->alarms[i].min, snapshot->alarms[i].weekdays,
+            snapshot->alarms[i].start_volume, snapshot->alarms[i].end_volume);
+        mp_buffer_append_json_string(&body, snapshot->alarms[i].music_file);
         mp_buffer_append(&body, "\"}");
     }
     mp_buffer_append(&body, "]}");
     return ipc_send_builder(client, 200, &body);
+}
+
+static int ipc_status(int client) {
+    struct mp_status_snapshot snapshot;
+    status_snapshot_capture(&snapshot);
+    return ipc_status_serialize(client, &snapshot);
 }
 
 static int ipc_logs_get(int client) {
@@ -4917,6 +5000,7 @@ static int ipc_display_action(int client, const struct mp_ipc_display_action *re
     }
     return ipc_send_json(client, 200, "{\"ok\":true}");
 }
+
 
 static int ipc_config_alarm(int client, const struct mp_ipc_alarm_config *request) {
     int id = clamp_int(request->id, 1, MAX_ALARMS);
@@ -5154,12 +5238,14 @@ static int ipc_weather_update(int client, const struct mp_ipc_weather_update *re
             clamp_int(request->slots[i].low_temperature_c, -99, 99);
         slots[i].low_temperature_available =
             request->slots[i].low_temperature_available != 0;
-        slots[i].low_hour = clamp_int(request->slots[i].low_hour, 0, 23);
+        slots[i].low_hour = request->slots[i].low_hour <= 23
+            ? (int)request->slots[i].low_hour : -1;
         slots[i].high_temperature_c =
             clamp_int(request->slots[i].high_temperature_c, -99, 99);
         slots[i].high_temperature_available =
             request->slots[i].high_temperature_available != 0;
-        slots[i].high_hour = clamp_int(request->slots[i].high_hour, 0, 23);
+        slots[i].high_hour = request->slots[i].high_hour <= 23
+            ? (int)request->slots[i].high_hour : -1;
         slots[i].precipitation_probability_percent =
             clamp_int(request->slots[i].precipitation_probability_percent, 0, 100);
         slots[i].icon = clamp_int(request->slots[i].icon, MP_WEATHER_ICON_UNKNOWN, MP_WEATHER_ICON_FOG);
@@ -5260,13 +5346,14 @@ static int ipc_weather_update(int client, const struct mp_ipc_weather_update *re
 static int ipc_asset_event(int client, const struct mp_ipc_asset_event *event) {
     if (event->action == MP_IPC_ASSET_UPLOADED) {
         if (event->kind == MP_IPC_ASSET_FONT) {
+            int active_font_replaced = 0;
             pthread_mutex_lock(&g_state.lock);
-            g_state.oled_font = 0;
-            mp_safe_str(g_state.oled_font_file, sizeof(g_state.oled_font_file), event->file);
-            g_state.display_dirty = 1;
+            active_font_replaced =
+                strcmp(g_state.oled_font_file, event->file) == 0 ||
+                strcmp(g_state.inside_font_file, event->file) == 0;
+            if (active_font_replaced) g_state.display_dirty = 1;
             pthread_mutex_unlock(&g_state.lock);
-            font_cache_reset();
-            save_config();
+            if (active_font_replaced) font_cache_reset();
         } else if (event->kind != MP_IPC_ASSET_MUSIC) {
             return ipc_send_json(client, 400, "{\\\"ok\\\":false,\\\"error\\\":\\\"invalid asset kind\\\"}");
         }
@@ -5416,6 +5503,7 @@ static int config_blob_valid(const struct mp_ipc_config_blob *blob) {
     return has_clock_name && has_alarm;
 }
 
+
 static int ipc_config_import(int client, const struct mp_ipc_config_blob *blob) {
     if (!config_blob_valid(blob))
         return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"backup configuration is invalid\"}");
@@ -5450,70 +5538,20 @@ static int ipc_config_import(int client, const struct mp_ipc_config_blob *blob) 
     return ipc_send_json(client, 200, "{\"ok\":true}");
 }
 
-static int ipc_bluetooth_state(int client, const struct mp_ipc_bluetooth_state *request) {
-    if (!request) return ipc_bad_payload(client);
 
-    char title[MP_ID3_TEXT_MAX];
-    char artist[MP_ID3_TEXT_MAX];
-    char passkey[MP_IPC_BLUETOOTH_PASSKEY_MAX];
-    size_t title_copy = sizeof(request->title) < sizeof(title) - 1
-        ? sizeof(request->title) : sizeof(title) - 1;
-    size_t artist_copy = sizeof(request->artist) < sizeof(artist) - 1
-        ? sizeof(request->artist) : sizeof(artist) - 1;
-    size_t passkey_copy = sizeof(request->pairing_passkey) < sizeof(passkey) - 1
-        ? sizeof(request->pairing_passkey) : sizeof(passkey) - 1;
-    memcpy(title, request->title, title_copy);
-    title[title_copy] = '\0';
-    memcpy(artist, request->artist, artist_copy);
-    artist[artist_copy] = '\0';
-    memcpy(passkey, request->pairing_passkey, passkey_copy);
-    passkey[passkey_copy] = '\0';
 
-    int pairing_active = request->pairing_passkey_active ? 1 : 0;
-    if (pairing_active) {
-        size_t len = strlen(passkey);
-        if (len != 6) pairing_active = 0;
-        for (size_t i = 0; pairing_active && i < len; i++)
-            if (!isdigit((unsigned char)passkey[i])) pairing_active = 0;
-    }
-    if (!pairing_active) passkey[0] = '\0';
 
-    int playing = request->playing ? 1 : 0;
-    int changed = 0;
+
+
+
+
+
+static int ipc_timezone_reload(int client) {
+    tzset();
     pthread_mutex_lock(&g_state.lock);
-
-    if (playing != g_state.bluetooth_audio_playing ||
-        (playing && (strcmp(title, g_state.bluetooth_audio_title) != 0 ||
-                     strcmp(artist, g_state.bluetooth_audio_artist) != 0))) {
-        changed = 1;
-        if (playing)
-            g_state.bluetooth_audio_scroll_started_ms = monotonic_millis();
-    }
-    g_state.bluetooth_audio_playing = playing;
-    if (playing) {
-        safe_str(g_state.bluetooth_audio_title, sizeof(g_state.bluetooth_audio_title), title);
-        safe_str(g_state.bluetooth_audio_artist, sizeof(g_state.bluetooth_audio_artist), artist);
-    } else {
-        g_state.bluetooth_audio_title[0] = '\0';
-        g_state.bluetooth_audio_artist[0] = '\0';
-        g_state.bluetooth_audio_scroll_started_ms = 0;
-    }
-
-    if (pairing_active != g_state.bluetooth_pairing_passkey_active ||
-        strcmp(passkey, g_state.bluetooth_pairing_passkey) != 0) {
-        changed = 1;
-    }
-    g_state.bluetooth_pairing_passkey_active = pairing_active;
-    safe_str(g_state.bluetooth_pairing_passkey,
-             sizeof(g_state.bluetooth_pairing_passkey), passkey);
-
-    if (pairing_active) {
-        /* A numeric comparison request must always be visible on the OLED. */
-        g_state.display_mode = 0;
-    }
-    if (changed) g_state.display_dirty = 1;
+    g_state.display_dirty = 1;
     pthread_mutex_unlock(&g_state.lock);
-
+    app_log("system", "System timezone reloaded");
     return ipc_send_json(client, 200, "{\"ok\":true}");
 }
 
@@ -5568,9 +5606,9 @@ static int ipc_dispatch(int client, uint16_t opcode, const void *payload, size_t
         case MP_IPC_OP_CONFIG_IMPORT:
             EXPECT(struct mp_ipc_config_blob);
             return ipc_config_import(client, payload);
-        case MP_IPC_OP_BLUETOOTH_STATE:
-            EXPECT(struct mp_ipc_bluetooth_state);
-            return ipc_bluetooth_state(client, payload);
+        case MP_IPC_OP_TIMEZONE_RELOAD:
+            if (payload_len != 0) return ipc_bad_payload(client);
+            return ipc_timezone_reload(client);
         default:
             return ipc_send_json(client, 404, "{\"ok\":false,\"error\":\"unknown IPC opcode\"}");
     }
@@ -5619,6 +5657,7 @@ static ssize_t ipc_expected_payload_size(uint16_t opcode) {
         case MP_IPC_OP_PING:
         case MP_IPC_OP_DISPLAY_PREVIEW:
         case MP_IPC_OP_CONFIG_EXPORT:
+        case MP_IPC_OP_TIMEZONE_RELOAD:
             return 0;
         case MP_IPC_OP_DISPLAY_ACTION: return sizeof(struct mp_ipc_display_action);
         case MP_IPC_OP_BRIGHTNESS_PREVIEW: return sizeof(struct mp_ipc_brightness_preview);
@@ -5629,7 +5668,6 @@ static ssize_t ipc_expected_payload_size(uint16_t opcode) {
         case MP_IPC_OP_WEATHER_UPDATE: return sizeof(struct mp_ipc_weather_update);
         case MP_IPC_OP_ASSET_EVENT: return sizeof(struct mp_ipc_asset_event);
         case MP_IPC_OP_CONFIG_IMPORT: return sizeof(struct mp_ipc_config_blob);
-        case MP_IPC_OP_BLUETOOTH_STATE: return sizeof(struct mp_ipc_bluetooth_state);
         default: return -1;
     }
 }
@@ -5778,6 +5816,8 @@ static void check_alarm(void) {
 
 int main(void) {
     g_start_time = time(NULL);
+    struct mp_service_watchdog service_watchdog;
+    mp_service_watchdog_init(&service_watchdog);
 
     if (mpg123_init() != MPG123_OK) {
         fprintf(stderr, "mpg123_init failed\n");
@@ -5819,6 +5859,7 @@ int main(void) {
         app_log("system", "OLED init failed, core IPC will still start");
         fprintf(stderr, "OLED init failed, core IPC will still start\n");
     }
+
 
     pthread_t ipc_thread;
     pthread_t touch_thread;
@@ -5865,6 +5906,9 @@ int main(void) {
     int last_colon_phase = -1;
     uint64_t last_diagnostic_refresh_ms = 0;
     while (g_running) {
+        /* Heartbeat from the core main loop. systemd restarts this service if
+           the loop stops making progress for WatchdogSec. */
+        mp_service_watchdog_ping_if_due(&service_watchdog);
         check_alarm();
         apply_bedtime_brightness();
 

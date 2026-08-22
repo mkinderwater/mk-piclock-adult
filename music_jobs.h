@@ -7,7 +7,8 @@
 
 #include "asset_store.h"
 
-#define MP_MUSIC_JOB_MAX 32
+#define MP_MUSIC_JOB_MAX 14
+#define MP_MUSIC_UPLOAD_MAX 14
 #define MP_MUSIC_JOB_ERROR_MAX 160
 
 enum mp_music_job_state {
