@@ -9,11 +9,14 @@
 #endif
 #define MP_MUSIC_DIR MP_APP_ROOT "/assets/music"
 #define MP_MUSIC_PROCESS_DIR MP_MUSIC_DIR "/.processing"
+#define MP_PODCAST_DIR MP_APP_ROOT "/assets/podcasts"
 #define MP_FONT_DIR MP_APP_ROOT "/assets/fonts"
 #define MP_ASSET_NAME_MAX 256
-#define MP_ASSET_LIST_MAX 256
+#define MP_ASSET_LIST_MAX 1024
 #define MP_FONT_UPLOAD_MAX_BYTES (16u * 1024u * 1024u)
 #define MP_MUSIC_UPLOAD_MAX_BYTES (64u * 1024u * 1024u)
+#define MP_PODCAST_UPLOAD_MAX_BYTES (256u * 1024u * 1024u)
+#define MP_PODCAST_UPLOAD_MAX 14
 
 enum mp_asset_scan_kind {
     MP_ASSET_SCAN_MUSIC_MP3 = 1,
@@ -60,5 +63,6 @@ uint64_t mp_asset_directory_bytes(const char *dir, int kind);
 int mp_asset_move_file(const char *source, const char *target);
 int mp_asset_delete_file(const char *dir, const char *file);
 int mp_asset_delete_music(void);
+int mp_asset_delete_podcasts(void);
 
 #endif

@@ -1,4 +1,4 @@
-# mk-clock-adult 2.3.50-preview42 BPI-M2 Zero pinouts
+# mk-clock-adult 2.3.54-preview59 BPI-M2 Zero pinouts
 
 This document covers the Banana Pi M2 Zero 40-pin CON2 header used by the adult clock with `bpi-zero-clock 1.0.4-preview36`. Physical pin 38 / PA21 is unassigned and free. Touch is physical pin 37 / PA17.
 

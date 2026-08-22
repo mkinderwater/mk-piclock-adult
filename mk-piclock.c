@@ -36,6 +36,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -55,6 +56,7 @@
 #include "compiler_attrs.h"
 #include "font_catalog.h"
 #include "ipc_protocol.h"
+#include "io_helpers.h"
 #include "util.h"
 
 #define safe_str mp_safe_str
@@ -64,6 +66,8 @@
 #define DEFAULT_CLOCK_NAME "Adult Clock"
 #define APP_ROOT "/opt/mk-piclock"
 #define MUSIC_DIR APP_ROOT "/assets/music"
+#define PODCAST_DIR APP_ROOT "/assets/podcasts"
+#define PODCAST_HISTORY_FILE CONFIG_DIR "/podcast-history.txt"
 #define DEFAULT_ALARM_PATH APP_ROOT "/assets/default-alarm.mp3"
 #define DEFAULT_ALARM_LABEL "Built-in Alarm"
 #define MESSAGE_CHIME_PATH APP_ROOT "/assets/message-chime.mp3"
@@ -83,6 +87,11 @@
 
 #define ROOM_SENSOR_POLL_SECONDS_DEFAULT 10
 #define ROOM_SENSOR_STALE_SECONDS_DEFAULT 120
+#define ROOM_TREND_SAMPLE_SECONDS 60
+#define ROOM_TREND_HISTORY_SAMPLES 31
+#define ROOM_TREND_MIN_SPAN_SECONDS (20 * 60)
+#define ROOM_TREND_AVERAGE_SAMPLES 5
+#define ROOM_TREND_THRESHOLD_C 0.3
 
 
 #define OLED_SPI_DEV MP_OLED_SPI_DEV
@@ -102,6 +111,9 @@
 #define TOUCH_POLL_MS 20u
 #define TOUCH_DEBOUNCE_MS 50u
 #define TOUCH_LONG_PRESS_MS 3000u
+#define PODCAST_TOUCH_TAPS 10u
+#define PODCAST_TOUCH_WINDOW_MS 8000u
+#define PODCAST_TOUCH_START_GUARD_MS 1000u
 #define TOUCH_DIAGNOSTIC_PRESS_MS MP_TOUCH_DIAGNOSTIC_PRESS_MS
 #define DIAGNOSTIC_SCREEN_SECONDS 30u
 #define DIAGNOSTIC_REFRESH_MS 2000u
@@ -109,6 +121,13 @@
 #define MAX_ALARMS 7
 #define ALARM_MAX_DURATION_SECONDS 1800
 #define MUSIC_FILE_MAX 256
+
+enum audio_content_kind {
+    AUDIO_CONTENT_NONE = 0,
+    AUDIO_CONTENT_MUSIC = 1,
+    AUDIO_CONTENT_PODCAST = 2,
+    AUDIO_CONTENT_ALARM = 3
+};
 
 
 #define CORE_RUNTIME_DIR "/run/mk-piclock"
@@ -119,6 +138,7 @@
 static volatile sig_atomic_t g_running = 1;
 static time_t g_start_time = 0;
 static pthread_mutex_t g_log_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_podcast_history_lock = PTHREAD_MUTEX_INITIALIZER;
 
 struct alarm_slot {
     int enabled;
@@ -137,6 +157,8 @@ struct app_state {
     int diagnostic_return_mode;
     time_t diagnostic_until;
     int global_volume;
+    int podcast_volume;
+    int podcast_touch_enabled;
     int bedtime_enabled;
     int bedtime_start_hour;
     int bedtime_start_min;
@@ -151,6 +173,7 @@ struct app_state {
     int brightness_preview_percent;
     time_t brightness_preview_until;
     int audio_playing;
+    int audio_content_kind;
     char audio_file[MUSIC_FILE_MAX];
     char audio_title[MP_ID3_TEXT_MAX];
     char audio_artist[MP_ID3_TEXT_MAX];
@@ -178,6 +201,8 @@ static struct app_state g_state = {
     .diagnostic_return_mode = 0,
     .diagnostic_until = 0,
     .global_volume = 80,
+    .podcast_volume = 30,
+    .podcast_touch_enabled = 1,
     .bedtime_enabled = 0,
     .bedtime_start_hour = 21,
     .bedtime_start_min = 0,
@@ -192,6 +217,7 @@ static struct app_state g_state = {
     .brightness_preview_percent = -1,
     .brightness_preview_until = 0,
     .audio_playing = 0,
+    .audio_content_kind = AUDIO_CONTENT_NONE,
     .audio_file = "",
     .audio_title = "",
     .audio_artist = "",
@@ -306,6 +332,17 @@ enum room_sensor_status {
     ROOM_SENSOR_ERROR = 4
 };
 
+enum room_temperature_trend {
+    ROOM_TREND_STABLE = 0,
+    ROOM_TREND_RISING = 1,
+    ROOM_TREND_FALLING = -1
+};
+
+struct room_trend_sample {
+    double temperature_c;
+    time_t measured_at;
+};
+
 struct room_sensor_state {
     int enabled;
     enum room_sensor_status status;
@@ -316,6 +353,10 @@ struct room_sensor_state {
     double temperature_c;
     double humidity_percent;
     time_t measured_at;
+    enum room_temperature_trend temperature_trend;
+    struct room_trend_sample trend_history[ROOM_TREND_HISTORY_SAMPLES];
+    int trend_count;
+    int trend_next;
     char error[160];
     pthread_mutex_t lock;
 };
@@ -330,6 +371,7 @@ struct room_sensor_snapshot {
     double temperature_c;
     double humidity_percent;
     time_t measured_at;
+    enum room_temperature_trend temperature_trend;
     char error[160];
 };
 
@@ -343,6 +385,10 @@ static struct room_sensor_state g_room_sensor = {
     .temperature_c = 0.0,
     .humidity_percent = 0.0,
     .measured_at = 0,
+    .temperature_trend = ROOM_TREND_STABLE,
+    .trend_history = {{0}},
+    .trend_count = 0,
+    .trend_next = 0,
     .error = "",
     .lock = PTHREAD_MUTEX_INITIALIZER
 };
@@ -628,6 +674,57 @@ static int env_number(const char *name, int fallback, int minimum, int maximum, 
     return (int)parsed;
 }
 
+static void room_sensor_update_trend_locked(double temperature_c, time_t measured_at)
+{
+    if (measured_at <= 0 || !isfinite(temperature_c)) return;
+
+    if (g_room_sensor.trend_count > 0) {
+        int newest_index = (g_room_sensor.trend_next + ROOM_TREND_HISTORY_SAMPLES - 1) %
+                           ROOM_TREND_HISTORY_SAMPLES;
+        time_t newest_time = g_room_sensor.trend_history[newest_index].measured_at;
+        if (newest_time > 0 && measured_at - newest_time < ROOM_TREND_SAMPLE_SECONDS)
+            return;
+    }
+
+    g_room_sensor.trend_history[g_room_sensor.trend_next].temperature_c = temperature_c;
+    g_room_sensor.trend_history[g_room_sensor.trend_next].measured_at = measured_at;
+    g_room_sensor.trend_next = (g_room_sensor.trend_next + 1) % ROOM_TREND_HISTORY_SAMPLES;
+    if (g_room_sensor.trend_count < ROOM_TREND_HISTORY_SAMPLES)
+        g_room_sensor.trend_count++;
+
+    g_room_sensor.temperature_trend = ROOM_TREND_STABLE;
+    if (g_room_sensor.trend_count < ROOM_TREND_AVERAGE_SAMPLES * 2) return;
+
+    int oldest_index = (g_room_sensor.trend_next + ROOM_TREND_HISTORY_SAMPLES -
+                        g_room_sensor.trend_count) % ROOM_TREND_HISTORY_SAMPLES;
+    int newest_index = (g_room_sensor.trend_next + ROOM_TREND_HISTORY_SAMPLES - 1) %
+                       ROOM_TREND_HISTORY_SAMPLES;
+    time_t oldest_time = g_room_sensor.trend_history[oldest_index].measured_at;
+    time_t newest_time = g_room_sensor.trend_history[newest_index].measured_at;
+    if (oldest_time <= 0 || newest_time - oldest_time < ROOM_TREND_MIN_SPAN_SECONDS)
+        return;
+
+    int average_count = ROOM_TREND_AVERAGE_SAMPLES;
+    if (average_count > g_room_sensor.trend_count / 2)
+        average_count = g_room_sensor.trend_count / 2;
+
+    double old_sum = 0.0;
+    double new_sum = 0.0;
+    for (int i = 0; i < average_count; i++) {
+        int old_index = (oldest_index + i) % ROOM_TREND_HISTORY_SAMPLES;
+        int new_index = (g_room_sensor.trend_next + ROOM_TREND_HISTORY_SAMPLES -
+                         average_count + i) % ROOM_TREND_HISTORY_SAMPLES;
+        old_sum += g_room_sensor.trend_history[old_index].temperature_c;
+        new_sum += g_room_sensor.trend_history[new_index].temperature_c;
+    }
+
+    double delta = (new_sum - old_sum) / (double)average_count;
+    if (delta >= ROOM_TREND_THRESHOLD_C)
+        g_room_sensor.temperature_trend = ROOM_TREND_RISING;
+    else if (delta <= -ROOM_TREND_THRESHOLD_C)
+        g_room_sensor.temperature_trend = ROOM_TREND_FALLING;
+}
+
 static void room_sensor_configure(void)
 {
     pthread_mutex_lock(&g_room_sensor.lock);
@@ -644,6 +741,10 @@ static void room_sensor_configure(void)
     if (g_room_sensor.stale_seconds < g_room_sensor.poll_seconds * 2)
         g_room_sensor.stale_seconds = g_room_sensor.poll_seconds * 2;
     g_room_sensor.status = g_room_sensor.enabled ? ROOM_SENSOR_WAITING : ROOM_SENSOR_DISABLED;
+    g_room_sensor.temperature_trend = ROOM_TREND_STABLE;
+    g_room_sensor.trend_count = 0;
+    g_room_sensor.trend_next = 0;
+    memset(g_room_sensor.trend_history, 0, sizeof(g_room_sensor.trend_history));
     g_room_sensor.error[0] = '\0';
     pthread_mutex_unlock(&g_room_sensor.lock);
 }
@@ -661,6 +762,7 @@ static void room_sensor_snapshot(struct room_sensor_snapshot *out)
     out->temperature_c = g_room_sensor.temperature_c;
     out->humidity_percent = g_room_sensor.humidity_percent;
     out->measured_at = g_room_sensor.measured_at;
+    out->temperature_trend = g_room_sensor.temperature_trend;
     safe_str(out->error, sizeof(out->error), g_room_sensor.error);
     pthread_mutex_unlock(&g_room_sensor.lock);
 }
@@ -702,6 +804,7 @@ static void *room_sensor_thread_main(void *arg)
             g_room_sensor.temperature_c = sample.temperature_c;
             g_room_sensor.humidity_percent = sample.humidity_percent;
             g_room_sensor.measured_at = sample.measured_at;
+            room_sensor_update_trend_locked(sample.temperature_c, sample.measured_at);
             g_room_sensor.error[0] = '\0';
             next_status = ROOM_SENSOR_ACTIVE;
         } else {
@@ -812,6 +915,10 @@ static int has_mp3_ext(const char *name) {
 
 static void make_music_path(const char *file, char *out, size_t out_len) {
     snprintf(out, out_len, MUSIC_DIR "/%s", file && *file ? file : "");
+}
+
+static void make_podcast_path(const char *file, char *out, size_t out_len) {
+    snprintf(out, out_len, PODCAST_DIR "/%s", file && *file ? file : "");
 }
 
 
@@ -936,6 +1043,8 @@ static void reset_persistent_state_locked(void) {
     g_state.diagnostic_return_mode = 0;
     g_state.diagnostic_until = 0;
     g_state.global_volume = 80;
+    g_state.podcast_volume = 30;
+    g_state.podcast_touch_enabled = 1;
     g_state.bedtime_enabled = 0;
     g_state.bedtime_start_hour = 21;
     g_state.bedtime_start_min = 0;
@@ -960,6 +1069,8 @@ static void reset_persistent_state_locked(void) {
 
 #define CONFIG_INT_FIELDS(X) \
     X("global_volume", g_state.global_volume, "%d") \
+    X("podcast_volume", g_state.podcast_volume, "%d") \
+    X("podcast_touch_enabled", g_state.podcast_touch_enabled, "%d") \
     X("bedtime_enabled", g_state.bedtime_enabled, "%d") \
     X("bedtime_start_hour", g_state.bedtime_start_hour, "%02d") \
     X("bedtime_start_min", g_state.bedtime_start_min, "%02d") \
@@ -1126,6 +1237,8 @@ static void load_config(void) {
     fclose(f);
 
     g_state.global_volume = clamp_int(g_state.global_volume, 0, 100);
+    g_state.podcast_volume = clamp_int(g_state.podcast_volume, 0, 100);
+    g_state.podcast_touch_enabled = g_state.podcast_touch_enabled ? 1 : 0;
     g_state.bedtime_enabled = g_state.bedtime_enabled ? 1 : 0;
     g_state.bedtime_start_hour = clamp_int(g_state.bedtime_start_hour, 0, 23);
     g_state.bedtime_start_min = clamp_int(g_state.bedtime_start_min, 0, 59);
@@ -2997,6 +3110,25 @@ static void draw_weather_compact_text_scaled_centered(
     }
 }
 
+static void draw_room_temperature_trend_arrow(
+    int x0, int x1, int y, enum room_temperature_trend trend, uint8_t level)
+{
+    if (trend == ROOM_TREND_STABLE) return;
+
+    int cx = (x0 + x1) / 2;
+    if (trend == ROOM_TREND_RISING) {
+        oled_draw_line(cx - 4, y + 4, cx, y, level);
+        oled_draw_line(cx, y, cx + 4, y + 4, level);
+        oled_draw_line(cx, y + 1, cx, y + 8, level);
+        oled_draw_line(cx + 1, y + 2, cx + 1, y + 8, level);
+    } else if (trend == ROOM_TREND_FALLING) {
+        oled_draw_line(cx - 4, y + 4, cx, y + 8, level);
+        oled_draw_line(cx, y + 8, cx + 4, y + 4, level);
+        oled_draw_line(cx, y, cx, y + 7, level);
+        oled_draw_line(cx + 1, y, cx + 1, y + 6, level);
+    }
+}
+
 static void draw_room_temperature_panel(
     int x0,
     int x1,
@@ -3037,19 +3169,22 @@ static void draw_room_temperature_panel(
             upper_font_size,
             temperature_text,
             x0 + 2,
-            13,
+            12,
             x1 - 2,
-            43,
+            34,
             temperature_level
         ) == 0;
 
     if (!used_ttf)
         draw_weather_compact_text_scaled_centered(
-            x0 + 1, x1 - 1, 23, fallback_text, 2, temperature_level);
+            x0 + 1, x1 - 1, 18, fallback_text, 2, temperature_level);
+
+    if (has_reading)
+        draw_room_temperature_trend_arrow(
+            x0 + 1, x1 - 1, 39, sensor->temperature_trend, temperature_level);
 
     draw_weather_compact_text_centered(
-        x0 + 1, x1 - 1, WEATHER_PANEL_LOWER_ROW_Y,
-        humidity_text, humidity_level);
+        x0 + 1, x1 - 1, 56, humidity_text, humidity_level);
 }
 
 
@@ -3342,12 +3477,14 @@ static int dashboard_footer_state(char *text, size_t text_len,
     if (is_marquee) *is_marquee = 0;
 
     int audio_playing;
+    int audio_content_kind;
     char audio_file[MUSIC_FILE_MAX];
     char audio_title[MP_ID3_TEXT_MAX];
     char audio_artist[MP_ID3_TEXT_MAX];
     uint64_t audio_started_ms;
     pthread_mutex_lock(&g_state.lock);
     audio_playing = g_state.audio_playing;
+    audio_content_kind = g_state.audio_content_kind;
     safe_str(audio_file, sizeof(audio_file), g_state.audio_file);
     safe_str(audio_title, sizeof(audio_title), g_state.audio_title);
     safe_str(audio_artist, sizeof(audio_artist), g_state.audio_artist);
@@ -3355,7 +3492,17 @@ static int dashboard_footer_state(char *text, size_t text_len,
     pthread_mutex_unlock(&g_state.lock);
 
     if (audio_playing) {
-        dashboard_audio_display(text, text_len, audio_title, audio_artist, audio_file);
+        if (audio_content_kind == AUDIO_CONTENT_PODCAST) {
+            char podcast_title[MP_ID3_TEXT_MAX];
+            char podcast_file[MUSIC_FILE_MAX];
+            oled_filter_metadata_text(audio_title, podcast_title, sizeof(podcast_title));
+            oled_filter_metadata_text(audio_file, podcast_file, sizeof(podcast_file));
+            if (podcast_title[0]) safe_str(text, text_len, podcast_title);
+            else if (podcast_file[0]) safe_str(text, text_len, podcast_file);
+            else safe_str(text, text_len, "PODCAST");
+        } else {
+            dashboard_audio_display(text, text_len, audio_title, audio_artist, audio_file);
+        }
         if (started_ms) *started_ms = audio_started_ms;
     } else {
         struct weather_dashboard_snapshot weather;
@@ -3414,6 +3561,10 @@ static void refresh_dashboard_footer(void) {
 
 static int collect_music_files(char files[][ASSET_LIST_NAME_MAX], int max_files) {
     return scan_asset_files(MUSIC_DIR, ASSET_LIST_MUSIC_MP3, files, max_files);
+}
+
+static int collect_podcast_files(char files[][ASSET_LIST_NAME_MAX], int max_files) {
+    return scan_asset_files(PODCAST_DIR, ASSET_LIST_MUSIC_MP3, files, max_files);
 }
 
 static void draw_weather_dashboard_screen(void) {
@@ -3555,6 +3706,7 @@ struct audio_play_request {
     int end_volume;
     int use_ramp;
     int follow_global_volume; /* normal music tracks follow live GUI/API volume changes */
+    int follow_podcast_volume; /* podcasts follow their independent live volume */
 };
 
 static int choose_random_music_file(char *out, size_t out_len) {
@@ -3566,6 +3718,142 @@ static int choose_random_music_file(char *out, size_t out_len) {
     if (count <= 0) return -1;
 
     safe_str(out, out_len, files[rand() % count]);
+    return 0;
+}
+
+static int podcast_history_load_locked(char played[][ASSET_LIST_NAME_MAX], int max_played) {
+    if (!played || max_played <= 0) return 0;
+    FILE *f = fopen(PODCAST_HISTORY_FILE, "r");
+    if (!f) return 0;
+    int count = 0;
+    char line[ASSET_LIST_NAME_MAX + 8];
+    while (count < max_played && fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!safe_asset_filename(line) || !has_mp3_ext(line)) continue;
+        safe_str(played[count++], ASSET_LIST_NAME_MAX, line);
+    }
+    fclose(f);
+    return count;
+}
+
+static int podcast_history_name_in_list(const char *file,
+                                        char played[][ASSET_LIST_NAME_MAX], int played_count) {
+    if (!file || !*file) return 0;
+    for (int i = 0; i < played_count; i++) {
+        if (strcmp(file, played[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+static int podcast_history_mark_played(const char *file) {
+    if (!safe_asset_filename(file) || !has_mp3_ext(file)) return -1;
+    pthread_mutex_lock(&g_podcast_history_lock);
+    char played[ASSET_LIST_MAX_FILES][ASSET_LIST_NAME_MAX];
+    int count = podcast_history_load_locked(played, ASSET_LIST_MAX_FILES);
+    if (podcast_history_name_in_list(file, played, count)) {
+        pthread_mutex_unlock(&g_podcast_history_lock);
+        return 0;
+    }
+    ensure_dir(CONFIG_DIR);
+    FILE *f = fopen(PODCAST_HISTORY_FILE, "a");
+    if (!f) {
+        pthread_mutex_unlock(&g_podcast_history_lock);
+        return -1;
+    }
+    (void)fchmod(fileno(f), 0660);
+    int rc = fprintf(f, "%s\n", file) < 0 || fflush(f) != 0 || fsync(fileno(f)) != 0 ? -1 : 0;
+    fclose(f);
+    pthread_mutex_unlock(&g_podcast_history_lock);
+    return rc;
+}
+
+static int podcast_history_reset(void) {
+    pthread_mutex_lock(&g_podcast_history_lock);
+    int rc = unlink(PODCAST_HISTORY_FILE);
+    if (rc != 0 && errno == ENOENT) rc = 0;
+    if (rc == 0) (void)mp_fsync_parent_directory(PODCAST_HISTORY_FILE);
+    pthread_mutex_unlock(&g_podcast_history_lock);
+    return rc;
+}
+
+static int podcast_history_forget(const char *file) {
+    if (!file || !*file) return -1;
+    pthread_mutex_lock(&g_podcast_history_lock);
+    char played[ASSET_LIST_MAX_FILES][ASSET_LIST_NAME_MAX];
+    int count = podcast_history_load_locked(played, ASSET_LIST_MAX_FILES);
+    int found = podcast_history_name_in_list(file, played, count);
+    if (!found) {
+        pthread_mutex_unlock(&g_podcast_history_lock);
+        return 0;
+    }
+    ensure_dir(CONFIG_DIR);
+    char temp[512];
+    snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", PODCAST_HISTORY_FILE);
+    int fd = mkstemp(temp);
+    if (fd < 0) {
+        pthread_mutex_unlock(&g_podcast_history_lock);
+        return -1;
+    }
+    (void)fchmod(fd, 0660);
+    FILE *f = fdopen(fd, "w");
+    int rc = f ? 0 : -1;
+    if (f) {
+        for (int i = 0; i < count; i++) {
+            if (strcmp(played[i], file) == 0) continue;
+            if (fprintf(f, "%s\n", played[i]) < 0) { rc = -1; break; }
+        }
+        if (rc == 0 && (fflush(f) != 0 || fsync(fd) != 0)) rc = -1;
+        if (fclose(f) != 0) rc = -1;
+    } else {
+        close(fd);
+    }
+    if (rc == 0 && rename(temp, PODCAST_HISTORY_FILE) != 0) rc = -1;
+    if (rc == 0) (void)mp_fsync_parent_directory(PODCAST_HISTORY_FILE);
+    if (rc != 0) unlink(temp);
+    pthread_mutex_unlock(&g_podcast_history_lock);
+    return rc;
+}
+
+static size_t podcast_random_index(size_t count) {
+    if (count <= 1) return 0;
+    uint32_t value = 0;
+    uint32_t limit = UINT32_MAX - (UINT32_MAX % (uint32_t)count);
+    do {
+        ssize_t got = getrandom(&value, sizeof(value), 0);
+        if (got != (ssize_t)sizeof(value)) return (size_t)(rand() % (int)count);
+    } while (value >= limit);
+    return (size_t)(value % (uint32_t)count);
+}
+
+static int choose_random_podcast_file(char *out, size_t out_len) {
+    if (!out || out_len == 0) return -1;
+    out[0] = '\0';
+
+    char files[ASSET_LIST_MAX_FILES][ASSET_LIST_NAME_MAX];
+    int count = collect_podcast_files(files, ASSET_LIST_MAX_FILES);
+    if (count <= 0) return -1;
+
+    char played[ASSET_LIST_MAX_FILES][ASSET_LIST_NAME_MAX];
+    pthread_mutex_lock(&g_podcast_history_lock);
+    int played_count = podcast_history_load_locked(played, ASSET_LIST_MAX_FILES);
+    pthread_mutex_unlock(&g_podcast_history_lock);
+
+    char available[ASSET_LIST_MAX_FILES][ASSET_LIST_NAME_MAX];
+    int available_count = 0;
+    for (int i = 0; i < count; i++) {
+        if (!podcast_history_name_in_list(files[i], played, played_count))
+            safe_str(available[available_count++], ASSET_LIST_NAME_MAX, files[i]);
+    }
+    if (available_count <= 0) {
+        /* All current podcasts have been played. Start a fresh no-repeat cycle
+         * only when another random podcast is requested. */
+        if (podcast_history_reset() != 0) return -5;
+        safe_str(out, out_len, files[podcast_random_index((size_t)count)]);
+        app_log("podcast", "All podcasts played; history reset for a new random cycle");
+        return 0;
+    }
+
+    safe_str(out, out_len, available[podcast_random_index((size_t)available_count)]);
     return 0;
 }
 
@@ -3842,9 +4130,11 @@ static void *audio_thread_main(void *arg) {
              * Alarm ramps and notification chimes deliberately do not set this
              * flag, preserving their independent volume behavior.
              */
-            if (req->follow_global_volume) {
+            if (req->follow_global_volume || req->follow_podcast_volume) {
                 pthread_mutex_lock(&g_state.lock);
-                volume = clamp_int(g_state.global_volume, 0, 100);
+                volume = req->follow_podcast_volume
+                    ? clamp_int(g_state.podcast_volume, 0, 100)
+                    : clamp_int(g_state.global_volume, 0, 100);
                 pthread_mutex_unlock(&g_state.lock);
             }
 
@@ -3906,6 +4196,7 @@ done:
 
     pthread_mutex_lock(&g_state.lock);
     g_state.audio_playing = 0;
+    g_state.audio_content_kind = AUDIO_CONTENT_NONE;
     g_state.audio_file[0] = '\0';
     clear_audio_metadata_locked();
     g_state.display_dirty = 1;
@@ -3950,6 +4241,7 @@ static void audio_clear_visible_state(void) {
 
     pthread_mutex_lock(&g_state.lock);
     g_state.audio_playing = 0;
+    g_state.audio_content_kind = AUDIO_CONTENT_NONE;
     g_state.audio_file[0] = '\0';
     clear_audio_metadata_locked();
     g_state.display_dirty = 1;
@@ -4083,6 +4375,7 @@ static int audio_play_music_file(const char *music_file, int start_volume, int e
 
     pthread_mutex_lock(&g_state.lock);
     g_state.audio_playing = 1;
+    g_state.audio_content_kind = alarm_mode ? AUDIO_CONTENT_ALARM : AUDIO_CONTENT_MUSIC;
     safe_str(g_state.audio_file, sizeof(g_state.audio_file), safe_file);
     safe_str(g_state.audio_title, sizeof(g_state.audio_title), song_title);
     safe_str(g_state.audio_artist, sizeof(g_state.audio_artist), song_artist);
@@ -4103,6 +4396,7 @@ static int audio_play_music_file(const char *music_file, int start_volume, int e
         pthread_mutex_unlock(&g_audio.lock);
         pthread_mutex_lock(&g_state.lock);
         g_state.audio_playing = 0;
+        g_state.audio_content_kind = AUDIO_CONTENT_NONE;
         g_state.audio_file[0] = '\0';
         clear_audio_metadata_locked();
         g_state.display_dirty = 1;
@@ -4113,6 +4407,105 @@ static int audio_play_music_file(const char *music_file, int start_volume, int e
     pthread_detach(tid);
     return 0;
 
+}
+
+static int audio_play_podcast_file(const char *podcast_file) {
+    if (!podcast_file || !*podcast_file ||
+        !safe_asset_filename(podcast_file) || !has_mp3_ext(podcast_file))
+        return -1;
+
+    char path[512];
+    char podcast_title[MP_ID3_TEXT_MAX];
+    char podcast_artist[MP_ID3_TEXT_MAX];
+    make_podcast_path(podcast_file, path, sizeof(path));
+    if (access(path, R_OK) != 0) return -1;
+
+    song_metadata_for_file(path, podcast_file,
+                           podcast_title, sizeof(podcast_title),
+                           podcast_artist, sizeof(podcast_artist));
+
+    int volume;
+    pthread_mutex_lock(&g_state.lock);
+    volume = clamp_int(g_state.podcast_volume, 0, 100);
+    pthread_mutex_unlock(&g_state.lock);
+
+    if (audio_stop_and_wait(3000u) != 0) return -3;
+
+    struct audio_play_request *req = calloc(1, sizeof(*req));
+    if (!req) return -1;
+    safe_str(req->path, sizeof(req->path), path);
+    safe_str(req->file, sizeof(req->file), podcast_file);
+    req->start_volume = volume;
+    req->end_volume = volume;
+    req->use_ramp = 0;
+    req->follow_global_volume = 0;
+    req->follow_podcast_volume = 1;
+
+    /* A podcast is not allowed to start unless its history marker is durable. */
+    if (podcast_history_mark_played(podcast_file) != 0) {
+        free(req);
+        app_log("podcast", "Refusing playback because history could not record %s", podcast_file);
+        return -5;
+    }
+
+    pthread_mutex_lock(&g_audio.lock);
+    g_audio.running = 1;
+    g_audio.stop_requested = 0;
+    g_audio.alarm_mode = 0;
+    g_audio.timed_out = 0;
+    g_audio.alarm_deadline_ms = 0;
+    safe_str(g_audio.file, sizeof(g_audio.file), podcast_file);
+    pthread_mutex_unlock(&g_audio.lock);
+
+    pthread_mutex_lock(&g_state.lock);
+    g_state.audio_playing = 1;
+    g_state.audio_content_kind = AUDIO_CONTENT_PODCAST;
+    safe_str(g_state.audio_file, sizeof(g_state.audio_file), podcast_file);
+    safe_str(g_state.audio_title, sizeof(g_state.audio_title), podcast_title);
+    safe_str(g_state.audio_artist, sizeof(g_state.audio_artist), podcast_artist);
+    g_state.audio_scroll_started_ms = monotonic_millis();
+    /* Podcasts are background audio. Keep or restore the normal clock face. */
+    g_state.display_mode = 0;
+    g_state.display_dirty = 1;
+    pthread_mutex_unlock(&g_state.lock);
+
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, audio_thread_main, req) != 0) {
+        pthread_mutex_lock(&g_audio.lock);
+        g_audio.running = 0;
+        g_audio.stop_requested = 0;
+        g_audio.alarm_mode = 0;
+        g_audio.timed_out = 0;
+        g_audio.alarm_deadline_ms = 0;
+        g_audio.file[0] = '\0';
+        pthread_cond_broadcast(&g_audio.stopped);
+        pthread_mutex_unlock(&g_audio.lock);
+
+        pthread_mutex_lock(&g_state.lock);
+        g_state.audio_playing = 0;
+        g_state.audio_content_kind = AUDIO_CONTENT_NONE;
+        g_state.audio_file[0] = '\0';
+        clear_audio_metadata_locked();
+        g_state.display_dirty = 1;
+        pthread_mutex_unlock(&g_state.lock);
+        (void)podcast_history_forget(podcast_file);
+        free(req);
+        return -1;
+    }
+    pthread_detach(tid);
+    return 0;
+}
+
+static int audio_play_random_podcast(void) {
+    int enabled;
+    pthread_mutex_lock(&g_state.lock);
+    enabled = g_state.podcast_touch_enabled;
+    pthread_mutex_unlock(&g_state.lock);
+    if (!enabled) return -2;
+
+    char file[MUSIC_FILE_MAX];
+    if (choose_random_podcast_file(file, sizeof(file)) != 0) return -1;
+    return audio_play_podcast_file(file);
 }
 
 /*
@@ -4462,6 +4855,9 @@ static void *touch_thread_main(void *arg) {
     uint64_t now_ms = monotonic_millis();
     uint64_t raw_changed_ms = now_ms;
     uint64_t pressed_ms = stable ? now_ms : 0;
+    uint64_t podcast_tap_window_started_ms = 0;
+    uint64_t podcast_start_guard_until_ms = 0;
+    unsigned int podcast_tap_count = 0;
     touch_set_state(1, stable);
 
     while (g_running) {
@@ -4491,11 +4887,37 @@ static void *touch_thread_main(void *arg) {
                 } else if (diagnostic_opened_this_press || action_consumed) {
                     /* The diagnostic gesture has already consumed this press. */
                 } else if (held_ms >= TOUCH_LONG_PRESS_MS) {
+                    podcast_tap_count = 0;
+                    podcast_tap_window_started_ms = 0;
                     app_log("touch", "Long press requested random music");
                     audio_play_music_file("", 0, 0, 0);
                 } else if (audio_is_playing()) {
-                    app_log("touch", "Short press requested audio stop");
-                    audio_request_stop();
+                    podcast_tap_count = 0;
+                    podcast_tap_window_started_ms = 0;
+                    if (now_ms >= podcast_start_guard_until_ms) {
+                        app_log("touch", "Short press requested audio stop");
+                        audio_request_stop();
+                    }
+                } else {
+                    if (!podcast_tap_window_started_ms ||
+                        now_ms - podcast_tap_window_started_ms > PODCAST_TOUCH_WINDOW_MS) {
+                        podcast_tap_window_started_ms = now_ms;
+                        podcast_tap_count = 0;
+                    }
+                    podcast_tap_count++;
+                    if (podcast_tap_count >= PODCAST_TOUCH_TAPS) {
+                        int podcast_result = audio_play_random_podcast();
+                        if (podcast_result == 0) {
+                            podcast_start_guard_until_ms = now_ms + PODCAST_TOUCH_START_GUARD_MS;
+                            app_log("touch", "Ten taps requested a random podcast");
+                        } else if (podcast_result == -2) {
+                            app_log("touch", "Ten-tap podcast shortcut is disabled");
+                        } else {
+                            app_log("touch", "Ten-tap podcast shortcut found no playable podcast");
+                        }
+                        podcast_tap_count = 0;
+                        podcast_tap_window_started_ms = 0;
+                    }
                 }
                 pressed_ms = 0;
             }
@@ -4643,6 +5065,15 @@ static const char *display_mode_name(int mode) {
     }
 }
 
+static const char *audio_content_kind_name(int kind) {
+    switch (kind) {
+        case AUDIO_CONTENT_MUSIC: return "music";
+        case AUDIO_CONTENT_PODCAST: return "podcast";
+        case AUDIO_CONTENT_ALARM: return "alarm";
+        default: return "none";
+    }
+}
+
 static int ipc_send_response(int client, unsigned int status, unsigned int content_type,
                              const void *body, size_t body_len) {
     if (body_len > MP_IPC_MAX_PAYLOAD) return -1;
@@ -4681,6 +5112,7 @@ struct mp_status_snapshot {
     char datestr[96];
     long uptime_seconds;
     int audio_playing;
+    int audio_content_kind;
     int alarm_active;
     int alarm_volume_percent;
     int display_mode;
@@ -4688,6 +5120,8 @@ struct mp_status_snapshot {
     int oled_font;
     int oled_font_size;
     int global_volume;
+    int podcast_volume;
+    int podcast_touch_enabled;
     int bedtime_enabled;
     int bedtime_start_hour;
     int bedtime_start_min;
@@ -4731,6 +5165,7 @@ static void status_snapshot_capture(struct mp_status_snapshot *snapshot) {
 
     pthread_mutex_lock(&g_state.lock);
     snapshot->audio_playing = g_state.audio_playing;
+    snapshot->audio_content_kind = g_state.audio_content_kind;
     snapshot->alarm_active = g_state.alarm_active;
     snapshot->alarm_volume_percent = g_state.alarm_volume_percent;
     snapshot->display_mode = g_state.display_mode;
@@ -4738,6 +5173,8 @@ static void status_snapshot_capture(struct mp_status_snapshot *snapshot) {
     snapshot->oled_font = g_state.oled_font;
     snapshot->oled_font_size = g_state.oled_font_size;
     snapshot->global_volume = g_state.global_volume;
+    snapshot->podcast_volume = g_state.podcast_volume;
+    snapshot->podcast_touch_enabled = g_state.podcast_touch_enabled;
     snapshot->bedtime_enabled = g_state.bedtime_enabled;
     snapshot->bedtime_start_hour = g_state.bedtime_start_hour;
     snapshot->bedtime_start_min = g_state.bedtime_start_min;
@@ -4809,7 +5246,8 @@ static int ipc_status_serialize(int client, const struct mp_status_snapshot *sna
     mp_buffer_appendf(&body,
         "{\"time\":\"%s\",\"date\":\"%s\",\"clock_name\":\"%s\",\"app_version\":\"%s\","
         "\"uptime_seconds\":%ld,\"audio_file\":\"%s\",\"audio_title\":\"%s\",\"audio_artist\":\"%s\","
-        "\"global_volume\":%d,"
+        "\"audio_kind\":\"%s\",\"global_volume\":%d,"
+        "\"podcast_volume\":%d,\"podcast_touch_enabled\":%d,"
         "\"bedtime_enabled\":%d,"
         "\"bedtime_start_hour\":%d,\"bedtime_start_min\":%d,\"bedtime_end_hour\":%d,\"bedtime_end_min\":%d,"
         "\"bedtime_dim_percent\":%d,\"weather_warning_chime_enabled\":%d,\"weather_warning_chime_during_bedtime\":%d,"
@@ -4820,7 +5258,8 @@ static int ipc_status_serialize(int client, const struct mp_status_snapshot *sna
         "\"oled_font\":%d,\"oled_font_size\":%d,\"oled_font_file\":\"%s\",\"oled_font_name\":\"%s\","
         "\"inside_font_file\":\"%s\",\"weather\":{",
         e_time, e_date, e_clock_name, APP_VERSION, snapshot->uptime_seconds, e_audio_file,
-        e_audio_title, e_audio_artist, snapshot->global_volume,
+        e_audio_title, e_audio_artist, audio_content_kind_name(snapshot->audio_content_kind), snapshot->global_volume,
+        snapshot->podcast_volume, snapshot->podcast_touch_enabled,
         snapshot->bedtime_enabled,
         snapshot->bedtime_start_hour, snapshot->bedtime_start_min,
         snapshot->bedtime_end_hour, snapshot->bedtime_end_min,
@@ -4991,10 +5430,21 @@ static int ipc_display_action(int client, const struct mp_ipc_display_action *re
             pthread_mutex_lock(&g_state.lock);
             volume = g_state.global_volume;
             pthread_mutex_unlock(&g_state.lock);
-            audio_play_music_file(request->file, volume, volume, 0);
+            if (audio_play_music_file(request->file, volume, volume, 0) != 0)
+                return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"music could not be played\"}");
             app_log("action", "Play music requested: %s", request->file);
             break;
         }
+        case MP_IPC_ACTION_PLAY_PODCAST:
+            if (audio_play_podcast_file(request->file) != 0)
+                return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"podcast could not be played\"}");
+            app_log("action", "Play podcast requested: %s", request->file);
+            break;
+        case MP_IPC_ACTION_RESET_PODCAST_HISTORY:
+            if (podcast_history_reset() != 0)
+                return ipc_send_json(client, 500, "{\"ok\":false,\"error\":\"podcast history could not be reset\"}");
+            app_log("podcast", "Podcast play history reset through GUI");
+            break;
         default:
             return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"unknown display action\"}");
     }
@@ -5043,11 +5493,20 @@ static int ipc_config_audio(int client, const struct mp_ipc_audio_config *reques
         g_state.global_volume = volume;
         changed = 1;
     }
+    if (request->present_mask & MP_IPC_AUDIO_PODCAST_VOLUME) {
+        g_state.podcast_volume = clamp_int(request->podcast_volume, 0, 100);
+        changed = 1;
+    }
+    if (request->present_mask & MP_IPC_AUDIO_PODCAST_TOUCH_ENABLED) {
+        g_state.podcast_touch_enabled = request->podcast_touch_enabled ? 1 : 0;
+        changed = 1;
+    }
     pthread_mutex_unlock(&g_state.lock);
     if (!changed)
         return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"no audio settings supplied\"}");
     save_config();
     if (volume >= 0) app_log("music", "Saved global volume %d%%", volume);
+    app_log("podcast", "Saved podcast audio settings");
     return ipc_send_json(client, 200, "{\"ok\":true}");
 }
 
@@ -5354,8 +5813,10 @@ static int ipc_asset_event(int client, const struct mp_ipc_asset_event *event) {
             if (active_font_replaced) g_state.display_dirty = 1;
             pthread_mutex_unlock(&g_state.lock);
             if (active_font_replaced) font_cache_reset();
+        } else if (event->kind == MP_IPC_ASSET_PODCAST) {
+            (void)podcast_history_forget(event->file);
         } else if (event->kind != MP_IPC_ASSET_MUSIC) {
-            return ipc_send_json(client, 400, "{\\\"ok\\\":false,\\\"error\\\":\\\"invalid asset kind\\\"}");
+            return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"invalid asset kind\"}");
         }
         app_log("assets", "Uploaded %u asset(s), first %s", event->count, event->file);
     } else if (event->action == MP_IPC_ASSET_DELETED) {
@@ -5363,12 +5824,14 @@ static int ipc_asset_event(int client, const struct mp_ipc_asset_event *event) {
             int stop_audio = 0;
             int config_changed = 0;
             pthread_mutex_lock(&g_state.lock);
-            stop_audio = strcmp(g_state.audio_file, event->file) == 0;
+            stop_audio = g_state.audio_content_kind != AUDIO_CONTENT_PODCAST &&
+                         strcmp(g_state.audio_file, event->file) == 0;
             pthread_mutex_unlock(&g_state.lock);
             if (stop_audio) audio_stop();
             pthread_mutex_lock(&g_state.lock);
             if (stop_audio) {
                 g_state.audio_playing = 0;
+                g_state.audio_content_kind = AUDIO_CONTENT_NONE;
                 g_state.audio_file[0] = '\0';
             }
             for (int i = 0; i < MAX_ALARMS; i++) {
@@ -5380,6 +5843,22 @@ static int ipc_asset_event(int client, const struct mp_ipc_asset_event *event) {
             g_state.display_dirty = 1;
             pthread_mutex_unlock(&g_state.lock);
             if (config_changed) save_config();
+        } else if (event->kind == MP_IPC_ASSET_PODCAST) {
+            (void)podcast_history_forget(event->file);
+            int stop_audio = 0;
+            pthread_mutex_lock(&g_state.lock);
+            stop_audio = g_state.audio_content_kind == AUDIO_CONTENT_PODCAST &&
+                         strcmp(g_state.audio_file, event->file) == 0;
+            pthread_mutex_unlock(&g_state.lock);
+            if (stop_audio) audio_stop();
+            pthread_mutex_lock(&g_state.lock);
+            if (stop_audio) {
+                g_state.audio_playing = 0;
+                g_state.audio_content_kind = AUDIO_CONTENT_NONE;
+                g_state.audio_file[0] = '\0';
+            }
+            g_state.display_dirty = 1;
+            pthread_mutex_unlock(&g_state.lock);
         } else if (event->kind == MP_IPC_ASSET_FONT) {
             int clock_font_deleted = 0;
             pthread_mutex_lock(&g_state.lock);
@@ -5397,25 +5876,51 @@ static int ipc_asset_event(int client, const struct mp_ipc_asset_event *event) {
             font_cache_reset();
             save_config();
         } else {
-            return ipc_send_json(client, 400, "{\\\"ok\\\":false,\\\"error\\\":\\\"invalid asset kind\\\"}");
+            return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"invalid asset kind\"}");
         }
         app_log("assets", "Deleted asset %s", event->file);
     } else if (event->action == MP_IPC_ASSET_DELETED_ALL) {
-        if (event->kind != MP_IPC_ASSET_MUSIC)
-            return ipc_send_json(client, 400, "{\\\"ok\\\":false,\\\"error\\\":\\\"invalid asset kind\\\"}");
-        audio_stop();
-        pthread_mutex_lock(&g_state.lock);
-        g_state.audio_playing = 0;
-        g_state.audio_file[0] = '\0';
-        for (int i = 0; i < MAX_ALARMS; i++) g_state.alarms[i].music_file[0] = '\0';
-        g_state.display_dirty = 1;
-        pthread_mutex_unlock(&g_state.lock);
-        save_config();
-        app_log("assets", "Deleted all music assets (%u files)", event->count);
+        if (event->kind == MP_IPC_ASSET_MUSIC) {
+            int stop_audio = 0;
+            pthread_mutex_lock(&g_state.lock);
+            stop_audio = g_state.audio_content_kind == AUDIO_CONTENT_MUSIC ||
+                         g_state.audio_content_kind == AUDIO_CONTENT_ALARM;
+            pthread_mutex_unlock(&g_state.lock);
+            if (stop_audio) audio_stop();
+            pthread_mutex_lock(&g_state.lock);
+            if (stop_audio) {
+                g_state.audio_playing = 0;
+                g_state.audio_content_kind = AUDIO_CONTENT_NONE;
+                g_state.audio_file[0] = '\0';
+            }
+            for (int i = 0; i < MAX_ALARMS; i++) g_state.alarms[i].music_file[0] = '\0';
+            g_state.display_dirty = 1;
+            pthread_mutex_unlock(&g_state.lock);
+            save_config();
+            app_log("assets", "Deleted all music assets (%u files)", event->count);
+        } else if (event->kind == MP_IPC_ASSET_PODCAST) {
+            (void)podcast_history_reset();
+            int stop_audio = 0;
+            pthread_mutex_lock(&g_state.lock);
+            stop_audio = g_state.audio_content_kind == AUDIO_CONTENT_PODCAST;
+            pthread_mutex_unlock(&g_state.lock);
+            if (stop_audio) audio_stop();
+            pthread_mutex_lock(&g_state.lock);
+            if (stop_audio) {
+                g_state.audio_playing = 0;
+                g_state.audio_content_kind = AUDIO_CONTENT_NONE;
+                g_state.audio_file[0] = '\0';
+            }
+            g_state.display_dirty = 1;
+            pthread_mutex_unlock(&g_state.lock);
+            app_log("assets", "Deleted all podcast assets (%u files)", event->count);
+        } else {
+            return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"invalid asset kind\"}");
+        }
     } else {
-        return ipc_send_json(client, 400, "{\\\"ok\\\":false,\\\"error\\\":\\\"invalid asset event\\\"}");
+        return ipc_send_json(client, 400, "{\"ok\":false,\"error\":\"invalid asset event\"}");
     }
-    return ipc_send_json(client, 200, "{\\\"ok\\\":true}");
+    return ipc_send_json(client, 200, "{\"ok\":true}");
 }
 
 static int ipc_asset_state(int client) {
@@ -5423,9 +5928,13 @@ static int ipc_asset_state(int client) {
     memset(&state, 0, sizeof(state));
     pthread_mutex_lock(&g_state.lock);
     state.global_volume = g_state.global_volume;
+    state.podcast_volume = g_state.podcast_volume;
+    state.podcast_touch_enabled = g_state.podcast_touch_enabled;
     state.builtin_font = g_state.oled_font;
     state.font_size = g_state.oled_font_size;
-    mp_safe_str(state.current_music, sizeof(state.current_music), g_state.audio_file);
+    if (g_state.audio_content_kind == AUDIO_CONTENT_MUSIC ||
+        g_state.audio_content_kind == AUDIO_CONTENT_ALARM)
+        mp_safe_str(state.current_music, sizeof(state.current_music), g_state.audio_file);
     mp_safe_str(state.selected_font, sizeof(state.selected_font), g_state.oled_font_file);
     pthread_mutex_unlock(&g_state.lock);
     return ipc_send_response(client, 200, MP_IPC_CONTENT_BINARY, &state, sizeof(state));

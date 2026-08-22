@@ -57,14 +57,18 @@ export async function mount(ctx) {
         ctx.setText('#status-version', status.app_version);
         ctx.setText('#status-uptime', ctx.formatUptime(status.uptime_seconds));
         const localTrack = [status.audio_title, status.audio_artist].filter(Boolean).join(' - ') || status.audio_file;
-        const track = localTrack;
+        const track = status.audio_kind === 'podcast'
+            ? (status.audio_title || status.audio_file || 'podcast')
+            : localTrack;
         const audioPlaying = Boolean(status.audio_playing);
         ctx.setText('#status-audio', status.alarm_active
             ? `Alarm playing at ${status.alarm_volume_percent || 0}%`
-            : (audioPlaying ? `Playing ${track || 'music'}` : 'Audio stopped'));
+            : (audioPlaying ? `${status.audio_kind === 'podcast' ? 'Podcast:' : 'Playing'} ${track || 'music'}` : 'Audio stopped'));
         ctx.setText('#status-volume', status.alarm_active
             ? `Alarm ${status.alarm_volume_percent || 0}%`
-            : `${status.global_volume || 0}%`);
+            : (status.audio_kind === 'podcast'
+                ? `Podcast ${status.podcast_volume || 0}%`
+                : `${status.global_volume || 0}%`));
         ctx.setText('#status-display', status.display_mode);
         ctx.setText('#status-oled-color', `${String(status.oled_color || 'green').replace(/^./, value => value.toUpperCase())} panel`);
         ctx.setText('#status-touch', status.touch_ok
@@ -79,7 +83,7 @@ export async function mount(ctx) {
         ctx.setText('#summary-clock', status.oled_ok ? `Working · ${status.time || ''}` : 'Screen unavailable');
         ctx.setText('#summary-sound', status.alarm_active
             ? `Alarm playing · ${status.alarm_volume_percent || 0}%`
-            : (audioPlaying ? `Playing ${track || 'music'}` : 'Stopped'));
+            : (audioPlaying ? (status.audio_kind === 'podcast' ? `Podcast · ${track || 'Untitled'}` : `Playing ${track || 'music'}`) : 'Stopped'));
         ctx.setText('#summary-next-alarm', status.next_alarm_text || 'None scheduled');
         ctx.setText('#summary-bedtime', status.bedtime_enabled
             ? `${ctx.timeValue(status.bedtime_start_hour, status.bedtime_start_min)} to ${ctx.timeValue(status.bedtime_end_hour, status.bedtime_end_min)}`

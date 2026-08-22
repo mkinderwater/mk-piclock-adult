@@ -471,15 +471,23 @@ int mp_asset_delete_file(const char *dir, const char *file) {
 }
 
 
-int mp_asset_delete_music(void) {
-    DIR *d = opendir(MP_MUSIC_DIR);
+static int delete_mp3_directory(const char *dir) {
+    DIR *d = opendir(dir);
     if (!d) return 0;
     int count = 0;
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
         if (!mp_asset_safe_filename(de->d_name) || !mp_asset_has_mp3_ext(de->d_name)) continue;
-        if (mp_asset_delete_file(MP_MUSIC_DIR, de->d_name) == 0) count++;
+        if (mp_asset_delete_file(dir, de->d_name) == 0) count++;
     }
     closedir(d);
     return count;
+}
+
+int mp_asset_delete_music(void) {
+    return delete_mp3_directory(MP_MUSIC_DIR);
+}
+
+int mp_asset_delete_podcasts(void) {
+    return delete_mp3_directory(MP_PODCAST_DIR);
 }

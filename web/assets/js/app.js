@@ -15,6 +15,7 @@ const modules = Object.freeze([
     {id: 'dashboard', name: 'Home', group: 'Everyday', default: true, icon: 'home'},
     {id: 'alarms', name: 'Alarms', group: 'Everyday', icon: 'bell'},
     {id: 'music', name: 'Music', group: 'Everyday', icon: 'music'},
+    {id: 'podcasts', name: 'Podcasts', group: 'Everyday', icon: 'podcast'},
     {id: 'weather', name: 'Weather', group: 'Settings', icon: 'cloud'},
     {id: 'display', name: 'Display', group: 'Settings', icon: 'display'},
     {id: 'system', name: 'System', group: 'Settings', icon: 'settings'},
@@ -27,8 +28,8 @@ let authPromise = null;
 let authResolve = null;
 let noticeTimer = null;
 const statusListeners = new Set();
-const GUI_VERSION = 'mk-clock-adult-2.3.50-preview42-bpi-m2-zero-r1';
-const REQUIRED_API_VERSION = '1.59';
+const GUI_VERSION = 'mk-clock-adult-2.3.54-preview59-bpi-m2-zero-r1';
+const REQUIRED_API_VERSION = '1.62';
 const oledPreviewIntensity = Array.from({length: 16}, (_, level) =>
     level === 0 ? 0 : Math.pow(level / 15, 0.48));
 const oledPreviewColours = Object.freeze({
@@ -245,7 +246,8 @@ function clock(action, params = {}, button = null, feedback = {}) {
         clock: {busyText: 'Restoring clock...', done: 'Clock display restored'},
         clear: {busyText: 'Clearing screen...', done: 'Screen cleared'},
         stop: {busyText: 'Stopping audio...', done: 'Audio stopped'},
-        'play-music': {busyText: 'Starting music...', done: 'Music playback started'}
+        'play-music': {busyText: 'Starting music...', done: 'Music playback started'},
+        'play-podcast': {busyText: 'Starting podcast...', done: 'Podcast playback started'}
     };
     const defaults = messages[action] || {busyText: 'Sending clock command...', done: 'Clock command completed'};
     const body = new URLSearchParams({do: action, format: 'json', ...params});

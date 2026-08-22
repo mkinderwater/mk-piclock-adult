@@ -6,7 +6,7 @@
 /* Private same-host protocol. Integer fields use native byte order because both
  * endpoints run on the same Linux device and are built from this header. */
 #define MP_IPC_MAGIC 0x4D4B5043u /* MKPC */
-#define MP_IPC_VERSION 33u
+#define MP_IPC_VERSION 35u
 #define MP_IPC_MAX_PAYLOAD (128u * 1024u)
 
 struct mp_ipc_request_header {
@@ -58,14 +58,17 @@ enum mp_ipc_display_action_code {
     MP_IPC_ACTION_CLOCK = 1,
     MP_IPC_ACTION_CLEAR = 2,
     MP_IPC_ACTION_STOP_AUDIO = 3,
-    MP_IPC_ACTION_PLAY_MUSIC = 4
+    MP_IPC_ACTION_PLAY_MUSIC = 4,
+    MP_IPC_ACTION_PLAY_PODCAST = 5,
+    MP_IPC_ACTION_RESET_PODCAST_HISTORY = 6
 };
 
 
 
 enum mp_ipc_asset_kind {
     MP_IPC_ASSET_MUSIC = 1,
-    MP_IPC_ASSET_FONT = 2
+    MP_IPC_ASSET_FONT = 2,
+    MP_IPC_ASSET_PODCAST = 3
 };
 
 enum mp_ipc_asset_action {
@@ -102,13 +105,16 @@ struct mp_ipc_alarm_config {
 };
 
 enum mp_ipc_audio_field {
-    MP_IPC_AUDIO_GLOBAL_VOLUME = 1u << 0
+    MP_IPC_AUDIO_GLOBAL_VOLUME = 1u << 0,
+    MP_IPC_AUDIO_PODCAST_VOLUME = 1u << 1,
+    MP_IPC_AUDIO_PODCAST_TOUCH_ENABLED = 1u << 2
 };
 
 struct mp_ipc_audio_config {
     uint8_t present_mask;
     uint8_t global_volume;
-    uint8_t reserved[2];
+    uint8_t podcast_volume;
+    uint8_t podcast_touch_enabled;
 };
 
 struct mp_ipc_personalization_config {
@@ -241,6 +247,8 @@ struct mp_ipc_asset_event {
 
 struct mp_ipc_asset_state {
     int32_t global_volume;
+    int32_t podcast_volume;
+    int32_t podcast_touch_enabled;
     int32_t builtin_font;
     int32_t font_size;
     char current_music[256];

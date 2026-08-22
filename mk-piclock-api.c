@@ -49,6 +49,7 @@
 #include "ipc_protocol.h"
 #include "io_helpers.h"
 #include "music_jobs.h"
+#include "podcast_import.h"
 #include "util.h"
 
 
@@ -56,7 +57,7 @@
 #include "weather_frames.h"
 #include "weather_version.h"
 #define API_NAME "mk-clock-adult-api"
-#define API_VERSION "1.59"
+#define API_VERSION "1.62"
 #define PRODUCT_VERSION MP_PRODUCT_VERSION
 #define BUILD_TIMESTAMP __DATE__ " " __TIME__
 #define DEFAULT_PUBLIC_BIND "0.0.0.0"
@@ -70,12 +71,14 @@
 #define SYSTEM_REQUEST_TEMP "/run/mk-piclock/.system-request.tmp"
 #define NTP_OVERRIDE_FILE "/etc/systemd/timesyncd.conf.d/50-mk-clock-adult.conf"
 #define AUTH_COOKIE_NAME "mkpiclock_auth"
-#define MAX_REQUEST_BODY (128U * 1024U * 1024U)
+#define MAX_REQUEST_BODY (512U * 1024U * 1024U)
 #define MAX_STATIC_FILE (64U * 1024U * 1024U)
 #define MAX_API_JSON_RESPONSE (1024U * 1024U)
 #define ALLOWED_ORIGIN_MAX 256
 #define DISK_RESERVE_BYTES (64ULL * 1024ULL * 1024ULL)
 #define DEFAULT_MUSIC_QUOTA_BYTES (1024ULL * 1024ULL * 1024ULL)
+#define PODCAST_HISTORY_FILE "/opt/mk-piclock/config/podcast-history.txt"
+#define DEFAULT_PODCAST_QUOTA_BYTES (2ULL * 1024ULL * 1024ULL * 1024ULL)
 #define SOCKET_TIMEOUT_SEC 15
 #define HTTP_CONNECTION_TIMEOUT_SEC 40
 #define MHD_THREAD_POOL_SIZE 2
@@ -93,6 +96,7 @@ static int g_music_upload_in_progress = 0;
 static char g_allowed_origin[ALLOWED_ORIGIN_MAX];
 static uid_t g_expected_core_uid = (uid_t)-1;
 static uint64_t g_music_quota_bytes = DEFAULT_MUSIC_QUOTA_BYTES;
+static uint64_t g_podcast_quota_bytes = DEFAULT_PODCAST_QUOTA_BYTES;
 static uint64_t g_disk_reserve_bytes = DISK_RESERVE_BYTES;
 
 
@@ -113,13 +117,19 @@ enum route_id {
     ROUTE_BACKUP_RESTORE,
     ROUTE_FONTS_LIST,
     ROUTE_MUSIC_LIST,
+    ROUTE_PODCAST_LIST,
+    ROUTE_PODCAST_SUMMARY,
+    ROUTE_PODCAST_IMPORT,
     ROUTE_MUSIC_JOBS,
     ROUTE_CLEAR_MUSIC_QUEUE,
     ROUTE_FONT_FILE,
     ROUTE_UPLOAD_MUSIC,
+    ROUTE_UPLOAD_PODCAST,
     ROUTE_UPLOAD_FONT,
     ROUTE_DELETE_MUSIC,
     ROUTE_DELETE_ALL_MUSIC,
+    ROUTE_DELETE_PODCAST,
+    ROUTE_DELETE_ALL_PODCASTS,
     ROUTE_DELETE_FONT,
     ROUTE_DISPLAY_ACTION,
     ROUTE_DISPLAY_PREVIEW,
@@ -161,13 +171,19 @@ static const struct api_route g_routes[] = {
     {"POST", "/api/v1/backup/restore",                  ROUTE_BACKUP_RESTORE},
     {"GET",  "/api/v1/assets/fonts",                    ROUTE_FONTS_LIST},
     {"GET",  "/api/v1/assets/music",                    ROUTE_MUSIC_LIST},
+    {"GET",  "/api/v1/assets/podcasts",                 ROUTE_PODCAST_LIST},
+    {"GET",  "/api/v1/assets/podcasts/summary",         ROUTE_PODCAST_SUMMARY},
+    {"GET",  "/api/v1/assets/podcasts/import",          ROUTE_PODCAST_IMPORT},
     {"GET",  "/api/v1/assets/music/jobs",               ROUTE_MUSIC_JOBS},
     {"POST", "/api/v1/assets/music/jobs/clear",         ROUTE_CLEAR_MUSIC_QUEUE},
     {"GET",  "/api/v1/assets/fonts/file",               ROUTE_FONT_FILE},
     {"POST", "/api/v1/assets/music/upload",             ROUTE_UPLOAD_MUSIC},
+    {"POST", "/api/v1/assets/podcasts/upload",          ROUTE_UPLOAD_PODCAST},
     {"POST", "/api/v1/assets/fonts/upload",             ROUTE_UPLOAD_FONT},
     {"POST", "/api/v1/assets/music/delete",            ROUTE_DELETE_MUSIC},
     {"POST", "/api/v1/assets/music/delete-all",        ROUTE_DELETE_ALL_MUSIC},
+    {"POST", "/api/v1/assets/podcasts/delete",         ROUTE_DELETE_PODCAST},
+    {"POST", "/api/v1/assets/podcasts/delete-all",     ROUTE_DELETE_ALL_PODCASTS},
     {"POST", "/api/v1/assets/fonts/delete",            ROUTE_DELETE_FONT},
     {"POST", "/api/v1/display/action",                  ROUTE_DISPLAY_ACTION},
     {"GET",  "/api/v1/display/preview",                 ROUTE_DISPLAY_PREVIEW},
@@ -461,6 +477,7 @@ static void collect_network_diagnostics(struct network_diagnostics *info) {
 
 
 #define DIAG_MUSIC_DIR "/opt/mk-piclock/assets/music"
+#define DIAG_PODCAST_DIR "/opt/mk-piclock/assets/podcasts"
 #define DIAG_FONT_DIR "/opt/mk-piclock/assets/fonts"
 #define DIAG_CONFIG_DIR "/opt/mk-piclock/config"
 
@@ -471,6 +488,7 @@ struct adult_diagnostic_info {
     uint64_t storage_used_bytes;
     uint64_t storage_total_bytes;
     uint64_t music_bytes, music_files;
+    uint64_t podcast_bytes, podcast_files;
     uint64_t fonts_bytes, fonts_files;
     uint64_t config_bytes, config_files;
     int api_healthy;
@@ -952,6 +970,7 @@ static void collect_adult_diagnostics(struct adult_diagnostic_info *info) {
         info->storage_total_bytes = total * block;
     }
     diag_directory_usage(DIAG_MUSIC_DIR, &info->music_bytes, &info->music_files);
+    diag_directory_usage(DIAG_PODCAST_DIR, &info->podcast_bytes, &info->podcast_files);
     diag_directory_usage(DIAG_FONT_DIR, &info->fonts_bytes, &info->fonts_files);
     diag_directory_usage(DIAG_CONFIG_DIR, &info->config_bytes, &info->config_files);
     diag_read_platform(info);
@@ -976,6 +995,8 @@ static size_t route_upload_limit(const struct api_route *route) {
     switch (route->id) {
         case ROUTE_UPLOAD_MUSIC:
             return MP_MUSIC_UPLOAD_MAX_BYTES;
+        case ROUTE_UPLOAD_PODCAST:
+            return MP_PODCAST_UPLOAD_MAX_BYTES;
         case ROUTE_UPLOAD_FONT:
             return MP_FONT_UPLOAD_MAX_BYTES;
         case ROUTE_BACKUP_RESTORE:
@@ -1470,6 +1491,11 @@ static int notify_asset(uint8_t kind, uint8_t action, uint32_t count, const char
 static int notify_processed_music(const char *file, void *userdata) {
     (void)userdata;
     return notify_asset(MP_IPC_ASSET_MUSIC, MP_IPC_ASSET_UPLOADED, 1, file);
+}
+
+static int notify_processed_podcast(const char *file, void *userdata) {
+    (void)userdata;
+    return notify_asset(MP_IPC_ASSET_PODCAST, MP_IPC_ASSET_UPLOADED, 1, file);
 }
 
 static pthread_mutex_t g_maintenance_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -2092,7 +2118,7 @@ static enum MHD_Result restore_backup_locked(struct MHD_Connection *connection,
     free(rollback_config);
     remove_tree(rollback_root);
     char response[192];
-    snprintf(response, sizeof(response), "{\"ok\":true,\"restored_files\":%d,\"music_preserved\":true}", extracted);
+    snprintf(response, sizeof(response), "{\"ok\":true,\"restored_files\":%d,\"music_preserved\":true,\"podcasts_preserved\":true}", extracted);
     return queue_json(connection, 200, response);
 }
 
@@ -2819,6 +2845,152 @@ static enum MHD_Result serve_music_list(struct MHD_Connection *connection) {
     return queue_json_builder(connection, 200, &body);
 }
 
+static int podcast_history_load_api(char played[][MP_ASSET_NAME_MAX], int max_played) {
+    if (!played || max_played <= 0) return 0;
+    FILE *f = fopen(PODCAST_HISTORY_FILE, "r");
+    if (!f) return 0;
+    int count = 0;
+    char line[MP_ASSET_NAME_MAX + 8];
+    while (count < max_played && fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!mp_asset_safe_filename(line) || !mp_asset_has_mp3_ext(line)) continue;
+        mp_safe_str(played[count++], MP_ASSET_NAME_MAX, line);
+    }
+    fclose(f);
+    return count;
+}
+
+static int podcast_history_contains_api(const char *file,
+                                        char played[][MP_ASSET_NAME_MAX], int played_count) {
+    for (int i = 0; i < played_count; i++) {
+        if (strcmp(file, played[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+static enum MHD_Result serve_podcast_summary(struct MHD_Connection *connection) {
+    char files[MP_ASSET_LIST_MAX][MP_ASSET_NAME_MAX];
+    int count = mp_asset_scan(MP_PODCAST_DIR, MP_ASSET_SCAN_MUSIC_MP3, files, MP_ASSET_LIST_MAX);
+    if (count < 0)
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"podcast library scan failed\"}");
+    char played[MP_ASSET_LIST_MAX][MP_ASSET_NAME_MAX];
+    int history_count = podcast_history_load_api(played, MP_ASSET_LIST_MAX);
+    int played_count = 0;
+    for (int i = 0; i < count; i++)
+        if (podcast_history_contains_api(files[i], played, history_count)) played_count++;
+    char json[256];
+    snprintf(json, sizeof(json),
+             "{\"ok\":true,\"total\":%d,\"played_count\":%d,\"unplayed_count\":%d,\"history_exhausted\":%s}",
+             count, played_count, count - played_count,
+             (count > 0 && played_count >= count) ? "true" : "false");
+    return queue_json(connection, 200, json);
+}
+
+static enum MHD_Result serve_podcast_list(struct MHD_Connection *connection) {
+    struct mp_ipc_asset_state state;
+    if (get_asset_state(&state) != 0)
+        return queue_json(connection, 503, "{\"ok\":false,\"error\":\"clock core unavailable\"}");
+    char files[MP_ASSET_LIST_MAX][MP_ASSET_NAME_MAX];
+    int count = mp_asset_scan(MP_PODCAST_DIR, MP_ASSET_SCAN_MUSIC_MP3, files, MP_ASSET_LIST_MAX);
+    char played[MP_ASSET_LIST_MAX][MP_ASSET_NAME_MAX];
+    int history_count = podcast_history_load_api(played, MP_ASSET_LIST_MAX);
+    int played_count = 0;
+    for (int i = 0; i < count; i++)
+        if (podcast_history_contains_api(files[i], played, history_count)) played_count++;
+    struct mp_buffer body;
+    if (mp_buffer_init(&body, 4096, MAX_API_JSON_RESPONSE) != 0)
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"allocation failed\"}");
+    mp_buffer_appendf(&body, "{\"podcast_volume\":%d,\"podcast_touch_enabled\":%d,"
+                      "\"played_count\":%d,\"unplayed_count\":%d,\"history_exhausted\":%s,\"tracks\":[",
+                      state.podcast_volume, state.podcast_touch_enabled,
+                      played_count, count - played_count,
+                      (count > 0 && played_count >= count) ? "true" : "false");
+    for (int i = 0; i < count && !body.failed; i++) {
+        char path[768];
+        int path_len = snprintf(path, sizeof(path), "%s/%.*s", MP_PODCAST_DIR,
+                                MP_ASSET_NAME_MAX - 1, files[i]);
+        struct mp_id3_metadata metadata;
+        memset(&metadata, 0, sizeof(metadata));
+        int tagged = path_len >= 0 && (size_t)path_len < sizeof(path) &&
+                     mp_read_id3_metadata(path, &metadata) == 0;
+        struct mp_audio_info audio_info;
+        memset(&audio_info, 0, sizeof(audio_info));
+        if (path_len >= 0 && (size_t)path_len < sizeof(path))
+            (void)mp_asset_read_mp3_info(path, &audio_info);
+        if (!metadata.title[0]) mp_title_from_filename(files[i], metadata.title, sizeof(metadata.title));
+        char display[MP_ID3_TEXT_MAX * 2 + 4];
+        if (metadata.artist[0])
+            snprintf(display, sizeof(display), "%s - %s", metadata.title, metadata.artist);
+        else
+            mp_safe_str(display, sizeof(display), metadata.title);
+
+        mp_buffer_appendf(&body, "%s{\"file\":\"", i ? "," : "");
+        mp_buffer_append_json_string(&body, files[i]);
+        mp_buffer_appendf(&body, "\",\"played\":%s,\"title\":\"",
+                          podcast_history_contains_api(files[i], played, history_count) ? "true" : "false");
+        mp_buffer_append_json_string(&body, metadata.title);
+        mp_buffer_append(&body, "\",\"artist\":\"");
+        mp_buffer_append_json_string(&body, metadata.artist);
+        mp_buffer_append(&body, "\",\"album\":\"");
+        mp_buffer_append_json_string(&body, metadata.album);
+        mp_buffer_append(&body, "\",\"year\":\"");
+        mp_buffer_append_json_string(&body, metadata.year);
+        mp_buffer_append(&body, "\",\"track\":\"");
+        mp_buffer_append_json_string(&body, metadata.track);
+        mp_buffer_append(&body, "\",\"genre\":\"");
+        mp_buffer_append_json_string(&body, metadata.genre);
+        mp_buffer_append(&body, "\",\"display\":\"");
+        mp_buffer_append_json_string(&body, display);
+        mp_buffer_appendf(&body,
+            "\",\"id3\":%d,\"duration_seconds\":%.3f,\"duration_estimated\":%d,"
+            "\"bitrate_kbps\":%d,\"bitrate_mode\":\"%s\",\"sample_rate_hz\":%ld,"
+            "\"channels\":%d,\"mpeg_layer\":%d,\"file_size_bytes\":%llu}",
+            tagged ? 1 : 0, audio_info.duration_seconds, audio_info.duration_estimated,
+            audio_info.bitrate_kbps, audio_info.vbr_mode == 1 ? "VBR" : audio_info.vbr_mode == 2 ? "ABR" : "CBR",
+            audio_info.sample_rate_hz, audio_info.channels, audio_info.layer,
+            (unsigned long long)audio_info.file_size_bytes);
+    }
+    mp_buffer_append(&body, "]}");
+    return queue_json_builder(connection, 200, &body);
+}
+
+static enum MHD_Result serve_podcast_import(struct MHD_Connection *connection) {
+    const char *scan = query_value(connection, "scan");
+    const char *start = query_value(connection, "start");
+    if (scan && strcmp(scan, "1") == 0 && mp_podcast_import_scan() < 0)
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"podcast upload scan unavailable\"}");
+    if (start && strcmp(start, "1") == 0 && mp_podcast_import_trigger() < 0)
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"podcast importer unavailable\"}");
+    struct mp_podcast_import_snapshot status;
+    memset(&status, 0, sizeof(status));
+    mp_podcast_import_snapshot(&status);
+    struct mp_buffer body;
+    if (mp_buffer_init(&body, 512, MAX_API_JSON_RESPONSE) != 0)
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"allocation failed\"}");
+    mp_buffer_appendf(&body, "{\"ok\":true,\"active\":%s,\"waiting\":%u,\"processed\":%u,\"failed\":%u,\"total\":%u,\"progress\":%u,\"upload_dir\":\"",
+                      status.active ? "true" : "false", status.waiting, status.processed, status.failed,
+                      status.total, status.current_progress);
+    mp_buffer_append_json_string(&body, MP_PODCAST_UPLOAD_DIR);
+    mp_buffer_append(&body, "\",\"current_file\":\"");
+    mp_buffer_append_json_string(&body, status.current_file);
+    mp_buffer_append(&body, "\",\"last_error\":\"");
+    mp_buffer_append_json_string(&body, status.last_error);
+    mp_buffer_append(&body, "\",\"failures\":[");
+    int failure_count = mp_podcast_import_failure_count();
+    for (int i = 0; i < failure_count && !body.failed; i++) {
+        struct mp_podcast_import_failure failure;
+        memset(&failure, 0, sizeof(failure));
+        if (mp_podcast_import_failure_get((unsigned int)i, &failure) != 0) continue;
+        mp_buffer_appendf(&body, "%s{\"file\":\"", i ? "," : "");
+        mp_buffer_append_json_string(&body, failure.file);
+        mp_buffer_append(&body, "\",\"error\":\"");
+        mp_buffer_append_json_string(&body, failure.error);
+        mp_buffer_append(&body, "\"}");
+    }
+    mp_buffer_append(&body, "]}");
+    return queue_json_builder(connection, 200, &body);
+}
+
 static enum MHD_Result serve_music_jobs(struct MHD_Connection *connection) {
     struct mp_music_job_snapshot jobs[MP_MUSIC_JOB_MAX];
     int count = mp_music_jobs_snapshot(jobs, MP_MUSIC_JOB_MAX);
@@ -2973,6 +3145,72 @@ static enum MHD_Result upload_music(struct MHD_Connection *connection, struct re
     return queue_json_builder(connection, 202, &body);
 }
 
+static enum MHD_Result upload_podcasts(struct MHD_Connection *connection,
+                                       struct request_context *context) {
+    if (mp_asset_ensure_dir(MP_PODCAST_UPLOAD_DIR) != 0)
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"podcast directory unavailable\"}");
+    if (mp_music_jobs_active() > 0)
+        return queue_json(connection, 409,
+                          "{\"ok\":false,\"error\":\"wait for music processing to finish before uploading podcasts\"}");
+    if (context->upload_count == 0 || context->upload_count > MP_PODCAST_UPLOAD_MAX)
+        return queue_json(connection, 400,
+                          "{\"ok\":false,\"error\":\"upload between 1 and 14 podcast MP3 files at a time\"}");
+
+    char names[MP_PODCAST_UPLOAD_MAX][MP_ASSET_NAME_MAX];
+    uint64_t incoming_bytes = 0;
+    uint64_t replaced_bytes = 0;
+    memset(names, 0, sizeof(names));
+
+    for (size_t i = 0; i < context->upload_count; i++) {
+        struct upload_file *upload = &context->uploads[i];
+        mp_asset_sanitize_filename(upload->filename, names[i], sizeof(names[i]), "podcast.mp3");
+        if (!mp_asset_safe_filename(names[i]) || !mp_asset_has_mp3_ext(names[i]) ||
+            upload->size == 0 || upload->size > MP_PODCAST_UPLOAD_MAX_BYTES ||
+            mp_asset_validate_mp3(upload->temp_path) != 0)
+            return queue_json(connection, 400,
+                              "{\"ok\":false,\"error\":\"every selected podcast must be a readable MP3\"}");
+        for (size_t prior = 0; prior < i; prior++) {
+            if (strcmp(names[prior], names[i]) == 0)
+                return queue_json(connection, 400,
+                                  "{\"ok\":false,\"error\":\"selected podcasts must have unique filenames\"}");
+        }
+        if (UINT64_MAX - incoming_bytes < (uint64_t)upload->size)
+            return queue_json(connection, 400, "{\"ok\":false,\"error\":\"upload size overflow\"}");
+        incoming_bytes += (uint64_t)upload->size;
+
+        char target[768];
+        int n = snprintf(target, sizeof(target), "%s/%s", MP_PODCAST_DIR, names[i]);
+        if (n > 0 && (size_t)n < sizeof(target)) {
+            struct stat st;
+            if (stat(target, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0)
+                replaced_bytes += (uint64_t)st.st_size;
+        }
+    }
+
+    uint64_t existing_bytes = mp_asset_directory_bytes(MP_PODCAST_DIR, MP_ASSET_SCAN_MUSIC_MP3);
+    if (replaced_bytes > existing_bytes) replaced_bytes = existing_bytes;
+    uint64_t retained_bytes = existing_bytes - replaced_bytes;
+    if (incoming_bytes > g_podcast_quota_bytes ||
+        retained_bytes > g_podcast_quota_bytes - incoming_bytes)
+        return queue_json(connection, 507, "{\"ok\":false,\"error\":\"podcast library quota exceeded\"}");
+    if (!mp_asset_has_free_space(MP_PODCAST_UPLOAD_DIR, incoming_bytes, g_disk_reserve_bytes))
+        return queue_json(connection, 507, "{\"ok\":false,\"error\":\"insufficient storage\"}");
+
+    for (size_t i = 0; i < context->upload_count; i++) {
+        char target[768];
+        int n = snprintf(target, sizeof(target), "%s/%s", MP_PODCAST_UPLOAD_DIR, names[i]);
+        if (n <= 0 || (size_t)n >= sizeof(target) ||
+            mp_asset_move_file(context->uploads[i].temp_path, target) != 0)
+            return queue_json(connection, 500,
+                              "{\"ok\":false,\"error\":\"one or more podcasts could not be saved\"}");
+        context->uploads[i].temp_path[0] = '\0';
+    }
+
+    char json[160];
+    snprintf(json, sizeof(json), "{\"ok\":true,\"uploaded\":%zu}", context->upload_count);
+    return queue_json(connection, 200, json);
+}
+
 static enum MHD_Result upload_font(struct MHD_Connection *connection, struct request_context *context) {
     if (mp_asset_ensure_dir(MP_FONT_DIR) != 0)
         return queue_json(connection, 500, "{\"ok\":false,\"error\":\"font directory unavailable\"}");
@@ -3021,6 +3259,30 @@ static enum MHD_Result delete_all_music(struct MHD_Connection *connection) {
         return queue_json(connection, 503, "{\"ok\":false,\"deleted\":true,\"error\":\"clock core unavailable\"}");
     char json[128];
     snprintf(json, sizeof(json), "{\"ok\":true,\"deleted_music\":%d}", deleted);
+    return queue_json(connection, 200, json);
+}
+
+static enum MHD_Result delete_podcast(struct MHD_Connection *connection,
+                                      const struct request_context *context) {
+    const char *file = form_value(context, "file");
+    if (!mp_asset_safe_filename(file) || !mp_asset_has_mp3_ext(file))
+        return queue_json(connection, 400, "{\"ok\":false,\"error\":\"invalid podcast filename\"}");
+    if (mp_asset_delete_file(MP_PODCAST_DIR, file) != 0)
+        return queue_json(connection, 500, "{\"ok\":false,\"error\":\"podcast could not be deleted\"}");
+    if (notify_asset(MP_IPC_ASSET_PODCAST, MP_IPC_ASSET_DELETED, 1, file) != 0)
+        return queue_json(connection, 503,
+                          "{\"ok\":false,\"deleted\":true,\"error\":\"podcast deleted but clock core unavailable\"}");
+    return queue_json(connection, 200, "{\"ok\":true,\"deleted\":true}");
+}
+
+static enum MHD_Result delete_all_podcasts(struct MHD_Connection *connection) {
+    int deleted = mp_asset_delete_podcasts();
+    if (notify_asset(MP_IPC_ASSET_PODCAST, MP_IPC_ASSET_DELETED_ALL,
+                     (uint32_t)deleted, NULL) != 0)
+        return queue_json(connection, 503,
+                          "{\"ok\":false,\"deleted\":true,\"error\":\"clock core unavailable\"}");
+    char json[128];
+    snprintf(json, sizeof(json), "{\"ok\":true,\"deleted_podcasts\":%d}", deleted);
     return queue_json(connection, 200, json);
 }
 
@@ -3289,7 +3551,8 @@ static enum MHD_Result serve_network_diagnostics(struct MHD_Connection *connecti
         ",\"wifi_signal_percent\":%d,\"wifi_signal_dbm\":%d,\"wifi_signal_available\":%s"
         ",\"ntp_synchronized\":%s,\"system_time_valid\":%s,\"cpu_temperature_c\":%.1f"
         ",\"storage_free_bytes\":%llu,\"storage_used_bytes\":%llu,\"storage_total_bytes\":%llu"
-        ",\"music_bytes\":%llu,\"music_files\":%llu,\"fonts_bytes\":%llu,\"fonts_files\":%llu"
+        ",\"music_bytes\":%llu,\"music_files\":%llu,\"podcast_bytes\":%llu,\"podcast_files\":%llu"
+        ",\"fonts_bytes\":%llu,\"fonts_files\":%llu"
         ",\"config_bytes\":%llu,\"config_files\":%llu"
         ",\"api_healthy\":%s,\"core_healthy\":%s,\"oled_ok\":%s,\"touch_ok\":%s"
         ",\"last_successful_alarm\":%lld,\"uptime_seconds\":%llu",
@@ -3299,6 +3562,7 @@ static enum MHD_Result serve_network_diagnostics(struct MHD_Connection *connecti
         info.cpu_temperature_c, (unsigned long long)info.storage_free_bytes,
         (unsigned long long)info.storage_used_bytes, (unsigned long long)info.storage_total_bytes,
         (unsigned long long)info.music_bytes, (unsigned long long)info.music_files,
+        (unsigned long long)info.podcast_bytes, (unsigned long long)info.podcast_files,
         (unsigned long long)info.fonts_bytes, (unsigned long long)info.fonts_files,
         (unsigned long long)info.config_bytes, (unsigned long long)info.config_files,
         info.api_healthy ? "true" : "false", info.core_healthy ? "true" : "false",
@@ -3387,7 +3651,7 @@ static enum MHD_Result serve_diagnostic_report(struct MHD_Connection *connection
         "Device identity\nInventory ID: %s\nBoard serial: %s\nBoard revision: %s\nOS machine ID: %s\nCPU signature: %s\n\n"
         "Network and time\nHostname: %s\nInterface: %s\nIP address: %s\nSSID: %s\nWi-Fi signal: %s\nNTP synchronized: %s\nSystem time valid: %s\n\n"
         "Storage\nSystem drive: %s\nRoot partition: %s\nRoot filesystem: %s\nRoot state: %s\nUsed: %llu bytes\nAvailable: %llu bytes\nTotal: %llu bytes\n"
-        "Music: %llu bytes in %llu files\nFonts: %llu bytes in %llu files\nConfiguration: %llu bytes in %llu files\n"
+        "Music: %llu bytes in %llu files\nPodcasts: %llu bytes in %llu files\nFonts: %llu bytes in %llu files\nConfiguration: %llu bytes in %llu files\n"
         "Boot partition: %s\nBoot filesystem: %s\nBoot mount point: %s\n\n"
         "SD card\nPresent: %s\nDevice: %s\nType: %s\nProduct: %s\nManufacturer ID: %s\nOEM ID: %s\nSerial: %s\nManufactured: %s\nCapacity: %llu bytes\nCID: %s\n\n"
         "Health\nCPU temperature: %.1f C\nAPI: %s\nCore: %s\nOLED: %s\nTouch: %s\nNext alarm: %s\nLast successful alarm: %s\n\n"
@@ -3408,7 +3672,8 @@ static enum MHD_Result serve_diagnostic_report(struct MHD_Connection *connection
         info.root_filesystem[0]?info.root_filesystem:"Unavailable", info.root_device[0]?(info.root_read_only?"Read-only":"Read/write"):"Unavailable",
         (unsigned long long)info.storage_used_bytes, (unsigned long long)info.storage_free_bytes,
         (unsigned long long)info.storage_total_bytes, (unsigned long long)info.music_bytes,
-        (unsigned long long)info.music_files, (unsigned long long)info.fonts_bytes, (unsigned long long)info.fonts_files,
+        (unsigned long long)info.music_files, (unsigned long long)info.podcast_bytes, (unsigned long long)info.podcast_files,
+        (unsigned long long)info.fonts_bytes, (unsigned long long)info.fonts_files,
         (unsigned long long)info.config_bytes, (unsigned long long)info.config_files,
         info.boot_device[0]?info.boot_device:"Unavailable", info.boot_filesystem[0]?info.boot_filesystem:"Unavailable",
         info.boot_mount_point[0]?info.boot_mount_point:"Unavailable", info.sd_present?"Yes":"No",
@@ -3465,6 +3730,12 @@ static enum MHD_Result dispatch_route(struct MHD_Connection *connection,
             return serve_fonts_list(connection);
         case ROUTE_MUSIC_LIST:
             return serve_music_list(connection);
+        case ROUTE_PODCAST_LIST:
+            return serve_podcast_list(connection);
+        case ROUTE_PODCAST_SUMMARY:
+            return serve_podcast_summary(connection);
+        case ROUTE_PODCAST_IMPORT:
+            return serve_podcast_import(connection);
         case ROUTE_MUSIC_JOBS:
             return serve_music_jobs(connection);
         case ROUTE_CLEAR_MUSIC_QUEUE:
@@ -3473,12 +3744,18 @@ static enum MHD_Result dispatch_route(struct MHD_Connection *connection,
             return serve_font_file(connection);
         case ROUTE_UPLOAD_MUSIC:
             return upload_music(connection, context);
+        case ROUTE_UPLOAD_PODCAST:
+            return upload_podcasts(connection, context);
         case ROUTE_UPLOAD_FONT:
             return upload_font(connection, context);
         case ROUTE_DELETE_MUSIC:
             return delete_music(connection, context);
         case ROUTE_DELETE_ALL_MUSIC:
             return delete_all_music(connection);
+        case ROUTE_DELETE_PODCAST:
+            return delete_podcast(connection, context);
+        case ROUTE_DELETE_ALL_PODCASTS:
+            return delete_all_podcasts(connection);
         case ROUTE_DELETE_FONT:
             return delete_font(connection, context);
         case ROUTE_DISPLAY_ACTION: {
@@ -3489,6 +3766,8 @@ static enum MHD_Result dispatch_route(struct MHD_Connection *connection,
             else if (action && strcmp(action, "clear") == 0) request.action = MP_IPC_ACTION_CLEAR;
             else if (action && strcmp(action, "stop") == 0) request.action = MP_IPC_ACTION_STOP_AUDIO;
             else if (action && strcmp(action, "play-music") == 0) request.action = MP_IPC_ACTION_PLAY_MUSIC;
+            else if (action && strcmp(action, "play-podcast") == 0) request.action = MP_IPC_ACTION_PLAY_PODCAST;
+            else if (action && strcmp(action, "reset-podcast-history") == 0) request.action = MP_IPC_ACTION_RESET_PODCAST_HISTORY;
             else return queue_json(connection, 400, "{\"ok\":false,\"error\":\"unknown display action\"}");
             mp_safe_str(request.file, sizeof(request.file), form_value(context, "file"));
             return call_core(connection, MP_IPC_OP_DISPLAY_ACTION, &request, sizeof(request));
@@ -3531,6 +3810,14 @@ static enum MHD_Result dispatch_route(struct MHD_Connection *connection,
             if (form_value(context, "global_volume") != NULL) {
                 request.present_mask |= MP_IPC_AUDIO_GLOBAL_VOLUME;
                 request.global_volume = (uint8_t)form_int(context, "global_volume", 80);
+            }
+            if (form_value(context, "podcast_volume") != NULL) {
+                request.present_mask |= MP_IPC_AUDIO_PODCAST_VOLUME;
+                request.podcast_volume = (uint8_t)form_int(context, "podcast_volume", 30);
+            }
+            if (form_value(context, "podcast_touch_enabled") != NULL) {
+                request.present_mask |= MP_IPC_AUDIO_PODCAST_TOUCH_ENABLED;
+                request.podcast_touch_enabled = (uint8_t)(form_int(context, "podcast_touch_enabled", 1) != 0);
             }
             if (request.present_mask == 0)
                 return queue_json(connection, 400, "{\"ok\":false,\"error\":\"no audio settings supplied\"}");
@@ -3785,7 +4072,9 @@ static enum MHD_Result request_handler(void *cls, struct MHD_Connection *connect
         if (!context) return MHD_NO;
         context->route = find_route(method, url);
         context->upload_limit = route_upload_limit(context->route);
-        if (context->route && context->route->id == ROUTE_UPLOAD_MUSIC &&
+        if (context->route &&
+            (context->route->id == ROUTE_UPLOAD_MUSIC ||
+             context->route->id == ROUTE_UPLOAD_PODCAST) &&
             strcmp(method, MHD_HTTP_METHOD_POST) == 0) {
             if (music_upload_try_reserve())
                 context->music_upload_reserved = 1;
@@ -3815,7 +4104,7 @@ static enum MHD_Result request_handler(void *cls, struct MHD_Connection *connect
         *upload_data_size = 0;
         context->response_queued = 1;
         return queue_json(connection, 409,
-                          "{\"ok\":false,\"error\":\"music upload or processing is already in progress\"}");
+                          "{\"ok\":false,\"error\":\"audio upload or music processing is already in progress\"}");
     }
     if (*upload_data_size > 0) {
         if (*upload_data_size > MAX_REQUEST_BODY - context->received_bytes) {
@@ -3880,20 +4169,30 @@ int main(void) {
     if (allowed_origin && *allowed_origin) mp_safe_str(g_allowed_origin, sizeof(g_allowed_origin), allowed_origin);
     g_expected_core_uid = resolve_user_uid("MK_PICLOCK_CORE_USER", "mk-piclock-core");
     g_music_quota_bytes = bytes_from_env("MK_PICLOCK_MUSIC_QUOTA_BYTES", DEFAULT_MUSIC_QUOTA_BYTES);
+    g_podcast_quota_bytes = bytes_from_env("MK_PICLOCK_PODCAST_QUOTA_BYTES", DEFAULT_PODCAST_QUOTA_BYTES);
     g_disk_reserve_bytes = bytes_from_env("MK_PICLOCK_DISK_RESERVE_BYTES", DISK_RESERVE_BYTES);
 
     (void)mp_asset_ensure_dir(MP_MUSIC_DIR);
     (void)mp_asset_ensure_dir(MP_MUSIC_PROCESS_DIR);
+    (void)mp_asset_ensure_dir(MP_PODCAST_DIR);
+    (void)mp_asset_ensure_dir(MP_PODCAST_UPLOAD_DIR);
     (void)mp_asset_ensure_dir(MP_FONT_DIR);
     if (mp_music_jobs_start(g_music_quota_bytes, g_disk_reserve_bytes,
                             notify_processed_music, NULL) != 0) {
         fprintf(stderr, "%s: music processing worker could not start\n", API_NAME);
         return 1;
     }
+    if (mp_podcast_import_start(g_podcast_quota_bytes, g_disk_reserve_bytes,
+                                notify_processed_podcast, NULL) != 0) {
+        fprintf(stderr, "%s: podcast import worker could not start\n", API_NAME);
+        mp_music_jobs_stop();
+        return 1;
+    }
 
     int public_port = public_port_from_env();
     if (public_port < 0) {
         fprintf(stderr, "Invalid MK_PICLOCK_API_PORT\n");
+        mp_podcast_import_stop();
         mp_music_jobs_stop();
         return 1;
     }
@@ -3904,6 +4203,7 @@ int main(void) {
     bind_address.sin_port = htons((uint16_t)public_port);
     if (inet_pton(AF_INET, public_bind, &bind_address.sin_addr) != 1) {
         fprintf(stderr, "Invalid MK_PICLOCK_API_BIND IPv4 address: %s\n", public_bind);
+        mp_podcast_import_stop();
         mp_music_jobs_stop();
         return 1;
     }
@@ -3921,6 +4221,7 @@ int main(void) {
         MHD_OPTION_END);
     if (!daemon) {
         fprintf(stderr, "%s: failed to start libmicrohttpd on %s:%d\n", API_NAME, public_bind, public_port);
+        mp_podcast_import_stop();
         mp_music_jobs_stop();
         return 1;
     }
@@ -3933,6 +4234,7 @@ int main(void) {
         while (nanosleep(&delay, &delay) != 0 && errno == EINTR && g_running) {}
     }
     MHD_stop_daemon(daemon);
+    mp_podcast_import_stop();
     mp_music_jobs_stop();
     return 0;
 }

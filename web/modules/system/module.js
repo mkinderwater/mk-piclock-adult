@@ -138,6 +138,7 @@ export async function mount(ctx) {
             ctx.setText('#diag-storage-available', bytes(diagnostics.storage_free_bytes));
             ctx.setText('#diag-storage-total', bytes(diagnostics.storage_total_bytes));
             ctx.setText('#diag-music-size', directoryUsage(diagnostics.music_bytes, diagnostics.music_files));
+            ctx.setText('#diag-podcast-size', directoryUsage(diagnostics.podcast_bytes, diagnostics.podcast_files));
             ctx.setText('#diag-fonts-size', directoryUsage(diagnostics.fonts_bytes, diagnostics.fonts_files));
             ctx.setText('#diag-config-size', directoryUsage(diagnostics.config_bytes, diagnostics.config_files));
             ctx.setText('#diag-sd-device', available(diagnostics.sd_device));
@@ -295,7 +296,7 @@ export async function mount(ctx) {
 
     ctx.on('submit', '#restore-form', async (event, form) => {
         event.preventDefault();
-        if (!window.confirm('Restore this backup? Settings, alarms, fonts, and Weather configuration will be replaced. Music will remain unchanged.')) return;
+        if (!window.confirm('Restore this backup? Settings, alarms, fonts, and Weather configuration will be replaced. Music and podcasts will remain unchanged.')) return;
         const button = form.querySelector('[type="submit"]');
         try {
             await ctx.update(form.action, {

@@ -27,14 +27,14 @@ all: build
 
 build: mk-piclock-core mk-piclock-api weather
 
-mk-piclock-core: mk-piclock.c service_watchdog.c aht10_sensor.c font_catalog.c util.c hardware_profile.h interaction_profile.h service_watchdog.h ipc_protocol.h compiler_attrs.h aht10_sensor.h font_catalog.h util.h
-	$(CC) $(CORE_CPPFLAGS) $(CORE_CFLAGS) mk-piclock.c service_watchdog.c aht10_sensor.c font_catalog.c util.c $(LDFLAGS) $(CORE_LIBS) -lm -o $@
+mk-piclock-core: mk-piclock.c service_watchdog.c aht10_sensor.c font_catalog.c io_helpers.c util.c hardware_profile.h interaction_profile.h service_watchdog.h ipc_protocol.h compiler_attrs.h aht10_sensor.h font_catalog.h io_helpers.h util.h
+	$(CC) $(CORE_CPPFLAGS) $(CORE_CFLAGS) mk-piclock.c service_watchdog.c aht10_sensor.c font_catalog.c io_helpers.c util.c $(LDFLAGS) $(CORE_LIBS) -lm -o $@
 
 service-watchdog-check:
 	$(CC) $(CPPFLAGS) $(C_STANDARD) -Wall -Wextra -Wformat=2 -Werror $(CFLAGS) -I. -c service_watchdog.c -o /tmp/mk-clock-service-watchdog.o
 
-mk-piclock-api: mk-piclock-api.c asset_store.c music_jobs.c font_catalog.c util.c weather_source_store.c weather_frames.c io_helpers.c hardware_profile.h interaction_profile.h ipc_protocol.h compiler_attrs.h asset_store.h music_jobs.h font_catalog.h util.h weather_source_store.h weather_frames.h weather_version.h io_helpers.h
-	$(CC) $(API_CPPFLAGS) $(API_CFLAGS) mk-piclock-api.c weather_source_store.c weather_frames.c io_helpers.c asset_store.c music_jobs.c font_catalog.c util.c $(LDFLAGS) $(API_LIBS) -o $@
+mk-piclock-api: mk-piclock-api.c asset_store.c music_jobs.c podcast_import.c font_catalog.c util.c weather_source_store.c weather_frames.c io_helpers.c hardware_profile.h interaction_profile.h ipc_protocol.h compiler_attrs.h asset_store.h music_jobs.h podcast_import.h font_catalog.h util.h weather_source_store.h weather_frames.h weather_version.h io_helpers.h
+	$(CC) $(API_CPPFLAGS) $(API_CFLAGS) mk-piclock-api.c weather_source_store.c weather_frames.c io_helpers.c asset_store.c music_jobs.c podcast_import.c font_catalog.c util.c $(LDFLAGS) $(API_LIBS) -o $@
 
 weather:
 	$(MAKE) -C weather clean all
@@ -68,12 +68,13 @@ validate-release:
 	@test -s VERSION || { echo "ERROR: VERSION is missing or empty"; exit 1; }
 	@version="$$(tr -d '[:space:]' < VERSION)"; expected="mk-clock-adult-$${version}-bpi-m2-zero-r1"; gui="$$(sed -n "s/^const GUI_VERSION = '\([^']*\)';/\1/p" web/assets/js/app.js | head -1)"; hw="$$(sed -n 's/^#define MP_PRODUCT_VERSION "\([^"]*\)"/\1/p' hardware_profile.h | head -1)"; [ "$$gui" = "$$expected" ] && [ "$$hw" = "$$expected" ] || { echo "ERROR: product identity mismatch"; exit 1; }; echo "OK      Product identity $$expected"
 	@api="$$(sed -n 's/^#define API_VERSION "\([^"]*\)"/\1/p' mk-piclock-api.c | head -1)"; gui="$$(sed -n "s/^const REQUIRED_API_VERSION = '\([^']*\)';/\1/p" web/assets/js/app.js | head -1)"; [ "$$api" = "$$gui" ] || { echo "ERROR: GUI/API version mismatch"; exit 1; }; echo "OK      GUI/API version contract v$$api"
-	@grep -q 'Private core/API IPC protocol: v33' README.md && grep -q 'HTTP API: v1.59' README.md || { echo "ERROR: README protocol compatibility is stale"; exit 1; }
+	@grep -q 'Private core/API IPC protocol: v35' README.md && grep -q 'HTTP API: v1.62' README.md || { echo "ERROR: README protocol compatibility is stale"; exit 1; }
 	@printf '%s  %s\n' "$(DEFAULT_ALARM_SHA256)" assets/default-alarm.mp3 | sha256sum -c -
 	@printf '%s  %s\n' "$(MESSAGE_CHIME_SHA256)" assets/message-chime.mp3 | sha256sum -c -
 	@sh ./weather/install.sh --validate-only
 	@grep -q 'MP_GPIO_TOUCH 17' hardware_profile.h || { echo "ERROR: touch input is not PA17"; exit 1; }
 	@grep -q 'EXPECTED_VERSION=1.0.4-preview36' hardware/verify-bpi-hardware.sh && grep -q 'EXPECTED_KERNEL=6.12.101+deb13-armmp' hardware/verify-bpi-hardware.sh && ! grep -q 'EXPECTED_.*SHA256=' hardware/verify-bpi-hardware.sh || { echo "ERROR: preview36 playback hardware contract is stale"; exit 1; }
+	@grep -q 'ROLLBACK_STATE_PATHS=(' scripts/deploy.sh && grep -q 'opt/mk-piclock/config' scripts/deploy.sh && ! grep -A20 'if \[ -d /opt/mk-piclock/config \]' scripts/deploy.sh | grep -q 'LEGACY_PATHS' || { echo "ERROR: upgrade persistence boundary for /opt/mk-piclock/config is missing or unsafe"; exit 1; }
 	@! grep -qiE 'ICS-43434|MP_IPC_OP_VOICE|mp_voice_' mk-piclock.c mk-piclock-api.c ipc_protocol.h hardware_profile.h interaction_profile.h || { echo "ERROR: retired capture code survived in active C/header sources"; exit 1; }
 	@test ! -e voice_capture.c -a ! -e voice_dsp.c || { echo "ERROR: retired capture source files survived"; exit 1; }
 	@echo "OK      Playback-only release payload validated"

@@ -1,0 +1,78 @@
+<section class="panel podcasts-module">
+    <div class="card">
+        <h2>Podcasts</h2>
+        <p class="page-intro">Play a podcast in the background while the clock stays on screen. Random playback does not repeat a podcast within a cycle. After all have played, the next random request starts a fresh cycle automatically.</p>
+        <div class="status-summary">
+            <div class="status-tile"><strong>Now</strong><span id="podcast-status">Loading...</span></div>
+            <div class="status-tile"><strong>Podcast</strong><span id="podcast-current">Loading...</span></div>
+            <div class="status-tile"><strong>Unplayed</strong><span id="podcast-count">Loading...</span></div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Volume</h2>
+        <form method="POST" action="/api/v1/config/audio" data-busy-text="Saving podcast volume..." data-success-text="Podcast volume saved" data-error-text="Podcast volume could not be saved">
+            <label for="podcast-volume">Podcast volume <output id="podcast-volume-value" class="inline-output" for="podcast-volume">30%</output></label>
+            <p class="small muted">Podcast volume is separate from music and alarms. Changes apply while a podcast is playing.</p>
+            <input id="podcast-volume" type="range" name="podcast_volume" min="0" max="100" step="1" value="30">
+            <button class="btn" type="submit">Save volume</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Touch shortcut</h2>
+        <p class="page-intro">Start a random podcast from the clock without opening the web controls.</p>
+        <form method="POST" action="/api/v1/config/audio" data-busy-text="Saving touch shortcut..." data-success-text="Touch shortcut saved" data-error-text="Touch shortcut could not be saved">
+            <label for="podcast-touch-enabled">Ten-tap shortcut</label>
+            <select id="podcast-touch-enabled" name="podcast_touch_enabled">
+                <option value="1">Enabled</option>
+                <option value="0">Disabled</option>
+            </select>
+            <p class="small muted">Ten short taps within eight seconds starts a random podcast. One short tap stops audio that is playing.</p>
+            <button class="btn" type="submit">Save shortcut</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Bulk podcast import</h2>
+        <p class="page-intro">For large libraries, upload MP3 files by SSH/SFTP to <code>/opt/mk-piclock/assets/podcasts/upload/</code>. When the transfer is complete, scan the upload directory, then process the files found.</p>
+        <div id="podcast-import-card" class="mini-card music-job hidden">
+            <div class="job-head">
+                <strong id="podcast-import-status">Podcast uploads</strong>
+                <span id="podcast-import-position" class="job-state">Not scanned</span>
+            </div>
+            <div id="podcast-import-current" class="small muted">Scan uploads to check for new podcasts.</div>
+            <progress id="podcast-import-bar" max="100" value="0"></progress>
+            <div id="podcast-import-progress" class="small muted">0%</div>
+            <div id="podcast-import-failures" class="job-error-list hidden"></div>
+        </div>
+        <div class="button-row">
+            <button class="btn" type="button" id="scan-podcast-uploads">Scan uploads</button>
+            <button class="btn ok" type="button" id="process-podcast-import" hidden>Process podcasts</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Add podcasts</h2>
+        <p class="page-intro">Choose up to 14 MP3 files for a small browser upload. Large libraries are better copied to the bulk upload directory by SSH/SFTP.</p>
+        <form id="podcast-upload-form" method="POST" action="/api/v1/assets/podcasts/upload" enctype="multipart/form-data" data-module-handles-submit="true">
+            <label for="podcast-files">Choose podcasts</label>
+            <input id="podcast-files" type="file" name="file" accept="audio/mpeg,.mp3" multiple required>
+            <div id="podcast-selection-summary" class="small muted">No podcasts selected.</div>
+            <button class="btn" type="submit">Add podcasts</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Your podcasts</h2>
+        <div id="podcast-list" class="cards compact-cards"></div>
+        <details class="danger-details">
+            <summary>Podcast library options</summary>
+            <div class="button-row">
+                <button class="btn alt small-btn" type="button" data-podcast-stop>Stop playback</button>
+                <button class="btn alt small-btn" type="button" id="reset-podcast-history">Reset play history</button>
+                <button class="btn danger small-btn" type="button" id="delete-all-podcasts">Delete all podcasts</button>
+            </div>
+        </details>
+    </div>
+</section>

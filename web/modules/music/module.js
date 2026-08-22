@@ -1,4 +1,4 @@
-import {audioTrackFacts, formatAudioBytes} from '/assets/js/audio-library.js?v=mk-clock-adult-2.3.50-preview42-bpi-m2-zero-r1';
+import {audioTrackFacts, formatAudioBytes} from '/assets/js/audio-library.js?v=mk-clock-adult-2.3.54-preview59-bpi-m2-zero-r1';
 
 const MAX_MUSIC_UPLOAD_FILES = 14;
 
@@ -6,9 +6,9 @@ export async function mount(ctx) {
     const renderStatus = status => {
         if (!status) return;
         const localMetadata = [status.audio_title, status.audio_artist].filter(Boolean).join(' - ');
-        const playing = Boolean(status.audio_playing);
-        ctx.setText('#music-status', playing ? 'Playing' : 'None');
-        ctx.setText('#music-current', status.audio_playing
+        const playingMusic = Boolean(status.audio_playing && status.audio_kind === 'music');
+        ctx.setText('#music-status', playingMusic ? 'Playing' : 'None');
+        ctx.setText('#music-current', playingMusic
             ? (localMetadata || status.audio_file || 'Music')
             : 'None');
         ctx.setValue('#global-volume', status.global_volume ?? 80);
