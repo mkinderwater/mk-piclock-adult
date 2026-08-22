@@ -1,4 +1,4 @@
-import {audioTrackFacts, formatAudioBytes} from '/assets/js/audio-library.js?v=mk-clock-adult-2.3.54-preview59-bpi-m2-zero-r1';
+import {audioTrackFacts, formatAudioBytes} from '/assets/js/audio-library.js?v=mk-clock-adult-2.3.54-bpi-m2-zero-r1';
 
 const MAX_PODCAST_UPLOAD_FILES = 14;
 const MAX_PODCAST_FILE_BYTES = 256 * 1024 * 1024;

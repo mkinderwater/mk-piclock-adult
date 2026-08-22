@@ -28,7 +28,7 @@ let authPromise = null;
 let authResolve = null;
 let noticeTimer = null;
 const statusListeners = new Set();
-const GUI_VERSION = 'mk-clock-adult-2.3.54-preview59-bpi-m2-zero-r1';
+const GUI_VERSION = 'mk-clock-adult-2.3.54-bpi-m2-zero-r1';
 const REQUIRED_API_VERSION = '1.62';
 const oledPreviewIntensity = Array.from({length: 16}, (_, level) =>
     level === 0 ? 0 : Math.pow(level / 15, 0.48));

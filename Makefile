@@ -69,6 +69,7 @@ validate-release:
 	@version="$$(tr -d '[:space:]' < VERSION)"; expected="mk-clock-adult-$${version}-bpi-m2-zero-r1"; gui="$$(sed -n "s/^const GUI_VERSION = '\([^']*\)';/\1/p" web/assets/js/app.js | head -1)"; hw="$$(sed -n 's/^#define MP_PRODUCT_VERSION "\([^"]*\)"/\1/p' hardware_profile.h | head -1)"; [ "$$gui" = "$$expected" ] && [ "$$hw" = "$$expected" ] || { echo "ERROR: product identity mismatch"; exit 1; }; echo "OK      Product identity $$expected"
 	@api="$$(sed -n 's/^#define API_VERSION "\([^"]*\)"/\1/p' mk-piclock-api.c | head -1)"; gui="$$(sed -n "s/^const REQUIRED_API_VERSION = '\([^']*\)';/\1/p" web/assets/js/app.js | head -1)"; [ "$$api" = "$$gui" ] || { echo "ERROR: GUI/API version mismatch"; exit 1; }; echo "OK      GUI/API version contract v$$api"
 	@grep -q 'Private core/API IPC protocol: v35' README.md && grep -q 'HTTP API: v1.62' README.md || { echo "ERROR: README protocol compatibility is stale"; exit 1; }
+	@for script in install.sh hardware/verify-bpi-hardware.sh packaging/build-release.sh scripts/deploy.sh scripts/verify-install.sh weather/install.sh weather/uninstall.sh; do test -x "$$script" || { echo "ERROR: required script is not executable: $$script"; exit 1; }; done; echo "OK      Release script permissions validated"
 	@printf '%s  %s\n' "$(DEFAULT_ALARM_SHA256)" assets/default-alarm.mp3 | sha256sum -c -
 	@printf '%s  %s\n' "$(MESSAGE_CHIME_SHA256)" assets/message-chime.mp3 | sha256sum -c -
 	@sh ./weather/install.sh --validate-only

@@ -1,18 +1,12 @@
-# BPI-M2 Zero hardware wiring migration
+# BPI-M2 Zero touch migration
 
-This note documents the touch-sensor wiring change between older Banana Pi M2 Zero adult-clock releases and the current playback-only hardware contract.
+Current mk-clock-adult releases use **PA17 / physical pin 37** for TTP223B OUT.
 
-## Touch pin history
+Older BPI adult-clock builds used **PA21 / physical pin 38**.
 
-| Release generation | TTP223B OUT | PA21 / physical pin 38 | Reason |
-|:--|:--|:--|:--|
-| Older BPI adult builds through `2.3.50-preview1` | **PA21 / physical pin 38** | Touch input | Original Banana Pi touch wiring |
-| Microphone-era previews beginning with `2.3.50-preview2` | **PA17 / physical pin 37** | Reserved for I2S receive data | Touch moved so PA21 could be used by the microphone path |
-| Current playback-only builds (`2.3.50-preview33` and later) | **PA17 / physical pin 37** | **Free / unassigned** | Touch stays on PA17 to avoid another physical wiring change |
+The current release keeps touch on pin 37. Pin 38 is free.
 
-The current release therefore intentionally does **not** move touch back to pin 38.
-
-## Current TTP223B wiring
+## Current touch wiring
 
 ```text
 TTP223B VCC -> 3.3 V, physical pin 17
@@ -20,30 +14,30 @@ TTP223B GND -> GND, physical pin 39
 TTP223B OUT -> PA17, physical pin 37, gpiochip0 line 17
 ```
 
-Physical pin 38 / PA21 must remain disconnected for the current hardware profile.
+Leave physical pin 38 / PA21 disconnected.
 
-## Upgrading a clock wired to the older pinout
+## Migrate an older clock
 
-Power the clock off before changing the header wiring.
+Power the clock off.
 
-1. Leave TTP223B VCC on physical pin 17.
-2. Leave TTP223B GND on physical pin 39.
-3. Move only the TTP223B `OUT` / `SIG` wire from **physical pin 38** to **physical pin 37**.
-4. Leave physical pin 38 / PA21 disconnected.
-5. Power the clock on and confirm touch operation.
+1. Leave TTP223B VCC on pin 17.
+2. Leave TTP223B GND on pin 39.
+3. Move TTP223B OUT/SIG from pin 38 to pin 37.
+4. Leave pin 38 disconnected.
+5. Power the clock on.
+6. Test touch.
 
 ```text
-OLD                                      CURRENT
-
-TTP223B OUT -> pin 38 / PA21             TTP223B OUT -> pin 37 / PA17
-pin 37      -> unused                     pin 38      -> free / disconnected
+OLD                         CURRENT
+OUT -> pin 38 / PA21        OUT -> pin 37 / PA17
+pin 37 unused               pin 38 free
 ```
 
-If the touch wire is left on physical pin 38 with the current software, touch input will not work because `mk-clock-adult` reads gpiochip0 line 17 / PA17.
+If OUT remains on pin 38, touch will not work because the application reads gpiochip0 line 17 / PA17.
 
-## Audio wiring after microphone removal
+## Audio wiring
 
-The MAX98357A playback wiring does not change:
+MAX98357A wiring is unchanged:
 
 ```text
 BCLK  -> PA19, physical pin 27
@@ -52,19 +46,15 @@ DIN   -> PA20, physical pin 40
 SD/EN -> PA1,  physical pin 11
 ```
 
-There is no microphone connection and no I2S receive-data connection in the current build. PA21 / physical pin 38 is free.
+There is no microphone or I2S receive-data connection in this release.
 
-## Reference
+## Verify
 
-See `pinouts.md` for the complete current 40-pin header map, OLED, AHT10, MAX98357A, touch, speaker, power, and pre-power checklist.
-
-## Verify the migrated unit
-
-After booting the current build:
+After boot:
 
 ```bash
 grep -E '^(TOUCH_GPIO|TOUCH_HEADER_PIN|I2S_RX_GPIO|I2S_RX_HEADER_PIN)=' \
-    /etc/bpi-zero-clock-release
+  /etc/bpi-zero-clock-release
 ```
 
 Expected:
@@ -76,4 +66,6 @@ I2S_RX_GPIO=unassigned
 I2S_RX_HEADER_PIN=38-free
 ```
 
-Play music and press the touch sensor once. The current audio should stop. This confirms the application can see the sensor on PA17 / physical pin 37.
+Play audio and press touch once. Playback should stop.
+
+See `pinouts.md` for complete wiring.

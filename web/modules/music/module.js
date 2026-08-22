@@ -1,4 +1,4 @@
-import {audioTrackFacts, formatAudioBytes} from '/assets/js/audio-library.js?v=mk-clock-adult-2.3.54-preview59-bpi-m2-zero-r1';
+import {audioTrackFacts, formatAudioBytes} from '/assets/js/audio-library.js?v=mk-clock-adult-2.3.54-bpi-m2-zero-r1';
 
 const MAX_MUSIC_UPLOAD_FILES = 14;
 

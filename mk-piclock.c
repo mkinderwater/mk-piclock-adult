@@ -89,9 +89,10 @@
 #define ROOM_SENSOR_STALE_SECONDS_DEFAULT 120
 #define ROOM_TREND_SAMPLE_SECONDS 60
 #define ROOM_TREND_HISTORY_SAMPLES 31
-#define ROOM_TREND_MIN_SPAN_SECONDS (20 * 60)
-#define ROOM_TREND_AVERAGE_SAMPLES 5
-#define ROOM_TREND_THRESHOLD_C 0.3
+#define ROOM_TREND_COMPARE_MINUTES 10
+#define ROOM_TREND_AVERAGE_SAMPLES 3
+#define ROOM_TREND_ENTER_THRESHOLD_C 0.15
+#define ROOM_TREND_EXIT_THRESHOLD_C 0.08
 
 
 #define OLED_SPI_DEV MP_OLED_SPI_DEV
@@ -692,37 +693,57 @@ static void room_sensor_update_trend_locked(double temperature_c, time_t measure
     if (g_room_sensor.trend_count < ROOM_TREND_HISTORY_SAMPLES)
         g_room_sensor.trend_count++;
 
-    g_room_sensor.temperature_trend = ROOM_TREND_STABLE;
-    if (g_room_sensor.trend_count < ROOM_TREND_AVERAGE_SAMPLES * 2) return;
-
-    int oldest_index = (g_room_sensor.trend_next + ROOM_TREND_HISTORY_SAMPLES -
-                        g_room_sensor.trend_count) % ROOM_TREND_HISTORY_SAMPLES;
-    int newest_index = (g_room_sensor.trend_next + ROOM_TREND_HISTORY_SAMPLES - 1) %
-                       ROOM_TREND_HISTORY_SAMPLES;
-    time_t oldest_time = g_room_sensor.trend_history[oldest_index].measured_at;
-    time_t newest_time = g_room_sensor.trend_history[newest_index].measured_at;
-    if (oldest_time <= 0 || newest_time - oldest_time < ROOM_TREND_MIN_SPAN_SECONDS)
+    /*
+     * Compare two three-minute averages whose centres are about ten minutes
+     * apart.  At one sample per minute this needs 13 samples: the old window
+     * is t-12..t-10 and the recent window is t-2..t.
+     */
+    const int required = ROOM_TREND_COMPARE_MINUTES + ROOM_TREND_AVERAGE_SAMPLES;
+    if (g_room_sensor.trend_count < required) {
+        g_room_sensor.temperature_trend = ROOM_TREND_STABLE;
         return;
-
-    int average_count = ROOM_TREND_AVERAGE_SAMPLES;
-    if (average_count > g_room_sensor.trend_count / 2)
-        average_count = g_room_sensor.trend_count / 2;
-
-    double old_sum = 0.0;
-    double new_sum = 0.0;
-    for (int i = 0; i < average_count; i++) {
-        int old_index = (oldest_index + i) % ROOM_TREND_HISTORY_SAMPLES;
-        int new_index = (g_room_sensor.trend_next + ROOM_TREND_HISTORY_SAMPLES -
-                         average_count + i) % ROOM_TREND_HISTORY_SAMPLES;
-        old_sum += g_room_sensor.trend_history[old_index].temperature_c;
-        new_sum += g_room_sensor.trend_history[new_index].temperature_c;
     }
 
-    double delta = (new_sum - old_sum) / (double)average_count;
-    if (delta >= ROOM_TREND_THRESHOLD_C)
-        g_room_sensor.temperature_trend = ROOM_TREND_RISING;
-    else if (delta <= -ROOM_TREND_THRESHOLD_C)
-        g_room_sensor.temperature_trend = ROOM_TREND_FALLING;
+    int newest_index = (g_room_sensor.trend_next + ROOM_TREND_HISTORY_SAMPLES - 1) %
+                       ROOM_TREND_HISTORY_SAMPLES;
+    int oldest_window_start = (newest_index + ROOM_TREND_HISTORY_SAMPLES -
+                               (ROOM_TREND_COMPARE_MINUTES +
+                                ROOM_TREND_AVERAGE_SAMPLES - 1)) %
+                              ROOM_TREND_HISTORY_SAMPLES;
+    int recent_window_start = (newest_index + ROOM_TREND_HISTORY_SAMPLES -
+                               (ROOM_TREND_AVERAGE_SAMPLES - 1)) %
+                              ROOM_TREND_HISTORY_SAMPLES;
+
+    double old_sum = 0.0;
+    double recent_sum = 0.0;
+    for (int i = 0; i < ROOM_TREND_AVERAGE_SAMPLES; i++) {
+        int old_index = (oldest_window_start + i) % ROOM_TREND_HISTORY_SAMPLES;
+        int recent_index = (recent_window_start + i) % ROOM_TREND_HISTORY_SAMPLES;
+        old_sum += g_room_sensor.trend_history[old_index].temperature_c;
+        recent_sum += g_room_sensor.trend_history[recent_index].temperature_c;
+    }
+
+    double delta = (recent_sum - old_sum) / (double)ROOM_TREND_AVERAGE_SAMPLES;
+    enum room_temperature_trend previous = g_room_sensor.temperature_trend;
+
+    if (previous == ROOM_TREND_RISING) {
+        if (delta <= -ROOM_TREND_ENTER_THRESHOLD_C)
+            g_room_sensor.temperature_trend = ROOM_TREND_FALLING;
+        else if (delta < ROOM_TREND_EXIT_THRESHOLD_C)
+            g_room_sensor.temperature_trend = ROOM_TREND_STABLE;
+    } else if (previous == ROOM_TREND_FALLING) {
+        if (delta >= ROOM_TREND_ENTER_THRESHOLD_C)
+            g_room_sensor.temperature_trend = ROOM_TREND_RISING;
+        else if (delta > -ROOM_TREND_EXIT_THRESHOLD_C)
+            g_room_sensor.temperature_trend = ROOM_TREND_STABLE;
+    } else {
+        if (delta >= ROOM_TREND_ENTER_THRESHOLD_C)
+            g_room_sensor.temperature_trend = ROOM_TREND_RISING;
+        else if (delta <= -ROOM_TREND_ENTER_THRESHOLD_C)
+            g_room_sensor.temperature_trend = ROOM_TREND_FALLING;
+        else
+            g_room_sensor.temperature_trend = ROOM_TREND_STABLE;
+    }
 }
 
 static void room_sensor_configure(void)
@@ -3163,23 +3184,28 @@ static void draw_room_temperature_panel(
         humidity_level = 6;
     }
 
+    int show_trend = has_reading && sensor->temperature_trend != ROOM_TREND_STABLE;
+    int temperature_y0 = show_trend ? 12 : 13;
+    int temperature_y1 = show_trend ? 34 : 43;
+    int fallback_y = show_trend ? 18 : 23;
+
     int used_ttf = font_file && *font_file &&
         draw_room_temperature_ttf_binary(
             font_file,
             upper_font_size,
             temperature_text,
             x0 + 2,
-            12,
+            temperature_y0,
             x1 - 2,
-            34,
+            temperature_y1,
             temperature_level
         ) == 0;
 
     if (!used_ttf)
         draw_weather_compact_text_scaled_centered(
-            x0 + 1, x1 - 1, 18, fallback_text, 2, temperature_level);
+            x0 + 1, x1 - 1, fallback_y, fallback_text, 2, temperature_level);
 
-    if (has_reading)
+    if (show_trend)
         draw_room_temperature_trend_arrow(
             x0 + 1, x1 - 1, 39, sensor->temperature_trend, temperature_level);
 
