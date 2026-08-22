@@ -31,19 +31,28 @@
 #define DEFAULT_SOURCE_CONFIG "/var/lib/mk-piclock-weather/weather-source.url"
 #define DEFAULT_FRAME_CONFIG MP_WEATHER_FRAMES_FILE
 #define DEFAULT_CLOCK_API_URL "http://127.0.0.1:8080/api/v1/weather"
-#define DEFAULT_TIMEZONE "America/Edmonton"
+#define DEFAULT_TIMEZONE "system"
 #define DEFAULT_STATUS_PATH "/var/lib/mk-piclock-weather/status.json"
 #define DEFAULT_ACTIVITY_PATH "/var/lib/mk-piclock-weather/activity.json"
 #define DEFAULT_OUTPUT_PATH "/run/mk-piclock/weather.json"
 #define DEFAULT_CACHE_PATH "/var/lib/mk-piclock-weather/weather-last-good.json"
+#define DEFAULT_TODAY_EXTREMES_PATH "/var/lib/mk-piclock-weather/today-extremes.json"
 #define DEFAULT_ICON_LIBRARY_DIR "/usr/local/share/mk-piclock-weather/icons"
 #define DEFAULT_ICON_RUNTIME_DIR "/run/mk-piclock/weather-icons"
+#define DEFAULT_CORE_SOCKET_PATH "/run/mk-piclock/core.sock"
+#define DEFAULT_PUBLISHED_STAMP_PATH "/run/mk-piclock/weather-published.stamp"
+#define WEATHER_CACHE_PUSH_ATTEMPTS 4
+#define WEATHER_CACHE_PUSH_RETRY_MS 250
 #define DEFAULT_BASE_URL_PREFIX "https://api.weather.gc.ca/collections/citypageweather-realtime/items/"
+#define DEFAULT_SWOB_REALTIME_URL "https://api.weather.gc.ca/collections/swob-realtime/items"
+#define DEFAULT_WEATHER_ALERTS_URL "https://api.weather.gc.ca/collections/weather-alerts/items"
 #define MAX_RESPONSE_BYTES (4U * 1024U * 1024U)
 #define MAX_API_RESPONSE_BYTES 65536U
 #define WEATHER_ICON_RAW_BYTES 512U
 #define UNKNOWN_ICON_CODE 29
 #define ACTIVITY_LIMIT 50
+#define WEATHER_CACHE_RESTORE_SECONDS 86400
+#define WARNING_DETAIL_CHUNKS_PER_ALERT 3
 
 struct error_info {
     char text[512];
@@ -82,7 +91,15 @@ struct icon_result {
     char substitutions[3][128];
 };
 
+struct icon_runtime_backup {
+    bool present[3];
+    unsigned char raw[3][WEATHER_ICON_RAW_BYTES];
+};
+
 static void set_error(struct error_info *error, const char *format, ...) MP_PRINTF_LIKE(2, 3);
+static json_object *fetch_eccc_json(const char *url, int timeout_seconds,
+                                    const char *user_agent, const char *label,
+                                    struct error_info *error);
 
 static void set_error(struct error_info *error, const char *format, ...)
 {
@@ -420,6 +437,33 @@ static void add_text_if(json_object *target, const char *key, json_object *value
     if (as_text(value, text, sizeof(text))) json_object_object_add(target, key, json_object_new_string(text));
 }
 
+
+static void add_rich_text_fields(json_object *target, json_object *summary_value,
+                                 json_object *detail_value, const char *detail_source)
+{
+    if (!target) return;
+    char summary[512] = "";
+    char detail[4096] = "";
+    bool have_summary = as_text(summary_value, summary, sizeof(summary));
+    bool have_detail = as_text(detail_value, detail, sizeof(detail));
+
+    if (!have_summary && have_detail) {
+        snprintf(summary, sizeof(summary), "%s", detail);
+        have_summary = true;
+    }
+    if (have_summary)
+        json_object_object_add(target, "display_summary", json_object_new_string(summary));
+
+    /* Preserve richer authoritative prose separately from the concise panel
+     * label. Consumers with enough display space can use the detail, while
+     * compact OLED panels remain stable on display_summary/condition. */
+    if (have_detail && (!have_summary || strcasecmp(summary, detail) != 0)) {
+        json_object_object_add(target, "authoritative_detail", json_object_new_string(detail));
+        if (detail_source && *detail_source)
+            json_object_object_add(target, "detail_source", json_object_new_string(detail_source));
+    }
+}
+
 static void add_number_if(json_object *target, const char *key, json_object *value)
 {
     double number = 0.0;
@@ -651,8 +695,17 @@ static bool weather_transport_retryable(CURLcode code)
 {
     return code == CURLE_GOT_NOTHING ||
            code == CURLE_RECV_ERROR ||
+           code == CURLE_SEND_ERROR ||
            code == CURLE_COULDNT_CONNECT ||
+           code == CURLE_COULDNT_RESOLVE_HOST ||
+           code == CURLE_SSL_CONNECT_ERROR ||
            code == CURLE_OPERATION_TIMEDOUT;
+}
+
+static void weather_retry_delay(unsigned int seconds)
+{
+    struct timespec remaining = {.tv_sec = (time_t)seconds, .tv_nsec = 0};
+    while (nanosleep(&remaining, &remaining) != 0 && errno == EINTR) {}
 }
 
 static void weather_response_reset(struct memory_buffer *response, char **content_type)
@@ -670,43 +723,58 @@ static void weather_response_reset(struct memory_buffer *response, char **conten
 static json_object *fetch_json(const char *url, int timeout_seconds, const char *user_agent,
                                struct error_info *error)
 {
+    return fetch_eccc_json(url, timeout_seconds, user_agent, "GeoMet", error);
+}
+
+static json_object *fetch_eccc_json(const char *url, int timeout_seconds,
+                                    const char *user_agent, const char *label,
+                                    struct error_info *error)
+{
     struct memory_buffer response = {0};
     long status = 0;
     char *content_type = NULL;
     CURLcode code = CURLE_OK;
 
-    /* ECCC occasionally closes a negotiated connection without sending headers.
-       Prefer HTTP/1.1 for this small JSON request, then retry once over IPv4 with
-       a fresh connection when the first transport attempt fails. */
-    bool ok = curl_request(url, NULL, timeout_seconds, user_agent, MAX_RESPONSE_BYTES,
-                           "https", CURL_HTTP_VERSION_1_1, CURL_IPRESOLVE_WHATEVER,
-                           false, &response, &status, &content_type, &code, error);
-    if (!ok && weather_transport_retryable(code)) {
-        char initial_error[sizeof(error->text)];
-        snprintf(initial_error, sizeof(initial_error), "%s", error->text);
-        weather_response_reset(&response, &content_type);
-        status = 0;
-        code = CURLE_OK;
-        ok = curl_request(url, NULL, timeout_seconds, user_agent, MAX_RESPONSE_BYTES,
-                          "https", CURL_HTTP_VERSION_1_1, CURL_IPRESOLVE_V4,
-                          true, &response, &status, &content_type, &code, error);
-        if (!ok) {
-            char retry_error[sizeof(error->text)];
-            snprintf(retry_error, sizeof(retry_error), "%s", error->text);
-            set_error(error, "%s; IPv4 retry failed: %s", initial_error, retry_error);
+    /* ECCC occasionally closes a connection before returning HTTP headers.
+       Use bounded retries rather than failing a source change on one transient
+       edge/server event. All attempts use HTTP/1.1; retries use fresh IPv4
+       connections and short backoff. */
+    static const long resolve_modes[] = {
+        CURL_IPRESOLVE_WHATEVER, CURL_IPRESOLVE_V4, CURL_IPRESOLVE_V4
+    };
+    static const unsigned int retry_delays[] = {0, 1, 2};
+    bool ok = false;
+    int attempts = 0;
+    for (size_t attempt = 0; attempt < sizeof(resolve_modes) / sizeof(resolve_modes[0]); attempt++) {
+        if (attempt > 0) {
+            weather_response_reset(&response, &content_type);
+            status = 0;
+            code = CURLE_OK;
+            weather_retry_delay(retry_delays[attempt]);
         }
+        attempts = (int)attempt + 1;
+        ok = curl_request(url, NULL, timeout_seconds, user_agent, MAX_RESPONSE_BYTES,
+                          "https", CURL_HTTP_VERSION_1_1, resolve_modes[attempt],
+                          attempt > 0, &response, &status, &content_type, &code, error);
+        if (ok || !weather_transport_retryable(code)) break;
     }
     if (!ok) {
+        char final_error[sizeof(error->text)];
+        snprintf(final_error, sizeof(final_error), "%s", error->text);
+        if (attempts > 1)
+            set_error(error, "%s transport failed after %d attempts: %s",
+                      label, attempts, final_error);
         weather_response_reset(&response, &content_type);
         return NULL;
     }
     if (status < 200 || status >= 300) {
-        set_error(error, "GeoMet HTTP error %ld", status);
+        set_error(error, "%s HTTP error %ld", label, status);
         weather_response_reset(&response, &content_type);
         return NULL;
     }
     if (!content_type_is_json(content_type)) {
-        set_error(error, "unexpected GeoMet content type: %s", content_type ? content_type : "missing");
+        set_error(error, "unexpected %s content type: %s", label,
+                  content_type ? content_type : "missing");
         weather_response_reset(&response, &content_type);
         return NULL;
     }
@@ -715,7 +783,7 @@ static json_object *fetch_json(const char *url, int timeout_seconds, const char 
     free(response.data);
     if (!object || !json_object_is_type(object, json_type_object)) {
         if (object) json_object_put(object);
-        set_error(error, "GeoMet returned invalid JSON");
+        set_error(error, "%s returned invalid JSON", label);
         return NULL;
     }
     return object;
@@ -731,16 +799,16 @@ static json_object *normalize_forecast(json_object *item)
     add_text_if(output, "period", name);
 
     json_object *temperature = jdeep2(item, "temperatures", "temperature");
+    /* GeoMet citypage forecast periods wrap temperature in a one-element
+     * array: temperatures.temperature[0].  Keep object input compatible as
+     * well, but unwrap the published array shape before reading its fields. */
+    if (temperature && json_object_is_type(temperature, json_type_array)) {
+        temperature = json_object_array_length(temperature) > 0
+            ? json_object_array_get_idx(temperature, 0)
+            : NULL;
+    }
     json_object *temp_value = jget(temperature, "value");
     json_object *temp_class = jget(temperature, "class");
-    if (!temp_value) {
-        temp_value = jdeep2(item, "temperatures", "temp_high");
-        if (temp_value && !temp_class) json_object_object_add(output, "temperature_type", json_object_new_string("high"));
-    }
-    if (!temp_value) {
-        temp_value = jdeep2(item, "temperatures", "temp_low");
-        if (temp_value && !temp_class) json_object_object_add(output, "temperature_type", json_object_new_string("low"));
-    }
     add_number_if(output, "temperature_c", temp_value);
     char class_text[64];
     if (as_text(temp_class, class_text, sizeof(class_text))) {
@@ -757,6 +825,8 @@ static json_object *normalize_forecast(json_object *item)
     if (!condition) condition = jget(item, "cloudPrecip");
     if (!condition) condition = jget(item, "cloud_precip");
     add_text_if(output, "condition", condition);
+    json_object *authoritative_summary = jget(item, "textSummary");
+    add_rich_text_fields(output, condition, authoritative_summary, "citypageweather");
     json_object *icon_value = jget(icon, "value");
     add_int_if(output, "icon_code", icon_value ? icon_value : icon);
     add_text_if(output, "icon_url", jget(icon, "url"));
@@ -773,7 +843,11 @@ static json_object *normalize_hourly(json_object *item)
     json_object *output = json_object_new_object();
     add_text_if(output, "time", jget(item, "timestamp"));
     add_number_if(output, "temperature_c", jdeep2(item, "temperature", "value"));
-    add_text_if(output, "condition", jget(item, "condition"));
+    json_object *hourly_condition = jget(item, "condition");
+    add_text_if(output, "condition", hourly_condition);
+    json_object *hourly_detail = jget(item, "textSummary");
+    if (!hourly_detail) hourly_detail = jget(item, "summary");
+    add_rich_text_fields(output, hourly_condition, hourly_detail, "citypageweather");
     add_int_if(output, "icon_code", jdeep2(item, "iconCode", "value"));
     add_text_if(output, "icon_url", jdeep2(item, "iconCode", "url"));
     add_int_if(output, "precip_probability_percent", jdeep2(item, "lop", "value"));
@@ -791,14 +865,220 @@ static json_object *normalize_hourly(json_object *item)
 static json_object *normalize_warning(json_object *item)
 {
     json_object *output = json_object_new_object();
-    add_text_if(output, "type", jget(item, "type"));
-    add_text_if(output, "description", jget(item, "description"));
+    json_object *warning_type = jget(item, "type");
+    json_object *warning_description = jget(item, "description");
+    add_text_if(output, "type", warning_type);
+    add_text_if(output, "description", warning_description);
+    add_rich_text_fields(output, warning_description ? warning_description : warning_type, NULL, NULL);
     add_text_if(output, "priority", jget(item, "priority"));
     add_text_if(output, "colour", jget(item, "alertColourLevel"));
     add_text_if(output, "issued_at", jget(item, "eventIssue"));
     add_text_if(output, "expires_at", jget(item, "expiryTime"));
     add_text_if(output, "url", jget(item, "url"));
     return output;
+}
+
+static bool warning_event_id_from_url(json_object *warning, char *out, size_t out_size)
+{
+    if (!warning || !out || out_size == 0) return false;
+    out[0] = '\0';
+    char url[4096] = "";
+    if (!as_text(jget(warning, "url"), url, sizeof(url))) return false;
+    const char *fragment = strrchr(url, '#');
+    if (!fragment || !fragment[1]) return false;
+    fragment++;
+    size_t used = 0;
+    while (fragment[used] && isdigit((unsigned char)fragment[used]) && used + 1 < out_size)
+        used++;
+    if (used < 8) return false;
+    memcpy(out, fragment, used);
+    out[used] = '\0';
+    return true;
+}
+
+static bool warning_url_equal(json_object *a, json_object *b)
+{
+    char left[4096] = "";
+    char right[4096] = "";
+    return a && b &&
+           as_text(jget(a, "url"), left, sizeof(left)) &&
+           as_text(jget(b, "url"), right, sizeof(right)) &&
+           strcmp(left, right) == 0;
+}
+
+static void copy_warning_detail_fields(json_object *target, json_object *source)
+{
+    if (!target || !source) return;
+    static const char *keys[] = {
+        "detail", "authoritative_detail", "alert_name", "alert_short_name", "risk_colour",
+        "impact", "confidence", "feature_name", "detail_source"
+    };
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        json_object *value = jget(source, keys[i]);
+        if (value) json_object_object_add(target, keys[i], json_object_get(value));
+    }
+    if (!jget(target, "authoritative_detail")) {
+        json_object *legacy_detail = jget(source, "detail");
+        if (legacy_detail)
+            json_object_object_add(target, "authoritative_detail", json_object_get(legacy_detail));
+    }
+}
+
+static bool reuse_cached_warning_details(json_object *normalized, const char *cache_path)
+{
+    if (!normalized || !cache_path || !*cache_path) return false;
+    json_object *current = jget(normalized, "warnings");
+    if (!current || !json_object_is_type(current, json_type_array)) return false;
+    json_object *cached = read_json_file(cache_path);
+    if (!cached) return false;
+    json_object *old = jget(cached, "warnings");
+    bool copied = false;
+    if (old && json_object_is_type(old, json_type_array)) {
+        int current_count = json_object_array_length(current);
+        int old_count = json_object_array_length(old);
+        for (int i = 0; i < current_count; i++) {
+            json_object *warning = json_object_array_get_idx(current, i);
+            if (jget(warning, "detail")) continue;
+            for (int j = 0; j < old_count; j++) {
+                json_object *prior = json_object_array_get_idx(old, j);
+                if (!jget(prior, "detail") || !warning_url_equal(warning, prior)) continue;
+                copy_warning_detail_fields(warning, prior);
+                copied = true;
+                break;
+            }
+        }
+    }
+    json_object_put(cached);
+    return copied;
+}
+
+static bool alert_feature_matches_event(json_object *feature, const char *event_id)
+{
+    if (!feature || !event_id || !*event_id) return false;
+    char id[256] = "";
+    if (!as_text(jget(feature, "id"), id, sizeof(id))) return false;
+    size_t n = strlen(event_id);
+    return strncmp(id, event_id, n) == 0 && id[n] == '_';
+}
+
+static bool alert_feature_is_usable(json_object *feature, time_t now)
+{
+    json_object *properties = jget(feature, "properties");
+    if (!properties) return false;
+    char status[64] = "";
+    if (as_text(jget(properties, "status_en"), status, sizeof(status)) &&
+        strcasecmp(status, "ended") == 0)
+        return false;
+    char expires_text[128] = "";
+    time_t expires = 0;
+    if (as_text(jget(properties, "expiration_datetime"), expires_text, sizeof(expires_text)) &&
+        parse_iso8601(expires_text, &expires) && expires <= now)
+        return false;
+    return true;
+}
+
+static void enrich_warning_from_alert_feature(json_object *warning, json_object *feature)
+{
+    if (!warning || !feature) return;
+    json_object *properties = jget(feature, "properties");
+    if (!properties) return;
+    json_object *detail_object = jget(properties, "alert_text_en");
+    const char *detail = detail_object && json_object_is_type(detail_object, json_type_string)
+        ? json_object_get_string(detail_object) : NULL;
+    if (detail && *detail) {
+        json_object_object_add(warning, "detail", json_object_new_string(detail));
+        json_object_object_add(warning, "authoritative_detail", json_object_new_string(detail));
+    }
+    char text[512] = "";
+    if (as_text(jget(properties, "alert_name_en"), text, sizeof(text)))
+        json_object_object_add(warning, "alert_name", json_object_new_string(text));
+    if (as_text(jget(properties, "alert_short_name_en"), text, sizeof(text)))
+        json_object_object_add(warning, "alert_short_name", json_object_new_string(text));
+    if (as_text(jget(properties, "risk_colour_en"), text, sizeof(text)))
+        json_object_object_add(warning, "risk_colour", json_object_new_string(text));
+    if (as_text(jget(properties, "impact_en"), text, sizeof(text)))
+        json_object_object_add(warning, "impact", json_object_new_string(text));
+    if (as_text(jget(properties, "confidence_en"), text, sizeof(text)))
+        json_object_object_add(warning, "confidence", json_object_new_string(text));
+    if (as_text(jget(properties, "feature_name_en"), text, sizeof(text)))
+        json_object_object_add(warning, "feature_name", json_object_new_string(text));
+    json_object_object_add(warning, "detail_source",
+                           json_object_new_string("ECCC GeoMet Weather Alerts"));
+}
+
+static bool enrich_warning_details(json_object *normalized, time_t now,
+                                   int timeout_seconds, const char *user_agent,
+                                   const char *cache_path, struct error_info *error)
+{
+    json_object *warnings = jget(normalized, "warnings");
+    if (!warnings || !json_object_is_type(warnings, json_type_array) ||
+        json_object_array_length(warnings) == 0)
+        return true;
+
+    double latitude = 0.0, longitude = 0.0;
+    if (!as_number(jget(normalized, "latitude"), &latitude) ||
+        !as_number(jget(normalized, "longitude"), &longitude)) {
+        (void)reuse_cached_warning_details(normalized, cache_path);
+        set_error(error, "weather alert detail unavailable: source has no coordinates");
+        return false;
+    }
+
+    /* A small point-centred bbox is enough to select alert polygons affecting
+     * this city while keeping the Weather Alerts response compact. */
+    char url[1024];
+    double delta = 0.015;
+    if (snprintf(url, sizeof(url),
+                 "%s?f=json&bbox=%.6f,%.6f,%.6f,%.6f&limit=100",
+                 DEFAULT_WEATHER_ALERTS_URL,
+                 longitude - delta, latitude - delta,
+                 longitude + delta, latitude + delta) >= (int)sizeof(url)) {
+        (void)reuse_cached_warning_details(normalized, cache_path);
+        set_error(error, "weather alert detail URL is too long");
+        return false;
+    }
+
+    struct error_info fetch_error = {{0}};
+    json_object *collection = fetch_eccc_json(url, timeout_seconds, user_agent,
+                                               "Weather Alerts", &fetch_error);
+    if (!collection) {
+        (void)reuse_cached_warning_details(normalized, cache_path);
+        set_error(error, "%s", fetch_error.text);
+        return false;
+    }
+    json_object *features = jget(collection, "features");
+    if (!features || !json_object_is_type(features, json_type_array)) {
+        json_object_put(collection);
+        (void)reuse_cached_warning_details(normalized, cache_path);
+        set_error(error, "Weather Alerts returned no feature array");
+        return false;
+    }
+
+    int enriched = 0;
+    int warning_count = json_object_array_length(warnings);
+    int feature_count = json_object_array_length(features);
+    for (int i = 0; i < warning_count; i++) {
+        json_object *warning = json_object_array_get_idx(warnings, i);
+        char event_id[128] = "";
+        if (!warning_event_id_from_url(warning, event_id, sizeof(event_id))) continue;
+        for (int j = 0; j < feature_count; j++) {
+            json_object *feature = json_object_array_get_idx(features, j);
+            if (!alert_feature_matches_event(feature, event_id) ||
+                !alert_feature_is_usable(feature, now))
+                continue;
+            enrich_warning_from_alert_feature(warning, feature);
+            enriched++;
+            break;
+        }
+    }
+    json_object_put(collection);
+
+    if (enriched < warning_count)
+        (void)reuse_cached_warning_details(normalized, cache_path);
+    if (enriched == 0) {
+        set_error(error, "Weather Alerts did not contain matching active alert details");
+        return false;
+    }
+    return true;
 }
 
 static json_object *as_array_or_single(json_object *value)
@@ -834,6 +1114,7 @@ static json_object *normalize_weather(json_object *raw, const char *expected_loc
 
     json_object *output = json_object_new_object();
     json_object_object_add(output, "schema_version", json_object_new_int(1));
+    json_object_object_add(output, "text_model", json_object_new_string("summary-detail-v1"));
     json_object_object_add(output, "service_version", json_object_new_string(WEATHER_VERSION));
     json_object_object_add(output, "source", json_object_new_string("Environment and Climate Change Canada GeoMet"));
     json_object_object_add(output, "source_url", json_object_new_string(source_url));
@@ -842,6 +1123,20 @@ static json_object *normalize_weather(json_object *raw, const char *expected_loc
     if (as_text(jget(root, "name"), text, sizeof(text))) json_object_object_add(output, "location", json_object_new_string(text));
     else json_object_object_add(output, "location", json_object_new_string(expected_location_id));
     add_text_if(output, "region", jget(root, "region"));
+    json_object *geometry = jget(raw, "geometry");
+    json_object *coordinates = geometry ? jget(geometry, "coordinates") : NULL;
+    if (coordinates && json_object_is_type(coordinates, json_type_array) &&
+        json_object_array_length(coordinates) >= 2) {
+        double longitude = 0.0;
+        double latitude = 0.0;
+        if (as_number(json_object_array_get_idx(coordinates, 0), &longitude) &&
+            as_number(json_object_array_get_idx(coordinates, 1), &latitude) &&
+            longitude >= -180.0 && longitude <= 180.0 &&
+            latitude >= -90.0 && latitude <= 90.0) {
+            json_object_object_add(output, "longitude", json_object_new_double(longitude));
+            json_object_object_add(output, "latitude", json_object_new_double(latitude));
+        }
+    }
     char fetched_text[32];
     iso_z(fetched_at, fetched_text);
     json_object_object_add(output, "fetched_at", json_object_new_string(fetched_text));
@@ -869,7 +1164,11 @@ static json_object *normalize_weather(json_object *raw, const char *expected_loc
     json_object *current_out = json_object_new_object();
     add_text_if(current_out, "observed_at", jget(current, "timestamp"));
     add_number_if(current_out, "temperature_c", jdeep2(current, "temperature", "value"));
-    add_text_if(current_out, "condition", jget(current, "condition"));
+    json_object *current_condition = jget(current, "condition");
+    add_text_if(current_out, "condition", current_condition);
+    json_object *current_detail = jget(current, "textSummary");
+    if (!current_detail) current_detail = jget(current, "summary");
+    add_rich_text_fields(current_out, current_condition, current_detail, "citypageweather");
     add_int_if(current_out, "icon_code", jdeep2(current, "iconCode", "value"));
     add_text_if(current_out, "icon_url", jdeep2(current, "iconCode", "url"));
     add_number_if(current_out, "humidity_percent", jdeep2(current, "relativeHumidity", "value"));
@@ -949,6 +1248,30 @@ static bool timezone_is_valid(const char *name)
     struct stat st;
     return stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
+
+
+#ifndef WEATHER_TEST
+static bool system_timezone_name(char *output, size_t output_size)
+{
+    if (!output || output_size == 0) return false;
+    output[0] = '\0';
+    char resolved[PATH_MAX];
+    if (realpath("/etc/localtime", resolved)) {
+        static const char prefix[] = "/usr/share/zoneinfo/";
+        if (strncmp(resolved, prefix, sizeof(prefix) - 1) == 0) {
+            snprintf(output, output_size, "%s", resolved + sizeof(prefix) - 1);
+            return timezone_is_valid(output);
+        }
+    }
+    FILE *file = fopen("/etc/timezone", "r");
+    if (!file) return false;
+    bool ok = fgets(output, (int)output_size, file) != NULL;
+    fclose(file);
+    if (!ok) return false;
+    output[strcspn(output, "\r\n")] = '\0';
+    return timezone_is_valid(output);
+}
+#endif
 
 static time_t local_frame_target(time_t now,
                                  const struct mp_weather_frame_selection *selection,
@@ -1169,6 +1492,640 @@ static bool build_outside_slot(json_object *normalized, time_t now,
     return outside->temperature_available;
 }
 
+static bool period_matches_today_daytime(const char *period, const struct tm *local_now)
+{
+    if (!period || !*period || !local_now) return false;
+    if (strcasecmp(period, "Today") == 0) return true;
+
+    char weekday[32] = "";
+    char weekday_short[16] = "";
+    if (strftime(weekday, sizeof(weekday), "%A", local_now) > 0 &&
+        strcasecmp(period, weekday) == 0) return true;
+    if (strftime(weekday_short, sizeof(weekday_short), "%a", local_now) > 0 &&
+        strcasecmp(period, weekday_short) == 0) return true;
+    return false;
+}
+
+static bool period_matches_today_night(const char *period, const struct tm *local_now)
+{
+    if (!period || !*period || !local_now) return false;
+    if (strcasecmp(period, "Tonight") == 0) return true;
+
+    char weekday[32] = "";
+    if (strftime(weekday, sizeof(weekday), "%A", local_now) <= 0) return false;
+    char expected[48];
+    if (snprintf(expected, sizeof(expected), "%s night", weekday) >= (int)sizeof(expected))
+        return false;
+    return strcasecmp(period, expected) == 0;
+}
+
+static bool period_matches_weekday_daytime(const char *period,
+                                           const struct tm *local_day,
+                                           bool accept_tomorrow_alias)
+{
+    if (!period || !*period || !local_day) return false;
+    if (accept_tomorrow_alias && strcasecmp(period, "Tomorrow") == 0) return true;
+
+    char weekday[32] = "";
+    char weekday_short[16] = "";
+    if (strftime(weekday, sizeof(weekday), "%A", local_day) > 0 &&
+        strcasecmp(period, weekday) == 0) return true;
+    if (strftime(weekday_short, sizeof(weekday_short), "%a", local_day) > 0 &&
+        strcasecmp(period, weekday_short) == 0) return true;
+    return false;
+}
+
+static bool period_matches_weekday_night(const char *period,
+                                         const struct tm *local_day)
+{
+    if (!period || !*period || !local_day) return false;
+    char weekday[32] = "";
+    if (strftime(weekday, sizeof(weekday), "%A", local_day) <= 0) return false;
+    char expected[48];
+    if (snprintf(expected, sizeof(expected), "%s night", weekday) >=
+        (int)sizeof(expected)) return false;
+    return strcasecmp(period, expected) == 0;
+}
+
+static json_object *new_today_extremes_cache(const char *source_url)
+{
+    json_object *cache = json_object_new_object();
+    if (!cache) return NULL;
+    json_object_object_add(cache, "schema_version", json_object_new_int(3));
+    json_object_object_add(cache, "source_url", json_object_new_string(source_url));
+    json_object_object_add(cache, "days", json_object_new_object());
+    return cache;
+}
+
+static json_object *today_cache_day(json_object *cache, const char *date, bool create)
+{
+    if (!cache || !date || !*date) return NULL;
+    json_object *days = jget(cache, "days");
+    if (!days || !json_object_is_type(days, json_type_object)) return NULL;
+    json_object *day = jget(days, date);
+    if (day && json_object_is_type(day, json_type_object)) return day;
+    if (!create) return NULL;
+    day = json_object_new_object();
+    if (!day) return NULL;
+    json_object_object_add(days, date, day);
+    return day;
+}
+
+static void apply_cached_day(json_object *day, struct weather_slot *today,
+                             bool include_low)
+{
+    if (!day || !today || !json_object_is_type(day, json_type_object)) return;
+    double value = 0.0;
+    int hour = -1;
+    if (include_low && !today->low_temperature_available &&
+        as_number(jget(day, "low_temperature_c"), &value)) {
+        today->low_temperature_c = clamp_int((int)lround(value), -99, 99);
+        today->low_temperature_available = true;
+    }
+    if (!today->high_temperature_available &&
+        as_number(jget(day, "high_temperature_c"), &value)) {
+        today->high_temperature_c = clamp_int((int)lround(value), -99, 99);
+        today->high_temperature_available = true;
+    }
+    if (include_low && today->low_hour < 0 &&
+        as_int(jget(day, "low_hour"), &hour) && hour >= 0 && hour <= 23)
+        today->low_hour = hour;
+    if (today->high_hour < 0 &&
+        as_int(jget(day, "high_hour"), &hour) && hour >= 0 && hour <= 23)
+        today->high_hour = hour;
+}
+
+static void copy_cached_day(json_object *source_cache, json_object *target_cache,
+                            const char *date)
+{
+    if (!source_cache || !target_cache || !date || !*date) return;
+    json_object *source_day = today_cache_day(source_cache, date, false);
+    json_object *target_days = jget(target_cache, "days");
+    if (!source_day || !target_days) return;
+    json_object_object_add(target_days, date, json_object_get(source_day));
+}
+
+static json_object *load_today_extremes_cache(const char *path,
+                                              const char *date,
+                                              const char *next_date,
+                                              const char *source_url,
+                                              struct weather_slot *today)
+{
+    if (!path || !*path || !date || !*date || !next_date || !*next_date ||
+        !source_url || !*source_url || !today)
+        return NULL;
+
+    json_object *fresh = new_today_extremes_cache(source_url);
+    if (!fresh) return NULL;
+    json_object *cached = read_json_file(path);
+    if (!cached) return fresh;
+
+    int schema = 0;
+    char cached_source[4096] = "";
+    bool header_ok = as_int(jget(cached, "schema_version"), &schema) &&
+                     as_text(jget(cached, "source_url"), cached_source,
+                             sizeof(cached_source)) &&
+                     strcmp(cached_source, source_url) == 0;
+
+    if (header_ok && schema == 3) {
+        copy_cached_day(cached, fresh, date);
+        copy_cached_day(cached, fresh, next_date);
+        apply_cached_day(today_cache_day(fresh, date, false), today, true);
+    } else if (header_ok && (schema == 1 || schema == 2)) {
+        /* Schema 1/2 associated "Tonight" with the current date.  That low is
+           semantically unsafe after the calendar-day correction, so migrate
+           only the same-date high and its known occurrence hour. */
+        char cached_date[32] = "";
+        if (as_text(jget(cached, "date"), cached_date, sizeof(cached_date)) &&
+            strcmp(cached_date, date) == 0) {
+            double value = 0.0;
+            int hour = -1;
+            json_object *day = today_cache_day(fresh, date, true);
+            if (day && as_number(jget(cached, "high_temperature_c"), &value)) {
+                int rounded = clamp_int((int)lround(value), -99, 99);
+                json_object_object_add(day, "high_temperature_c",
+                                       json_object_new_int(rounded));
+                today->high_temperature_c = rounded;
+                today->high_temperature_available = true;
+            }
+            if (day && as_int(jget(cached, "high_hour"), &hour) &&
+                hour >= 0 && hour <= 23) {
+                json_object_object_add(day, "high_hour", json_object_new_int(hour));
+                today->high_hour = hour;
+            }
+        }
+    }
+    json_object_put(cached);
+    return fresh;
+}
+
+static void store_today_slot_in_cache(json_object *cache, const char *date,
+                                      const struct weather_slot *today)
+{
+    if (!cache || !date || !*date || !today) return;
+    json_object *day = today_cache_day(cache, date, true);
+    if (!day) return;
+    if (today->low_temperature_available)
+        json_object_object_add(day, "low_temperature_c",
+                               json_object_new_int(today->low_temperature_c));
+    if (today->high_temperature_available)
+        json_object_object_add(day, "high_temperature_c",
+                               json_object_new_int(today->high_temperature_c));
+    if (today->low_hour >= 0 && today->low_hour <= 23)
+        json_object_object_add(day, "low_hour", json_object_new_int(today->low_hour));
+    if (today->high_hour >= 0 && today->high_hour <= 23)
+        json_object_object_add(day, "high_hour", json_object_new_int(today->high_hour));
+}
+
+static void store_low_in_cache(json_object *cache, const char *date,
+                               int temperature_c, int hour)
+{
+    if (!cache || !date || !*date || hour < 0 || hour > 23) return;
+    json_object *day = today_cache_day(cache, date, true);
+    if (!day) return;
+    double existing_value = 0.0;
+    int existing_hour = -1;
+    if (as_number(jget(day, "low_temperature_c"), &existing_value)) {
+        int existing = clamp_int((int)lround(existing_value), -99, 99);
+        (void)as_int(jget(day, "low_hour"), &existing_hour);
+        if (existing < temperature_c ||
+            (existing == temperature_c && existing_hour >= 0 && existing_hour <= hour))
+            return;
+    }
+    json_object_object_add(day, "low_temperature_c",
+                           json_object_new_int(temperature_c));
+    json_object_object_add(day, "low_hour", json_object_new_int(hour));
+}
+
+static void apply_today_low_candidate(struct weather_slot *today,
+                                      int temperature_c, int hour)
+{
+    if (!today || hour < 0 || hour > 23) return;
+    if (!today->low_temperature_available || temperature_c < today->low_temperature_c ||
+        (temperature_c == today->low_temperature_c &&
+         (today->low_hour < 0 || hour < today->low_hour))) {
+        today->low_temperature_c = temperature_c;
+        today->low_temperature_available = true;
+        today->low_hour = hour;
+    }
+}
+
+static void write_today_extremes_cache(const char *path, json_object *cache)
+{
+    if (!path || !*path || !cache) return;
+    struct error_info ignored = {{0}};
+    (void)atomic_write_json(path, cache, &ignored);
+}
+
+static bool hourly_extreme_time(const struct hourly_candidate *candidates,
+                                int candidate_count, time_t start, time_t end,
+                                bool find_high, time_t *time_out,
+                                int *temperature_out)
+{
+    if (!candidates || candidate_count <= 0 || !time_out || !temperature_out ||
+        end <= start)
+        return false;
+
+    bool found = false;
+    double extreme = 0.0;
+    time_t extreme_time = 0;
+    for (int i = 0; i < candidate_count; i++) {
+        if (candidates[i].timestamp < start || candidates[i].timestamp >= end)
+            continue;
+        double temperature = 0.0;
+        if (!as_number(jget(candidates[i].entry, "temperature_c"), &temperature))
+            continue;
+        if (!found || (find_high ? temperature > extreme : temperature < extreme)) {
+            found = true;
+            extreme = temperature;
+            extreme_time = candidates[i].timestamp;
+        }
+    }
+    if (!found) return false;
+    *time_out = extreme_time;
+    *temperature_out = clamp_int((int)lround(extreme), -99, 99);
+    return true;
+}
+
+static bool local_day_bounds(const struct tm *local_now, time_t *start_out,
+                             time_t *next_out)
+{
+    if (!local_now || !start_out || !next_out) return false;
+    struct tm start_tm = *local_now;
+    start_tm.tm_hour = 0;
+    start_tm.tm_min = 0;
+    start_tm.tm_sec = 0;
+    start_tm.tm_isdst = -1;
+    time_t start = mktime(&start_tm);
+    struct tm next_tm = start_tm;
+    next_tm.tm_mday += 1;
+    next_tm.tm_isdst = -1;
+    time_t next = mktime(&next_tm);
+    if (start == (time_t)-1 || next == (time_t)-1 || next <= start) return false;
+    *start_out = start;
+    *next_out = next;
+    return true;
+}
+
+static bool date_for_timestamp(time_t timestamp, char output[16])
+{
+    struct tm local;
+    localtime_r(&timestamp, &local);
+    return strftime(output, 16, "%Y-%m-%d", &local) > 0;
+}
+
+struct observed_station_extreme {
+    char id[48];
+    char name[96];
+    double latitude;
+    double longitude;
+    double distance2;
+    int count;
+    int low_temperature_c;
+    int low_hour;
+    bool have_low;
+};
+
+static double observed_distance2(double latitude, double longitude,
+                                 double target_latitude, double target_longitude)
+{
+    double lat_scale = cos(target_latitude * (M_PI / 180.0));
+    double dy = latitude - target_latitude;
+    double dx = (longitude - target_longitude) * lat_scale;
+    return dx * dx + dy * dy;
+}
+
+static bool observed_feature_coordinates(json_object *feature,
+                                         double *latitude, double *longitude)
+{
+    if (!feature || !latitude || !longitude) return false;
+    json_object *geometry = jget(feature, "geometry");
+    json_object *coordinates = geometry ? jget(geometry, "coordinates") : NULL;
+    if (!coordinates || !json_object_is_type(coordinates, json_type_array) ||
+        json_object_array_length(coordinates) < 2)
+        return false;
+    double lat = 0.0;
+    double lon = 0.0;
+    if (!as_number(json_object_array_get_idx(coordinates, 0), &lon) ||
+        !as_number(json_object_array_get_idx(coordinates, 1), &lat))
+        return false;
+    if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) return false;
+    *latitude = lat;
+    *longitude = lon;
+    return true;
+}
+
+static bool observed_station_id(json_object *properties, char *output, size_t output_size)
+{
+    if (!properties || !output || output_size == 0) return false;
+    static const char *keys[] = {
+        "clim_id-value", "stn_id-value", "msc_id-value", "icao_stn_id-value", "id"
+    };
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        if (as_text(jget(properties, keys[i]), output, output_size) && output[0])
+            return true;
+    }
+    return false;
+}
+
+static bool observed_temperature_c(json_object *properties, double *temperature_out)
+{
+    if (!properties || !temperature_out ||
+        !as_number(jget(properties, "air_temp"), temperature_out))
+        return false;
+    char unit[32] = "";
+    if (as_text(jget(properties, "air_temp-uom"), unit, sizeof(unit)) && unit[0] &&
+        strcasecmp(unit, "Cel") != 0 && strcasecmp(unit, "degC") != 0 &&
+        strcasecmp(unit, "C") != 0 && strstr(unit, "Celsius") == NULL)
+        return false;
+    return true;
+}
+
+static bool parse_swob_observed_low(json_object *collection,
+                                    time_t day_start, time_t now,
+                                    double target_latitude,
+                                    double target_longitude,
+                                    int *temperature_out, int *hour_out,
+                                    char *station_out, size_t station_out_size,
+                                    char *station_id_out, size_t station_id_out_size,
+                                    double *distance_km_out)
+{
+    if (!collection || !temperature_out || !hour_out || now < day_start) return false;
+    json_object *features = jget(collection, "features");
+    if (!features || !json_object_is_type(features, json_type_array)) return false;
+
+    struct observed_station_extreme stations[64];
+    memset(stations, 0, sizeof(stations));
+    int station_count = 0;
+    int feature_count = json_object_array_length(features);
+    for (int i = 0; i < feature_count; i++) {
+        json_object *feature = json_object_array_get_idx(features, i);
+        json_object *properties = feature ? jget(feature, "properties") : NULL;
+        if (!properties || !json_object_is_type(properties, json_type_object)) continue;
+
+        char timestamp_text[128] = "";
+        if (!as_text(jget(properties, "date_tm-value"), timestamp_text,
+                     sizeof(timestamp_text)))
+            (void)as_text(jget(properties, "obs_date_tm"), timestamp_text,
+                          sizeof(timestamp_text));
+        time_t timestamp = 0;
+        if (!timestamp_text[0] || !parse_iso8601(timestamp_text, &timestamp) ||
+            timestamp < day_start || timestamp > now)
+            continue;
+
+        double temperature = 0.0;
+        if (!observed_temperature_c(properties, &temperature)) continue;
+
+        char station_id[48] = "";
+        if (!observed_station_id(properties, station_id, sizeof(station_id))) continue;
+
+        double latitude = 0.0;
+        double longitude = 0.0;
+        if (!observed_feature_coordinates(feature, &latitude, &longitude)) continue;
+
+        int station_index = -1;
+        for (int j = 0; j < station_count; j++) {
+            if (strcmp(stations[j].id, station_id) == 0) {
+                station_index = j;
+                break;
+            }
+        }
+        if (station_index < 0) {
+            if (station_count >= (int)(sizeof(stations) / sizeof(stations[0]))) continue;
+            station_index = station_count++;
+            snprintf(stations[station_index].id, sizeof(stations[station_index].id),
+                     "%s", station_id);
+            (void)as_text(jget(properties, "stn_nam-value"), stations[station_index].name,
+                          sizeof(stations[station_index].name));
+            stations[station_index].latitude = latitude;
+            stations[station_index].longitude = longitude;
+            stations[station_index].distance2 = observed_distance2(
+                latitude, longitude, target_latitude, target_longitude);
+            stations[station_index].low_hour = -1;
+        }
+
+        struct observed_station_extreme *station = &stations[station_index];
+        station->count++;
+        struct tm local_observation;
+        localtime_r(&timestamp, &local_observation);
+        int hour = local_observation.tm_hour;
+        int rounded = clamp_int((int)lround(temperature), -99, 99);
+        if (!station->have_low || rounded < station->low_temperature_c ||
+            (rounded == station->low_temperature_c && hour < station->low_hour)) {
+            station->low_temperature_c = rounded;
+            station->low_hour = hour;
+            station->have_low = true;
+        }
+    }
+
+    int best = -1;
+    for (int i = 0; i < station_count; i++) {
+        if (!stations[i].have_low || stations[i].count < 3) continue;
+        if (best < 0 || stations[i].distance2 < stations[best].distance2)
+            best = i;
+    }
+    if (best < 0) return false;
+
+    *temperature_out = stations[best].low_temperature_c;
+    *hour_out = stations[best].low_hour;
+    if (station_out && station_out_size)
+        snprintf(station_out, station_out_size, "%s",
+                 stations[best].name[0] ? stations[best].name : stations[best].id);
+    if (station_id_out && station_id_out_size)
+        snprintf(station_id_out, station_id_out_size, "%s", stations[best].id);
+    if (distance_km_out)
+        *distance_km_out = sqrt(stations[best].distance2) * 111.0;
+    return true;
+}
+
+static bool restore_timezone(const char *old_tz, bool had_old_tz)
+{
+    int rc = had_old_tz ? setenv("TZ", old_tz, 1) : unsetenv("TZ");
+    tzset();
+    return rc == 0;
+}
+
+static bool fetch_observed_today_low(json_object *normalized, time_t now,
+                                     const char *timezone_name,
+                                     int timeout_seconds, const char *user_agent,
+                                     struct error_info *error)
+{
+    if (!normalized || !timezone_name || !*timezone_name) return false;
+    double latitude = 0.0;
+    double longitude = 0.0;
+    if (!as_number(jget(normalized, "latitude"), &latitude) ||
+        !as_number(jget(normalized, "longitude"), &longitude)) {
+        set_error(error, "weather location has no coordinates for observed-low bootstrap");
+        return false;
+    }
+
+    const char *old_tz_env = getenv("TZ");
+    bool had_old_tz = old_tz_env != NULL;
+    char old_tz[256] = "";
+    if (old_tz_env) snprintf(old_tz, sizeof(old_tz), "%s", old_tz_env);
+    if (setenv("TZ", timezone_name, 1) < 0) {
+        set_error(error, "cannot select timezone for observed-low bootstrap");
+        return false;
+    }
+    tzset();
+
+    struct tm local_now;
+    localtime_r(&now, &local_now);
+    time_t day_start = 0;
+    time_t next_day = 0;
+    char local_date[16] = "";
+    bool have_bounds = local_day_bounds(&local_now, &day_start, &next_day) &&
+                       strftime(local_date, sizeof(local_date), "%Y-%m-%d", &local_now) > 0;
+    if (!have_bounds) {
+        (void)restore_timezone(old_tz, had_old_tz);
+        set_error(error, "cannot determine local day for observed-low bootstrap");
+        return false;
+    }
+
+    char start_text[32];
+    char now_text[32];
+    iso_z(day_start, start_text);
+    iso_z(now, now_text);
+
+    static const double radii[] = {0.35, 1.0};
+    for (size_t attempt = 0; attempt < sizeof(radii) / sizeof(radii[0]); attempt++) {
+        double radius = radii[attempt];
+        char url[2048];
+        int written = snprintf(
+            url, sizeof(url),
+            "%s?f=json&limit=1000&bbox=%.5f,%.5f,%.5f,%.5f&datetime=%s/%s",
+            DEFAULT_SWOB_REALTIME_URL,
+            longitude - radius, latitude - radius,
+            longitude + radius, latitude + radius,
+            start_text, now_text);
+        if (written < 0 || written >= (int)sizeof(url)) {
+            (void)restore_timezone(old_tz, had_old_tz);
+            set_error(error, "observed-low query URL is too long");
+            return false;
+        }
+
+        struct error_info fetch_error = {{0}};
+        json_object *observations = fetch_eccc_json(
+            url, timeout_seconds, user_agent, "ECCC SWOB observations", &fetch_error);
+        if (!observations) {
+            if (attempt + 1 == sizeof(radii) / sizeof(radii[0]))
+                set_error(error, "%s", fetch_error.text);
+            continue;
+        }
+
+        int temperature = 0;
+        int hour = -1;
+        char station[96] = "";
+        char station_id[48] = "";
+        double distance_km = 0.0;
+        bool found = parse_swob_observed_low(
+            observations, day_start, now, latitude, longitude,
+            &temperature, &hour, station, sizeof(station),
+            station_id, sizeof(station_id), &distance_km);
+        json_object_put(observations);
+        if (!found) continue;
+
+        json_object *observed = json_object_new_object();
+        if (!observed) {
+            (void)restore_timezone(old_tz, had_old_tz);
+            set_error(error, "out of memory while recording observed low");
+            return false;
+        }
+        json_object_object_add(observed, "date", json_object_new_string(local_date));
+        json_object_object_add(observed, "temperature_c", json_object_new_int(temperature));
+        json_object_object_add(observed, "hour", json_object_new_int(hour));
+        json_object_object_add(observed, "station", json_object_new_string(station));
+        json_object_object_add(observed, "station_id", json_object_new_string(station_id));
+        json_object_object_add(observed, "distance_km", json_object_new_double(distance_km));
+        json_object_object_add(observed, "source", json_object_new_string("ECCC SWOB real-time"));
+        json_object_object_add(normalized, "today_observed_low", observed);
+        (void)restore_timezone(old_tz, had_old_tz);
+        return true;
+    }
+
+    (void)restore_timezone(old_tz, had_old_tz);
+    set_error(error, "no nearby ECCC SWOB station has enough same-day observations");
+    return false;
+}
+
+static void derive_today_high_hour(const struct hourly_candidate *candidates,
+                                   int candidate_count,
+                                   const struct tm *now_local,
+                                   struct weather_slot *today)
+{
+    if (!now_local || !today || !today->high_temperature_available ||
+        today->high_hour >= 0)
+        return;
+    time_t day_start = 0;
+    time_t next_day = 0;
+    if (!local_day_bounds(now_local, &day_start, &next_day)) return;
+    time_t extreme_time = 0;
+    int hourly_temperature = 0;
+    if (hourly_extreme_time(candidates, candidate_count, day_start, next_day,
+                            true, &extreme_time, &hourly_temperature) &&
+        abs(hourly_temperature - today->high_temperature_c) <= 1) {
+        struct tm local;
+        localtime_r(&extreme_time, &local);
+        today->high_hour = local.tm_hour;
+    }
+}
+
+static bool night_low_occurrence(const struct hourly_candidate *candidates,
+                                 int candidate_count,
+                                 const struct tm *now_local,
+                                 int night_period_index,
+                                 int daytime_period_index,
+                                 int official_low,
+                                 time_t *occurrence_out,
+                                 int *hour_out)
+{
+    if (!candidates || candidate_count <= 0 || !now_local ||
+        night_period_index < 0 || !occurrence_out || !hour_out)
+        return false;
+
+    time_t day_start = 0;
+    time_t next_day = 0;
+    if (!local_day_bounds(now_local, &day_start, &next_day)) return false;
+
+    bool ongoing_night = daytime_period_index >= 0
+        ? night_period_index < daytime_period_index
+        : now_local->tm_hour < 12;
+
+    struct tm window_start_tm;
+    struct tm window_end_tm;
+    localtime_r(&day_start, &window_start_tm);
+    localtime_r(&day_start, &window_end_tm);
+    if (ongoing_night) {
+        window_start_tm.tm_mday -= 1;
+        window_start_tm.tm_hour = 18;
+        window_end_tm.tm_hour = 12;
+    } else {
+        window_start_tm.tm_hour = 18;
+        window_end_tm.tm_mday += 1;
+        window_end_tm.tm_hour = 12;
+    }
+    window_start_tm.tm_min = window_start_tm.tm_sec = 0;
+    window_end_tm.tm_min = window_end_tm.tm_sec = 0;
+    window_start_tm.tm_isdst = -1;
+    window_end_tm.tm_isdst = -1;
+    time_t window_start = mktime(&window_start_tm);
+    time_t window_end = mktime(&window_end_tm);
+    if (window_start == (time_t)-1 || window_end == (time_t)-1) return false;
+
+    time_t extreme_time = 0;
+    int hourly_temperature = 0;
+    if (!hourly_extreme_time(candidates, candidate_count, window_start, window_end,
+                             false, &extreme_time, &hourly_temperature) ||
+        abs(hourly_temperature - official_low) > 1)
+        return false;
+
+    struct tm local;
+    localtime_r(&extreme_time, &local);
+    *occurrence_out = extreme_time;
+    *hour_out = local.tm_hour;
+    return true;
+}
+
 static bool build_today_slot(json_object *normalized, time_t now,
                              const struct hourly_candidate *candidates,
                              int candidate_count, const char *timezone_name,
@@ -1177,8 +2134,10 @@ static bool build_today_slot(json_object *normalized, time_t now,
     memset(today, 0, sizeof(*today));
     today->kind = MP_WEATHER_SLOT_TODAY;
     today->icon_code = UNKNOWN_ICON_CODE;
-    today->low_hour = 0;
-    today->high_hour = 0;
+    /* ECCC daily H/L values remain authoritative. Hourly forecast samples are
+       used only to date and time each official extreme for the TODAY pane. */
+    today->low_hour = -1;
+    today->high_hour = -1;
     today->timestamp = now;
     snprintf(today->label, sizeof(today->label), "TODAY");
     snprintf(today->icon, sizeof(today->icon), "unknown");
@@ -1193,27 +2152,54 @@ static bool build_today_slot(json_object *normalized, time_t now,
 
     struct tm now_local;
     localtime_r(&now, &now_local);
+    char local_date[16] = "";
+    char next_date[16] = "";
+    (void)strftime(local_date, sizeof(local_date), "%Y-%m-%d", &now_local);
+    time_t day_start = 0;
+    time_t next_day = 0;
+    if (local_day_bounds(&now_local, &day_start, &next_day))
+        (void)date_for_timestamp(next_day, next_date);
+
+    char source_url[4096] = "";
+    bool have_source = as_text(jget(normalized, "source_url"), source_url,
+                               sizeof(source_url));
+    const char *extremes_path = env_value("MK_WEATHER_TODAY_EXTREMES",
+                                          DEFAULT_TODAY_EXTREMES_PATH);
+    json_object *extremes_cache = NULL;
+    if (have_source && local_date[0] && next_date[0])
+        extremes_cache = load_today_extremes_cache(extremes_path, local_date,
+                                                    next_date, source_url, today);
+
+    /* A fresh install/source change can occur after the morning low has fallen
+       out of the citypage hourly forecast.  In that one case, a nearby ECCC
+       SWOB station supplies the observed same-calendar-day minimum.  It is
+       a bootstrap candidate only: cached/forecast candidates are still
+       compared and the lower same-day value wins. */
+    json_object *observed_low = jget(normalized, "today_observed_low");
+    if (observed_low && json_object_is_type(observed_low, json_type_object)) {
+        char observed_date[16] = "";
+        double observed_temperature = 0.0;
+        int observed_hour = -1;
+        if (as_text(jget(observed_low, "date"), observed_date,
+                    sizeof(observed_date)) &&
+            strcmp(observed_date, local_date) == 0 &&
+            as_number(jget(observed_low, "temperature_c"), &observed_temperature) &&
+            as_int(jget(observed_low, "hour"), &observed_hour) &&
+            observed_hour >= 0 && observed_hour <= 23) {
+            apply_today_low_candidate(
+                today,
+                clamp_int((int)lround(observed_temperature), -99, 99),
+                observed_hour);
+        }
+    }
+
+    /* POP is a strict local-calendar-day aggregate.  Displayed H/L
+       temperatures are never calculated from these hourly values. */
     for (int i = 0; i < candidate_count; i++) {
         struct tm candidate_local;
         localtime_r(&candidates[i].timestamp, &candidate_local);
         if (candidate_local.tm_year != now_local.tm_year ||
             candidate_local.tm_yday != now_local.tm_yday) continue;
-
-        double temperature = 0.0;
-        if (as_number(jget(candidates[i].entry, "temperature_c"), &temperature)) {
-            int rounded = clamp_int((int)lround(temperature), -99, 99);
-            if (!today->low_temperature_available || rounded < today->low_temperature_c) {
-                today->low_temperature_c = rounded;
-                today->low_temperature_available = true;
-                today->low_hour = candidate_local.tm_hour;
-            }
-            if (!today->high_temperature_available || rounded > today->high_temperature_c) {
-                today->high_temperature_c = rounded;
-                today->high_temperature_available = true;
-                today->high_hour = candidate_local.tm_hour;
-            }
-        }
-
         int precipitation = clamp_int(
             rounded_json_int(jget(candidates[i].entry,
                                   "precip_probability_percent"), 0),
@@ -1222,20 +2208,76 @@ static bool build_today_slot(json_object *normalized, time_t now,
             today->precipitation_probability_percent = precipitation;
     }
 
-    json_object *current = jget(normalized, "current");
-    double current_temperature = 0.0;
-    if (as_number(jget(current, "temperature_c"), &current_temperature)) {
-        int rounded = clamp_int((int)lround(current_temperature), -99, 99);
-        if (!today->low_temperature_available || rounded < today->low_temperature_c) {
-            today->low_temperature_c = rounded;
-            today->low_temperature_available = true;
-            today->low_hour = now_local.tm_hour;
+    /* The daytime high belongs to the current local date.  A night-period low
+       is not assigned yet: its hourly occurrence determines whether that
+       official low belongs to today or tomorrow.  Forecast order distinguishes
+       an ongoing after-midnight "Tonight" period from the upcoming night. */
+    int daytime_period_index = -1;
+    int night_period_index = -1;
+    int official_night_low = 0;
+    bool have_official_night_low = false;
+    json_object *forecasts = jget(normalized, "forecast");
+    if (forecasts && json_object_is_type(forecasts, json_type_array)) {
+        int count = json_object_array_length(forecasts);
+        for (int i = 0; i < count; i++) {
+            json_object *entry = json_object_array_get_idx(forecasts, i);
+            char period[64] = "";
+            char type[32] = "";
+            double temperature = 0.0;
+            if (!as_text(jget(entry, "period"), period, sizeof(period)) ||
+                !as_text(jget(entry, "temperature_type"), type, sizeof(type)) ||
+                !as_number(jget(entry, "temperature_c"), &temperature)) continue;
+            int rounded = clamp_int((int)lround(temperature), -99, 99);
+            if (daytime_period_index < 0 && strcasecmp(type, "high") == 0 &&
+                period_matches_today_daytime(period, &now_local)) {
+                daytime_period_index = i;
+                if (!today->high_temperature_available ||
+                    today->high_temperature_c != rounded)
+                    today->high_hour = -1;
+                today->high_temperature_c = rounded;
+                today->high_temperature_available = true;
+            }
+            if (night_period_index < 0 && strcasecmp(type, "low") == 0 &&
+                period_matches_today_night(period, &now_local)) {
+                night_period_index = i;
+                official_night_low = rounded;
+                have_official_night_low = true;
+            }
         }
-        if (!today->high_temperature_available || rounded > today->high_temperature_c) {
-            today->high_temperature_c = rounded;
-            today->high_temperature_available = true;
-            today->high_hour = now_local.tm_hour;
+    }
+
+    derive_today_high_hour(candidates, candidate_count, &now_local, today);
+
+    if (have_official_night_low) {
+        time_t occurrence = 0;
+        int occurrence_hour = -1;
+        if (night_low_occurrence(candidates, candidate_count, &now_local,
+                                 night_period_index, daytime_period_index,
+                                 official_night_low, &occurrence,
+                                 &occurrence_hour)) {
+            char occurrence_date[16] = "";
+            if (date_for_timestamp(occurrence, occurrence_date)) {
+                if (strcmp(occurrence_date, local_date) == 0) {
+                    apply_today_low_candidate(today, official_night_low,
+                                              occurrence_hour);
+                }
+                if (extremes_cache &&
+                    (strcmp(occurrence_date, local_date) == 0 ||
+                     strcmp(occurrence_date, next_date) == 0)) {
+                    store_low_in_cache(extremes_cache, occurrence_date,
+                                       official_night_low, occurrence_hour);
+                }
+            }
         }
+    }
+
+    if (extremes_cache) {
+        /* The schema-3 cache keeps only today and tomorrow.  Tonight's low is
+           pre-positioned under tomorrow when its matched hourly minimum occurs
+           after midnight, so it becomes TODAY's low only after the date rolls. */
+        store_today_slot_in_cache(extremes_cache, local_date, today);
+        write_today_extremes_cache(extremes_path, extremes_cache);
+        json_object_put(extremes_cache);
     }
 
     if (old_tz) {
@@ -1249,10 +2291,194 @@ static bool build_today_slot(json_object *normalized, time_t now,
     return today->low_temperature_available || today->high_temperature_available;
 }
 
+static bool current_day_daily_forecast_available(json_object *normalized, time_t now,
+                                                 const char *timezone_name)
+{
+    if (!normalized || !timezone_name || !*timezone_name) return false;
+    const char *old_tz_env = getenv("TZ");
+    char *old_tz = old_tz_env ? strdup(old_tz_env) : NULL;
+    if (setenv("TZ", timezone_name, 1) < 0) {
+        free(old_tz);
+        return false;
+    }
+    tzset();
+
+    struct tm now_local;
+    localtime_r(&now, &now_local);
+    bool available = false;
+    json_object *forecasts = jget(normalized, "forecast");
+    if (forecasts && json_object_is_type(forecasts, json_type_array)) {
+        int count = json_object_array_length(forecasts);
+        for (int i = 0; i < count; i++) {
+            json_object *entry = json_object_array_get_idx(forecasts, i);
+            char period[64] = "";
+            char type[32] = "";
+            double temperature = 0.0;
+            if (!as_text(jget(entry, "period"), period, sizeof(period)) ||
+                !as_text(jget(entry, "temperature_type"), type, sizeof(type)) ||
+                !as_number(jget(entry, "temperature_c"), &temperature)) continue;
+            if (strcasecmp(type, "high") == 0 &&
+                period_matches_today_daytime(period, &now_local)) {
+                available = true;
+                break;
+            }
+        }
+    }
+
+    if (old_tz) {
+        setenv("TZ", old_tz, 1);
+        free(old_tz);
+    } else {
+        unsetenv("TZ");
+    }
+    tzset();
+    return available;
+}
+
+static bool build_tomorrow_slot(json_object *normalized, time_t now,
+                                const struct hourly_candidate *candidates,
+                                int candidate_count, const char *timezone_name,
+                                struct weather_slot *tomorrow)
+{
+    if (!normalized || !timezone_name || !*timezone_name || !tomorrow) return false;
+    memset(tomorrow, 0, sizeof(*tomorrow));
+    tomorrow->kind = MP_WEATHER_SLOT_TODAY;
+    tomorrow->icon_code = UNKNOWN_ICON_CODE;
+    tomorrow->low_hour = -1;
+    tomorrow->high_hour = -1;
+    snprintf(tomorrow->label, sizeof(tomorrow->label), "TMORROW");
+    snprintf(tomorrow->icon, sizeof(tomorrow->icon), "unknown");
+
+    const char *old_tz_env = getenv("TZ");
+    char *old_tz = old_tz_env ? strdup(old_tz_env) : NULL;
+    if (setenv("TZ", timezone_name, 1) < 0) {
+        free(old_tz);
+        return false;
+    }
+    tzset();
+
+    struct tm now_local;
+    localtime_r(&now, &now_local);
+    time_t day_start = 0;
+    time_t next_day = 0;
+    if (!local_day_bounds(&now_local, &day_start, &next_day)) goto cleanup;
+
+    struct tm target_local;
+    localtime_r(&next_day, &target_local);
+    time_t target_start = 0;
+    time_t day_after = 0;
+    if (!local_day_bounds(&target_local, &target_start, &day_after)) goto cleanup;
+    tomorrow->timestamp = target_start;
+
+    struct tm label_tm = target_local;
+    label_tm.tm_hour = 12;
+    label_tm.tm_min = 0;
+    label_tm.tm_sec = 0;
+    label_tm.tm_isdst = -1;
+    time_t label_time = mktime(&label_tm);
+    if (label_time == (time_t)-1) label_time = target_start;
+    future_date_label(label_time, now, timezone_name, tomorrow->date_label);
+
+    char target_date[16] = "";
+    char day_after_date[16] = "";
+    (void)date_for_timestamp(target_start, target_date);
+    (void)date_for_timestamp(day_after, day_after_date);
+
+    char source_url[4096] = "";
+    if (target_date[0] && day_after_date[0] &&
+        as_text(jget(normalized, "source_url"), source_url, sizeof(source_url))) {
+        const char *extremes_path = env_value("MK_WEATHER_TODAY_EXTREMES",
+                                              DEFAULT_TODAY_EXTREMES_PATH);
+        json_object *cache = load_today_extremes_cache(extremes_path, target_date,
+                                                       day_after_date, source_url,
+                                                       tomorrow);
+        if (cache) json_object_put(cache);
+    }
+
+    for (int i = 0; i < candidate_count; i++) {
+        if (candidates[i].timestamp < target_start ||
+            candidates[i].timestamp >= day_after) continue;
+        int precipitation = clamp_int(
+            rounded_json_int(jget(candidates[i].entry,
+                                  "precip_probability_percent"), 0),
+            0, 100);
+        if (precipitation > tomorrow->precipitation_probability_percent)
+            tomorrow->precipitation_probability_percent = precipitation;
+    }
+
+    json_object *forecasts = jget(normalized, "forecast");
+    int daytime_period_index = -1;
+    if (forecasts && json_object_is_type(forecasts, json_type_array)) {
+        int count = json_object_array_length(forecasts);
+        for (int i = 0; i < count; i++) {
+            json_object *entry = json_object_array_get_idx(forecasts, i);
+            char period[64] = "";
+            char type[32] = "";
+            double temperature = 0.0;
+            if (!as_text(jget(entry, "period"), period, sizeof(period)) ||
+                !as_text(jget(entry, "temperature_type"), type, sizeof(type)) ||
+                !as_number(jget(entry, "temperature_c"), &temperature)) continue;
+            if (strcasecmp(type, "high") == 0 && daytime_period_index < 0 &&
+                period_matches_weekday_daytime(period, &target_local, true)) {
+                daytime_period_index = i;
+                tomorrow->high_temperature_c =
+                    clamp_int((int)lround(temperature), -99, 99);
+                tomorrow->high_temperature_available = true;
+                tomorrow->high_hour = -1;
+            }
+        }
+
+        derive_today_high_hour(candidates, candidate_count, &target_local, tomorrow);
+
+        if (daytime_period_index >= 0) {
+            for (int i = 0; i < count; i++) {
+                json_object *entry = json_object_array_get_idx(forecasts, i);
+                char period[64] = "";
+                char type[32] = "";
+                double temperature = 0.0;
+                if (!as_text(jget(entry, "period"), period, sizeof(period)) ||
+                    !as_text(jget(entry, "temperature_type"), type, sizeof(type)) ||
+                    !as_number(jget(entry, "temperature_c"), &temperature) ||
+                    strcasecmp(type, "low") != 0) continue;
+
+                bool incoming_night = i < daytime_period_index &&
+                    period_matches_today_night(period, &now_local);
+                bool outgoing_night = i > daytime_period_index &&
+                    period_matches_weekday_night(period, &target_local);
+                if (!incoming_night && !outgoing_night) continue;
+
+                int official_low = clamp_int((int)lround(temperature), -99, 99);
+                time_t occurrence = 0;
+                int occurrence_hour = -1;
+                if (!night_low_occurrence(candidates, candidate_count, &target_local,
+                                          i, daytime_period_index, official_low,
+                                          &occurrence, &occurrence_hour)) continue;
+                char occurrence_date[16] = "";
+                if (date_for_timestamp(occurrence, occurrence_date) &&
+                    strcmp(occurrence_date, target_date) == 0) {
+                    apply_today_low_candidate(tomorrow, official_low,
+                                              occurrence_hour);
+                }
+            }
+        }
+    }
+
+cleanup:
+    if (old_tz) {
+        setenv("TZ", old_tz, 1);
+        free(old_tz);
+    } else {
+        unsetenv("TZ");
+    }
+    tzset();
+    return tomorrow->high_temperature_available || tomorrow->low_temperature_available;
+}
+
 static bool select_clock_slots(json_object *normalized, time_t now,
                                const struct mp_weather_frames_config *frames,
                                const char *timezone_name,
                                struct weather_slot slots[3],
+                               struct weather_slot *today_out,
                                struct error_info *error)
 {
     if (!timezone_is_valid(timezone_name)) {
@@ -1292,6 +2518,17 @@ static bool select_clock_slots(json_object *normalized, time_t now,
     build_today_slot(normalized, now, all_candidates, all_candidate_count,
                      timezone_name, &today);
 
+    struct weather_slot daily = today;
+    if (!current_day_daily_forecast_available(normalized, now, timezone_name)) {
+        struct weather_slot tomorrow;
+        if (build_tomorrow_slot(normalized, now, all_candidates,
+                                all_candidate_count, timezone_name, &tomorrow) &&
+            tomorrow.high_temperature_available) {
+            daily = tomorrow;
+        }
+    }
+    if (today_out) *today_out = daily;
+
     json_object *forecasts = jget(normalized, "forecast");
     int forecast_count = forecasts && json_object_is_type(forecasts, json_type_array)
         ? json_object_array_length(forecasts) : 0;
@@ -1312,7 +2549,7 @@ static bool select_clock_slots(json_object *normalized, time_t now,
             continue;
         }
         if (selection->mode == MP_WEATHER_FRAME_TODAY) {
-            slots[output_index] = today;
+            slots[output_index] = daily;
             continue;
         }
 
@@ -1474,6 +2711,43 @@ static bool load_sprite(const char *library_dir, int requested_code,
     free(data);
     *selected_code = code;
     return true;
+}
+
+static void snapshot_runtime_icons(const char *runtime_dir,
+                                   struct icon_runtime_backup *backup)
+{
+    if (!backup) return;
+    memset(backup, 0, sizeof(*backup));
+    for (int i = 0; i < 3; i++) {
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/slot%d.raw", runtime_dir, i);
+        unsigned char *data = NULL;
+        size_t length = 0;
+        struct error_info ignored = {{0}};
+        if (read_file(path, &data, &length, WEATHER_ICON_RAW_BYTES,
+                      &ignored, NULL) && weather_raw_is_valid(data, length)) {
+            memcpy(backup->raw[i], data, WEATHER_ICON_RAW_BYTES);
+            backup->present[i] = true;
+        }
+        free(data);
+    }
+}
+
+static void rollback_runtime_icons(const char *runtime_dir,
+                                   const struct icon_runtime_backup *backup)
+{
+    if (!backup) return;
+    for (int i = 0; i < 3; i++) {
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/slot%d.raw", runtime_dir, i);
+        if (backup->present[i]) {
+            struct error_info ignored = {{0}};
+            (void)atomic_write_bytes(path, backup->raw[i], WEATHER_ICON_RAW_BYTES,
+                                     0644, &ignored);
+        } else {
+            (void)unlink(path);
+        }
+    }
 }
 
 static bool prepare_icons(const struct weather_slot slots[3], const char *library_dir,
@@ -1654,6 +2928,89 @@ static void copy_warning_text(char *out, size_t out_size, const char *source)
     out[length] = '\0';
 }
 
+static bool warning_is_active(json_object *warning, time_t now)
+{
+    if (!warning || !json_object_is_type(warning, json_type_object) ||
+        warning_has_ended(warning))
+        return false;
+    char expires_text[128] = "";
+    time_t expires = 0;
+    if (as_text(jget(warning, "expires_at"), expires_text, sizeof(expires_text)) &&
+        parse_iso8601(expires_text, &expires) && expires <= now)
+        return false;
+    return true;
+}
+
+static const char *warning_detail_text(json_object *warning)
+{
+    json_object *detail = jget(warning, "authoritative_detail");
+    if (!detail) detail = jget(warning, "detail");
+    if (!detail || !json_object_is_type(detail, json_type_string)) return NULL;
+    const char *text = json_object_get_string(detail);
+    return text && *text ? text : NULL;
+}
+
+static bool next_warning_detail_chunk(const char *text, size_t *offset,
+                                      char out[MP_WEATHER_WARNING_TEXT_MAX])
+{
+    if (!text || !offset || !out) return false;
+    out[0] = '\0';
+    size_t length = strlen(text);
+    size_t pos = *offset;
+    while (pos < length && isspace((unsigned char)text[pos])) pos++;
+    if (pos >= length) {
+        *offset = pos;
+        return false;
+    }
+
+    /* Keep individual footer messages readable. Prefer a sentence boundary;
+     * if none fits, split at the last word boundary. */
+    const size_t limit = MP_WEATHER_WARNING_TEXT_MAX - 1;
+    size_t end = pos;
+    size_t last_space = 0;
+    size_t sentence_end = 0;
+    while (end < length && end - pos < limit) {
+        unsigned char ch = (unsigned char)text[end];
+        if (isspace(ch)) last_space = end;
+        if (ch == '.' || ch == '!' || ch == '?') sentence_end = end + 1;
+        end++;
+    }
+    if (end < length) {
+        size_t minimum_sentence = pos + limit / 3;
+        if (sentence_end >= minimum_sentence) end = sentence_end;
+        else if (last_space > pos) end = last_space;
+    }
+    if (end <= pos) end = pos + 1;
+
+    size_t used = 0;
+    bool pending_space = false;
+    for (size_t i = pos; i < end && used + 1 < MP_WEATHER_WARNING_TEXT_MAX; i++) {
+        unsigned char ch = (unsigned char)text[i];
+        if (isspace(ch)) {
+            pending_space = used > 0;
+            continue;
+        }
+        if (pending_space && used + 1 < MP_WEATHER_WARNING_TEXT_MAX)
+            out[used++] = ' ';
+        pending_space = false;
+        out[used++] = (char)toupper(ch);
+    }
+    while (used > 0 && out[used - 1] == ' ') used--;
+    out[used] = '\0';
+    *offset = end;
+    while (*offset < length && isspace((unsigned char)text[*offset])) (*offset)++;
+    return out[0] != '\0';
+}
+
+static bool warning_message_duplicate(
+    char out[MP_WEATHER_WARNING_SLOTS][MP_WEATHER_WARNING_TEXT_MAX],
+    int used, const char *message)
+{
+    for (int i = 0; i < used; i++)
+        if (strcasecmp(out[i], message) == 0) return true;
+    return false;
+}
+
 static int active_warning_descriptions(
     json_object *normalized,
     time_t now,
@@ -1665,32 +3022,43 @@ static int active_warning_descriptions(
     json_object *warnings = jget(normalized, "warnings");
     if (!warnings || !json_object_is_type(warnings, json_type_array)) return 0;
 
+    json_object *active[MP_WEATHER_WARNING_SLOTS] = {0};
+    size_t detail_offsets[MP_WEATHER_WARNING_SLOTS] = {0};
+    int active_count = 0;
     int used = 0;
     int count = json_object_array_length(warnings);
-    for (int i = 0; i < count && used < MP_WEATHER_WARNING_SLOTS; i++) {
+
+    /* Every active alert gets its heading first, regardless of the selected
+     * weather panel mode. This prevents one long statement from hiding a
+     * second, more urgent alert. */
+    for (int i = 0; i < count && active_count < MP_WEATHER_WARNING_SLOTS; i++) {
         json_object *warning = json_object_array_get_idx(warnings, i);
-        if (!warning || !json_object_is_type(warning, json_type_object)) continue;
-        if (warning_has_ended(warning)) continue;
+        if (!warning_is_active(warning, now)) continue;
 
-        char description[MP_WEATHER_WARNING_TEXT_MAX] = "";
-        if (!warning_display_description(warning, description, sizeof(description))) continue;
-
-        char expires_text[128] = "";
-        time_t expires = 0;
-        if (as_text(jget(warning, "expires_at"), expires_text, sizeof(expires_text)) &&
-            parse_iso8601(expires_text, &expires) && expires <= now) continue;
-
-        bool duplicate = false;
-        for (int j = 0; j < used; j++) {
-            if (strcasecmp(out[j], description) == 0) {
-                duplicate = true;
-                break;
-            }
+        char title[MP_WEATHER_WARNING_TEXT_MAX] = "";
+        if (!warning_display_description(warning, title, sizeof(title))) continue;
+        active[active_count++] = warning;
+        if (used < MP_WEATHER_WARNING_SLOTS &&
+            !warning_message_duplicate(out, used, title)) {
+            copy_warning_text(out[used], MP_WEATHER_WARNING_TEXT_MAX, title);
+            used++;
         }
-        if (duplicate) continue;
+    }
 
-        copy_warning_text(out[used], MP_WEATHER_WARNING_TEXT_MAX, description);
-        used++;
+    /* Then rotate authoritative Weather Alerts text in round-robin chunks.
+     * Three chunks per alert keeps the footer useful without allowing a very
+     * long bulletin to monopolize all display slots. */
+    for (int round = 0; round < WARNING_DETAIL_CHUNKS_PER_ALERT &&
+                        used < MP_WEATHER_WARNING_SLOTS; round++) {
+        for (int i = 0; i < active_count && used < MP_WEATHER_WARNING_SLOTS; i++) {
+            const char *detail = warning_detail_text(active[i]);
+            if (!detail) continue;
+            char chunk[MP_WEATHER_WARNING_TEXT_MAX] = "";
+            if (!next_warning_detail_chunk(detail, &detail_offsets[i], chunk)) continue;
+            if (warning_message_duplicate(out, used, chunk)) continue;
+            copy_warning_text(out[used], MP_WEATHER_WARNING_TEXT_MAX, chunk);
+            used++;
+        }
     }
     return used;
 }
@@ -1782,7 +3150,7 @@ static bool push_clock_weather(const char *api_url, json_object *normalized,
         snprintf(value, sizeof(value), "%d", slots[i].low_temperature_c);
         ok = ok && append_form_field(encoder, &form, &used, &capacity, key, value, error);
         snprintf(key, sizeof(key), "slot%d_low_hour", i);
-        snprintf(value, sizeof(value), "%d", slots[i].low_hour);
+        snprintf(value, sizeof(value), "%d", slots[i].low_hour >= 0 ? slots[i].low_hour : 24);
         ok = ok && append_form_field(encoder, &form, &used, &capacity, key, value, error);
         snprintf(key, sizeof(key), "slot%d_high_temperature_available", i);
         snprintf(value, sizeof(value), "%d", slots[i].high_temperature_available ? 1 : 0);
@@ -1791,7 +3159,7 @@ static bool push_clock_weather(const char *api_url, json_object *normalized,
         snprintf(value, sizeof(value), "%d", slots[i].high_temperature_c);
         ok = ok && append_form_field(encoder, &form, &used, &capacity, key, value, error);
         snprintf(key, sizeof(key), "slot%d_high_hour", i);
-        snprintf(value, sizeof(value), "%d", slots[i].high_hour);
+        snprintf(value, sizeof(value), "%d", slots[i].high_hour >= 0 ? slots[i].high_hour : 24);
         ok = ok && append_form_field(encoder, &form, &used, &capacity, key, value, error);
         snprintf(key, sizeof(key), "slot%d_precipitation_probability_percent", i);
         snprintf(value, sizeof(value), "%d", slots[i].precipitation_probability_percent);
@@ -1808,15 +3176,33 @@ static bool push_clock_weather(const char *api_url, json_object *normalized,
     struct memory_buffer response = {0};
     long status = 0;
     char *content_type = NULL;
-    ok = curl_request(api_url, form, timeout_seconds, user_agent,
-                      MAX_API_RESPONSE_BYTES, "http,https", 0, 0, false,
-                      &response, &status, &content_type, NULL, error);
+    CURLcode code = CURLE_OK;
+    int attempts = 0;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+            weather_response_reset(&response, &content_type);
+            status = 0;
+            code = CURLE_OK;
+            weather_retry_delay(1);
+        }
+        attempts = attempt + 1;
+        ok = curl_request(api_url, form, timeout_seconds, user_agent,
+                          MAX_API_RESPONSE_BYTES, "http,https", 0, 0,
+                          attempt > 0, &response, &status, &content_type,
+                          &code, error);
+        if (ok || !weather_transport_retryable(code)) break;
+    }
     free(form);
-    free(content_type);
     if (!ok) {
-        free(response.data);
+        char final_error[sizeof(error->text)];
+        snprintf(final_error, sizeof(final_error), "%s",
+                 error->text[0] ? error->text : "unknown transport error");
+        set_error(error, "clock API transport failed after %d attempt%s: %s",
+                  attempts, attempts == 1 ? "" : "s", final_error);
+        weather_response_reset(&response, &content_type);
         return false;
     }
+    free(content_type);
     if (status < 200 || status >= 300) {
         set_error(error, "clock API HTTP error %ld", status);
         free(response.data);
@@ -1844,89 +3230,136 @@ static bool push_clock_weather(const char *api_url, json_object *normalized,
     return true;
 }
 
-static bool weather_file_matches_source(const char *path, const char *source_url)
+static bool cached_weather_still_usable(json_object *cached, time_t now)
 {
-    if (!path || !source_url || !*source_url) return false;
-    json_object *document = read_json_file(path);
-    if (!document) return false;
-    char saved_source[4096] = "";
-    bool matches = as_text(jget(document, "source_url"), saved_source, sizeof(saved_source)) &&
-                   strcmp(saved_source, source_url) == 0;
-    json_object_put(document);
-    return matches;
-}
+    if (!cached) return false;
 
-static void clear_previous_source_artifacts(const char *output_path, const char *cache_path,
-                                            const char *icon_runtime_dir)
-{
-    if (output_path) (void)unlink(output_path);
-    if (cache_path) (void)unlink(cache_path);
-    if (!icon_runtime_dir || !*icon_runtime_dir) return;
-    for (int index = 0; index < 3; index++) {
-        char path[PATH_MAX];
-        int written = snprintf(path, sizeof(path), "%s/slot%d.raw", icon_runtime_dir, index);
-        if (written > 0 && (size_t)written < sizeof(path)) (void)unlink(path);
-    }
-}
-
-static void uppercase_location_id(const char *location_id, char *label, size_t label_size)
-{
-    if (!label || label_size == 0) return;
-    label[0] = '\0';
-    if (!location_id) return;
-    size_t used = 0;
-    while (*location_id && used + 1 < label_size) {
-        label[used++] = (char)toupper((unsigned char)*location_id++);
-    }
-    label[used] = '\0';
-}
-
-static bool push_source_pending(const char *api_url, const char *location_id,
-                                const char *frame_path, const char *timezone_name,
-                                int timeout_seconds, const char *user_agent,
-                                struct error_info *error)
-{
-    struct mp_weather_frames_config frames;
-    char frame_error[192];
-    if (mp_weather_frames_read_path(frame_path, &frames, frame_error, sizeof(frame_error)) != 0) {
-        mp_weather_frames_defaults(&frames);
-    }
-
-    char location[128];
-    uppercase_location_id(location_id, location, sizeof(location));
-    if (!location[0]) snprintf(location, sizeof(location), "WEATHER");
-
-    json_object *pending = json_object_new_object();
-    if (!pending) {
-        set_error(error, "out of memory while clearing previous weather source");
+    /* The last-good cache is a power-loss fallback, not a statement about the
+     * age of ECCC's source bulletin. Its lifetime therefore starts when this
+     * clock successfully fetched and saved it. Keep that rule fixed and simple:
+     * a saved payload may be restored for 24 hours. */
+    char timestamp_text[128] = "";
+    time_t fetched_at = 0;
+    if (!as_text(jget(cached, "fetched_at"), timestamp_text, sizeof(timestamp_text)) ||
+        !parse_iso8601(timestamp_text, &fetched_at))
         return false;
-    }
-    json_object_object_add(pending, "location", json_object_new_string(location));
-    json_object_object_add(pending, "current", json_object_new_object());
 
-    time_t now = time(NULL);
-    struct weather_slot slots[3];
-    bool ok = select_clock_slots(pending, now, &frames, timezone_name, slots, error) &&
-              push_clock_weather(api_url, pending, slots, now, timeout_seconds, user_agent, error);
-    json_object_put(pending);
-    return ok;
+    int64_t age = (int64_t)difftime(now, fetched_at);
+    if (age < 0) age = 0;
+    return age <= WEATHER_CACHE_RESTORE_SECONDS;
 }
 
-static bool restore_cache_if_needed(const char *cache_path, const char *output_path,
-                                    const char *source_url)
+static bool runtime_weather_publish_needed(const char *stamp_path, const char *core_socket_path)
 {
-    if (access(output_path, F_OK) == 0 || access(cache_path, R_OK) != 0) return false;
+    struct stat core_stat;
+    struct stat stamp_stat;
+    if (stat(core_socket_path, &core_stat) != 0) return true;
+    if (stat(stamp_path, &stamp_stat) != 0) return true;
+    if (stamp_stat.st_mtim.tv_sec != core_stat.st_mtim.tv_sec)
+        return stamp_stat.st_mtim.tv_sec < core_stat.st_mtim.tv_sec;
+    return stamp_stat.st_mtim.tv_nsec < core_stat.st_mtim.tv_nsec;
+}
+
+static bool mark_weather_published(const char *stamp_path, struct error_info *error)
+{
+    static const char marker[] = "core accepted weather\n";
+    return atomic_write_bytes(stamp_path, marker, sizeof(marker) - 1, 0644, error);
+}
+
+static bool push_cached_weather_until_core_ready(
+    const char *api_url, json_object *normalized, const struct weather_slot slots[3],
+    time_t now, int timeout_seconds, const char *user_agent,
+    struct error_info *error)
+{
+    struct error_info last = {{0}};
+    for (int attempt = 0; attempt < WEATHER_CACHE_PUSH_ATTEMPTS; attempt++) {
+        struct error_info local = {{0}};
+        if (push_clock_weather(api_url, normalized, slots, now, timeout_seconds,
+                               user_agent, &local))
+            return true;
+        last = local;
+        if (attempt + 1 < WEATHER_CACHE_PUSH_ATTEMPTS)
+            usleep((useconds_t)WEATHER_CACHE_PUSH_RETRY_MS * 1000u);
+    }
+    set_error(error, "cached weather could not reach core after %d attempts: %s",
+              WEATHER_CACHE_PUSH_ATTEMPTS,
+              last.text[0] ? last.text : "local API unavailable");
+    return false;
+}
+
+static bool restore_cached_weather_runtime(
+    const char *cache_path, const char *output_path, const char *source_url,
+    const char *frame_path, const char *timezone_name,
+    const char *icon_library_dir, const char *icon_runtime_dir,
+    const char *api_url, int api_timeout_seconds, const char *user_agent,
+    time_t now, struct error_info *error)
+{
+    if (access(cache_path, R_OK) != 0) return false;
+
     json_object *cached = read_json_file(cache_path);
     if (!cached) return false;
     int schema = 0;
     char cached_source[4096] = "";
-    bool valid = as_int(jget(cached, "schema_version"), &schema) && schema == 1 &&
-                 as_text(jget(cached, "source_url"), cached_source, sizeof(cached_source)) &&
-                 source_url && strcmp(cached_source, source_url) == 0;
-    struct error_info ignored = {{0}};
-    bool restored = valid && atomic_write_json(output_path, cached, &ignored);
+    bool valid =
+        as_int(jget(cached, "schema_version"), &schema) && schema == 1 &&
+        as_text(jget(cached, "source_url"), cached_source, sizeof(cached_source)) &&
+        source_url && strcmp(cached_source, source_url) == 0 &&
+        cached_weather_still_usable(cached, now);
+    if (!valid) {
+        json_object_put(cached);
+        return false;
+    }
+
+    struct mp_weather_frames_config frames;
+    char frame_error[192];
+    if (mp_weather_frames_read_path(frame_path, &frames, frame_error,
+                                    sizeof(frame_error)) != 0) {
+        set_error(error, "%s", frame_error);
+        json_object_put(cached);
+        return false;
+    }
+
+    struct weather_slot slots[3];
+    struct weather_slot daily_slot;
+    if (!select_clock_slots(cached, now, &frames, timezone_name, slots,
+                            &daily_slot, error)) {
+        json_object_put(cached);
+        return false;
+    }
+
+    struct icon_runtime_backup icon_backup;
+    snapshot_runtime_icons(icon_runtime_dir, &icon_backup);
+    struct icon_result icons;
+    if (!prepare_icons(slots, icon_library_dir, icon_runtime_dir, &icons, error)) {
+        rollback_runtime_icons(icon_runtime_dir, &icon_backup);
+        json_object_put(cached);
+        return false;
+    }
+    json_object_object_add(cached, "display_frame_settings",
+                           frame_config_json(&frames));
+    json_object_object_add(cached, "display_icons",
+                           icon_result_json(&icons, icon_runtime_dir));
+
+    /* Runtime JSON is diagnostic state, not proof that the core accepted the
+     * forecast. Publish through the API first. Only a successful core IPC
+     * acknowledgement creates the per-core publication stamp. */
+    if (!push_cached_weather_until_core_ready(
+            api_url, cached, slots, now, api_timeout_seconds, user_agent, error)) {
+        rollback_runtime_icons(icon_runtime_dir, &icon_backup);
+        json_object_put(cached);
+        return false;
+    }
+    if (!mark_weather_published(DEFAULT_PUBLISHED_STAMP_PATH, error)) {
+        json_object_put(cached);
+        return false;
+    }
+    if (!atomic_write_json(output_path, cached, error)) {
+        json_object_put(cached);
+        return false;
+    }
+
     json_object_put(cached);
-    return restored;
+    return true;
 }
 
 static json_object *clone_json(json_object *object)
@@ -2010,7 +3443,11 @@ int main(void)
     const char *api_env = getenv("MK_WEATHER_API_URL");
     const char *api_url = api_env ? api_env : DEFAULT_CLOCK_API_URL;
     const char *input_file = getenv("MK_WEATHER_INPUT_FILE");
-    const char *timezone_name = env_value("MK_WEATHER_TIMEZONE", DEFAULT_TIMEZONE);
+    const char *timezone_setting = env_value("MK_WEATHER_TIMEZONE", DEFAULT_TIMEZONE);
+    char system_timezone[PATH_MAX] = "";
+    const char *timezone_name = timezone_setting;
+    if (strcmp(timezone_setting, "system") == 0 && system_timezone_name(system_timezone, sizeof(system_timezone)))
+        timezone_name = system_timezone;
     const char *user_agent = env_value("MK_WEATHER_USER_AGENT", DEFAULT_USER_AGENT);
     time_t started = time(NULL);
     char source_url[4096] = "";
@@ -2021,13 +3458,15 @@ int main(void)
     bool curl_ready = false;
     json_object *raw = NULL;
     json_object *normalized = NULL;
+    bool startup_cache_restored = false;
+    bool primary_oled_pushed = false;
 
     if (!env_int("MK_WEATHER_TIMEOUT", 10, 1, 60, &timeout_seconds, &error) ||
         !env_int("MK_WEATHER_API_TIMEOUT", 5, 1, 30, &api_timeout_seconds, &error) ||
         !env_int("MK_WEATHER_FORECAST_PERIODS", 6, 0, 20, &forecast_limit, &error) ||
         !env_int("MK_WEATHER_HOURLY_PERIODS", 48, 0, 48, &hourly_limit, &error) ||
         !env_int("MK_WEATHER_STALE_AFTER", 5400, 60, 86400, &stale_after_seconds, &error) ||
-        !env_int("MK_WEATHER_EXPIRE_AFTER", 21600, 60, 604800, &expire_after_seconds, &error) ||
+        !env_int("MK_WEATHER_EXPIRE_AFTER", 86400, 60, 604800, &expire_after_seconds, &error) ||
         expire_after_seconds <= stale_after_seconds) {
         if (!*error.text) set_error(&error, "MK_WEATHER_EXPIRE_AFTER must exceed MK_WEATHER_STALE_AFTER");
         goto failure;
@@ -2039,13 +3478,27 @@ int main(void)
     }
     curl_ready = true;
 
-    if (!weather_file_matches_source(output_path, source_url)) {
-        clear_previous_source_artifacts(output_path, cache_path, icon_runtime_dir);
-        struct error_info pending_error = {{0}};
-        if (!push_source_pending(api_url, location_id, frame_path, timezone_name,
-                                 api_timeout_seconds, user_agent, &pending_error)) {
-            fprintf(stderr, "mk-piclock-weather: could not clear previous source display: %s\n",
-                    pending_error.text[0] ? pending_error.text : "unknown error");
+    /* /run is empty after a real power loss. Rehydrate a still-valid last-good
+     * snapshot before the first network fetch so the OLED does not sit on the
+     * core's built-in UNKNOWN/? weather tiles while Wi-Fi/DHCP/DNS comes up.
+     * Re-select slots for the current clock time, recreate runtime icon assets,
+     * and push the cached state through the normal API/core path. Fresh GeoMet
+     * data fetched below replaces this bootstrap state immediately when ready. */
+    bool core_needs_weather = runtime_weather_publish_needed(
+        DEFAULT_PUBLISHED_STAMP_PATH, DEFAULT_CORE_SOCKET_PATH);
+    if (!(input_file && *input_file) && core_needs_weather) {
+        struct error_info bootstrap_error = {{0}};
+        startup_cache_restored = restore_cached_weather_runtime(
+            cache_path, output_path, source_url, frame_path, timezone_name,
+            icon_library_dir, icon_runtime_dir, api_url, api_timeout_seconds,
+            user_agent, time(NULL), &bootstrap_error);
+        if (startup_cache_restored) {
+            fprintf(stderr,
+                    "mk-piclock-weather: restored last-good weather to OLED while awaiting fresh GeoMet data\n");
+        } else if (bootstrap_error.text[0]) {
+            fprintf(stderr,
+                    "mk-piclock-weather: startup cache bootstrap unavailable: %s\n",
+                    bootstrap_error.text);
         }
     }
 
@@ -2065,22 +3518,98 @@ int main(void)
                                    expire_after_seconds, now, &error);
     if (!normalized) goto failure;
 
+    /* Publish the primary City Page Weather result immediately. Alert-detail
+     * enrichment and the optional SWOB same-day-low bootstrap can each require
+     * additional network requests, so they must never hold a fresh OLED update
+     * hostage. Keep the persistent last-good cache untouched at this stage so
+     * alert enrichment can still reuse detail from the previous successful run.
+     * The final enriched snapshot below replaces both runtime JSON and cache. */
     struct mp_weather_frames_config frames;
     char frame_error[192];
     if (mp_weather_frames_read_path(frame_path, &frames, frame_error, sizeof(frame_error)) != 0) {
         set_error(&error, "%s", frame_error);
         goto failure;
     }
+    struct weather_slot primary_slots[3];
+    struct weather_slot primary_today_slot;
+    if (!select_clock_slots(normalized, now, &frames, timezone_name, primary_slots,
+                            &primary_today_slot, &error)) goto failure;
+    struct icon_runtime_backup primary_icon_backup;
+    snapshot_runtime_icons(icon_runtime_dir, &primary_icon_backup);
+    struct icon_result primary_icons;
+    if (!prepare_icons(primary_slots, icon_library_dir, icon_runtime_dir,
+                       &primary_icons, &error)) {
+        rollback_runtime_icons(icon_runtime_dir, &primary_icon_backup);
+        goto failure;
+    }
+    json_object_object_add(normalized, "display_frame_settings", frame_config_json(&frames));
+    json_object_object_add(normalized, "display_icons",
+                           icon_result_json(&primary_icons, icon_runtime_dir));
+    if (!push_clock_weather(api_url, normalized, primary_slots, now, api_timeout_seconds,
+                            user_agent, &error)) {
+        rollback_runtime_icons(icon_runtime_dir, &primary_icon_backup);
+        goto failure;
+    }
+    if (!mark_weather_published(DEFAULT_PUBLISHED_STAMP_PATH, &error) ||
+        !atomic_write_json(output_path, normalized, &error)) goto failure;
+    primary_oled_pushed = true;
+    fprintf(stderr,
+            "mk-piclock-weather: primary GeoMet weather pushed to OLED before optional enrichment\n");
+
+    /* City Page Weather advertises alert headings and event URLs but does not
+     * include the bulletin body. Enrich active records from ECCC's structured
+     * Weather Alerts collection. This is best-effort: the title remains usable
+     * if the detail feed is temporarily unavailable, and a matching detail from
+     * the previous last-good cache is reused when possible. */
+    if (!(input_file && *input_file)) {
+        struct error_info alert_error = {{0}};
+        if (!enrich_warning_details(normalized, now, timeout_seconds, user_agent,
+                                    cache_path, &alert_error)) {
+            fprintf(stderr, "mk-piclock-weather: alert detail enrichment unavailable: %s\n",
+                    alert_error.text);
+        }
+    }
+
     struct weather_slot slots[3];
-    if (!select_clock_slots(normalized, now, &frames, timezone_name, slots, &error)) goto failure;
+    struct weather_slot today_slot;
+    if (!select_clock_slots(normalized, now, &frames, timezone_name, slots,
+                            &today_slot, &error)) goto failure;
+
+    /* Normally schema-3 has already cached the same-day low, or the active
+       night forecast can date the official low.  If neither is available,
+       cold-start from nearby ECCC SWOB real-time observations and rebuild the slots
+       once.  Failure is non-fatal: an unavailable low is safer than a guessed
+       or next-day value. */
+    if (strcmp(today_slot.label, "TODAY") == 0 &&
+        !today_slot.low_temperature_available && !(input_file && *input_file)) {
+        struct error_info bootstrap_error = {{0}};
+        if (fetch_observed_today_low(normalized, now, timezone_name,
+                                     timeout_seconds, user_agent,
+                                     &bootstrap_error)) {
+            if (!select_clock_slots(normalized, now, &frames, timezone_name,
+                                    slots, &today_slot, &error)) goto failure;
+        } else {
+            fprintf(stderr, "mk-piclock-weather: observed-low bootstrap unavailable: %s\n",
+                    bootstrap_error.text);
+        }
+    }
+    struct icon_runtime_backup final_icon_backup;
+    snapshot_runtime_icons(icon_runtime_dir, &final_icon_backup);
     struct icon_result icons;
-    if (!prepare_icons(slots, icon_library_dir, icon_runtime_dir, &icons, &error)) goto failure;
+    if (!prepare_icons(slots, icon_library_dir, icon_runtime_dir, &icons, &error)) {
+        rollback_runtime_icons(icon_runtime_dir, &final_icon_backup);
+        goto failure;
+    }
     json_object_object_add(normalized, "display_frame_settings", frame_config_json(&frames));
     json_object_object_add(normalized, "display_icons", icon_result_json(&icons, icon_runtime_dir));
-    if (!atomic_write_json(cache_path, normalized, &error) ||
+    if (!push_clock_weather(api_url, normalized, slots, now, api_timeout_seconds,
+                            user_agent, &error)) {
+        rollback_runtime_icons(icon_runtime_dir, &final_icon_backup);
+        goto failure;
+    }
+    if (!mark_weather_published(DEFAULT_PUBLISHED_STAMP_PATH, &error) ||
         !atomic_write_json(output_path, normalized, &error) ||
-        !push_clock_weather(api_url, normalized, slots, now, api_timeout_seconds,
-                            user_agent, &error)) goto failure;
+        !atomic_write_json(cache_path, normalized, &error)) goto failure;
 
     char location[256] = "unknown", condition[256] = "unknown";
     as_text(jget(normalized, "location"), location, sizeof(location));
@@ -2114,7 +3643,8 @@ int main(void)
     json_object_object_add(entry, "condition", json_object_new_string(condition));
     json_object *updated = jget(normalized, "source_updated_at");
     if (updated) json_object_object_add(entry, "source_updated_at", json_object_get(updated));
-    json_object_object_add(entry, "cache_restored", json_object_new_boolean(false));
+    json_object_object_add(entry, "cache_restored", json_object_new_boolean(startup_cache_restored));
+    json_object_object_add(entry, "primary_oled_push", json_object_new_boolean(primary_oled_pushed));
     json_object_object_add(entry, "icon_count", json_object_new_int(icons.count));
     char icon_codes[16];
     snprintf(icon_codes, sizeof(icon_codes), "%02d,%02d,%02d", icons.codes[0], icons.codes[1], icons.codes[2]);
@@ -2134,7 +3664,15 @@ int main(void)
     return 0;
 
 failure: {
-        bool restored = restore_cache_if_needed(cache_path, output_path, source_url);
+        bool restored = startup_cache_restored;
+        if (!restored && *source_url && runtime_weather_publish_needed(
+                DEFAULT_PUBLISHED_STAMP_PATH, DEFAULT_CORE_SOCKET_PATH)) {
+            struct error_info restore_error = {{0}};
+            restored = restore_cached_weather_runtime(
+                cache_path, output_path, source_url, frame_path, timezone_name,
+                icon_library_dir, icon_runtime_dir, api_url, api_timeout_seconds,
+                user_agent, time(NULL), &restore_error);
+        }
         time_t finished = time(NULL);
         char message[640];
         snprintf(message, sizeof(message), "%s", *error.text ? error.text : "unknown weather service error");
@@ -2144,6 +3682,7 @@ failure: {
                                                  *location_id ? location_id : NULL,
                                                  output_path);
         json_object_object_add(entry, "cache_restored", json_object_new_boolean(restored));
+        json_object_object_add(entry, "primary_oled_push", json_object_new_boolean(primary_oled_pushed));
         safe_record_weather_run(status_path, activity_path, entry);
         json_object_put(entry);
         fprintf(stderr, "mk-piclock-weather: %s%s\n", message,

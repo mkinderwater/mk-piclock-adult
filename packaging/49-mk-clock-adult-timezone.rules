@@ -1,0 +1,8 @@
+// Allow only the dedicated mk-clock-adult API account to change the system timezone.
+// The API still validates the requested IANA timezone against zone1970.tab.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.timedate1.set-timezone" &&
+        subject.user == "mk-piclock-api") {
+        return polkit.Result.YES;
+    }
+});

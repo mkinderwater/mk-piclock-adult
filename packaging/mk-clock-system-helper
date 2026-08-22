@@ -1,0 +1,73 @@
+#!/bin/bash
+set -euo pipefail
+
+REQUEST=/run/mk-piclock/system-request
+NTP_DROPIN=/etc/systemd/timesyncd.conf.d/50-mk-clock-adult.conf
+
+hex_decode() {
+    local hex="$1" out="" byte
+    [[ "$hex" =~ ^([0-9A-Fa-f][0-9A-Fa-f])*$ ]] || return 1
+    while [ -n "$hex" ]; do
+        byte=${hex:0:2}
+        printf -v byte '\\x%s' "$byte"
+        printf -v byte '%b' "$byte"
+        out+="$byte"
+        hex=${hex:2}
+    done
+    printf '%s' "$out"
+}
+
+read_request() {
+    ACTION=""; VALUE_HEX=""
+    [ -r "$REQUEST" ] || { echo "system request is missing" >&2; return 1; }
+    while IFS='=' read -r key value; do
+        case "$key" in
+            action) ACTION=$value ;;
+            value_hex) VALUE_HEX=$value ;;
+        esac
+    done < "$REQUEST"
+    rm -f "$REQUEST"
+    [ -n "$ACTION" ] || { echo "system request action is missing" >&2; return 1; }
+}
+
+valid_hostname() {
+    local value="$1"
+    [ ${#value} -ge 1 ] && [ ${#value} -le 253 ] || return 1
+    [[ "$value" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || return 1
+    [[ "$value" != *..* ]] || return 1
+}
+
+valid_ntp() {
+    local value="$1"
+    [ ${#value} -le 253 ] || return 1
+    [ -z "$value" ] && return 0
+    [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]]
+}
+
+read_request
+VALUE=$(hex_decode "$VALUE_HEX")
+
+case "$ACTION" in
+    hostname)
+        valid_hostname "$VALUE" || { echo "invalid hostname" >&2; exit 2; }
+        /usr/bin/hostnamectl set-hostname "$VALUE"
+        ;;
+    ntp)
+        valid_ntp "$VALUE" || { echo "invalid NTP server" >&2; exit 2; }
+        if [ -z "$VALUE" ]; then
+            rm -f "$NTP_DROPIN"
+        else
+            install -d -m 0755 /etc/systemd/timesyncd.conf.d
+            tmp=$(mktemp)
+            printf '[Time]\nNTP=%s\n' "$VALUE" > "$tmp"
+            install -m 0644 "$tmp" "$NTP_DROPIN"
+            rm -f "$tmp"
+        fi
+        /usr/bin/timedatectl set-ntp true
+        /usr/bin/systemctl restart systemd-timesyncd.service
+        ;;
+    *)
+        echo "unsupported system action: $ACTION" >&2
+        exit 2
+        ;;
+esac

@@ -1,14 +1,14 @@
 [Unit]
 Description=Fetch ECCC GeoMet weather for mk-clock-adult
 Documentation=https://api.weather.gc.ca/collections/citypageweather-realtime
-Wants=network-online.target
-After=network-online.target mk-piclock-api.service
+After=mk-piclock-api.service mk-piclock-core.service
+Requires=mk-piclock-api.service mk-piclock-core.service
 
 [Service]
 Type=oneshot
 EnvironmentFile=-/etc/default/mk-piclock-weather
 ExecStart=/usr/local/lib/mk-piclock-weather/mk-piclock-weather
-TimeoutStartSec=60
+TimeoutStartSec=240
 UMask=0022
 
 # The process exits after each fetch. It runs as the same account used by the

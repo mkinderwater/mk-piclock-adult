@@ -21,7 +21,7 @@ rm -rf \
     /usr/local/lib/mk-piclock-weather \
     /usr/local/share/mk-piclock-weather \
     /run/mk-piclock/weather-icons
-rm -f /run/mk-piclock/weather.json
+rm -f /run/mk-piclock/weather.json /run/mk-piclock/weather-published.stamp
 
 systemctl daemon-reload
 systemctl reset-failed mk-piclock-weather.service 2>/dev/null || true

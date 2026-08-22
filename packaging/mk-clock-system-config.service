@@ -1,0 +1,13 @@
+[Unit]
+Description=mk-clock-adult privileged system configuration helper
+After=systemd-timesyncd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/mk-clock-system-helper
+User=root
+Group=root
+UMask=0077
+PrivateTmp=true
+ProtectHome=true
+NoNewPrivileges=true

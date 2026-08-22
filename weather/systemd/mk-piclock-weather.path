@@ -4,6 +4,7 @@ Description=Refresh mk-clock-adult weather when source or panel settings change
 [Path]
 PathChanged=/var/lib/mk-piclock-weather/weather-source.url
 PathChanged=/var/lib/mk-piclock-weather/weather-frames.conf
+PathChanged=/etc/localtime
 Unit=mk-piclock-weather.service
 
 [Install]

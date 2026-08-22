@@ -1,20 +1,57 @@
 #!/bin/sh
 set -eu
 
+BASE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+DEFER_START=0
+VALIDATE_ONLY=0
+SKIP_VALIDATION=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --defer-start) DEFER_START=1 ;;
+        --validate-only) VALIDATE_ONLY=1 ;;
+        --skip-validation) SKIP_VALIDATION=1 ;;
+        *) echo "Usage: ./install.sh [--defer-start] [--validate-only] [--skip-validation]" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+validate_payload() {
+    set -- "$BASE_DIR"/assets/oled-icons/[0-9][0-9].raw
+    [ "$#" -eq 49 ] || {
+        echo "Weather icon pack must contain exactly 49 RAW files; found $#." >&2
+        return 1
+    }
+    for icon in "$@"; do
+        [ "$(stat -c %s "$icon")" -eq 512 ] || {
+            echo "Invalid weather icon: $icon" >&2
+            return 1
+        }
+    done
+    for file in \
+        "$BASE_DIR/config/mk-piclock-weather.env" \
+        "$BASE_DIR/config/weather-source.url" \
+        "$BASE_DIR/config/weather-frames.conf" \
+        "$BASE_DIR/systemd/mk-piclock-weather.service" \
+        "$BASE_DIR/systemd/mk-piclock-weather.timer" \
+        "$BASE_DIR/systemd/mk-piclock-weather.path" \
+        "$BASE_DIR/systemd/mk-piclock-weather.tmpfiles" \
+        "$BASE_DIR/systemd/mk-piclock-api.service.d/weather-source.conf"; do
+        [ -r "$file" ] || { echo "Missing weather payload file: $file" >&2; return 1; }
+    done
+}
+
+if [ "$SKIP_VALIDATION" -eq 0 ]; then
+    validate_payload
+fi
+if [ "$VALIDATE_ONLY" -eq 1 ]; then
+    echo "OK      Weather payload validated"
+    exit 0
+fi
+
 if [ "$(id -u)" -ne 0 ]; then
     echo "Run from a root shell: ./install.sh" >&2
     exit 1
-fi
-
-BASE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-DEFER_START=0
-if [ "${1:-}" = "--defer-start" ]; then
-    DEFER_START=1
-    shift
-fi
-if [ "$#" -ne 0 ]; then
-    echo "Usage: ./install.sh [--defer-start]" >&2
-    exit 2
 fi
 
 BIN="$BASE_DIR/build/mk-piclock-weather"
@@ -32,20 +69,10 @@ getent group mk-piclock >/dev/null 2>&1 || {
     exit 1
 }
 
-set -- "$BASE_DIR"/assets/oled-icons/[0-9][0-9].raw
-[ "$#" -eq 49 ] || {
-    echo "Weather icon pack must contain exactly 49 RAW files; found $#." >&2
-    exit 1
-}
-for icon in "$@"; do
-    [ "$(stat -c %s "$icon")" -eq 512 ] || {
-        echo "Invalid weather icon: $icon" >&2
-        exit 1
-    }
-done
-
-systemctl stop mk-piclock-weather.path mk-piclock-weather.timer \
-    mk-piclock-weather.service 2>/dev/null || true
+if [ "$DEFER_START" -eq 0 ]; then
+    systemctl stop mk-piclock-weather.path mk-piclock-weather.timer \
+        mk-piclock-weather.service 2>/dev/null || true
+fi
 
 install -d -m 0755 /usr/local/lib/mk-piclock-weather
 install -m 0755 "$BIN" /usr/local/lib/mk-piclock-weather/mk-piclock-weather
@@ -97,9 +124,9 @@ install -m 0644 \
     /etc/systemd/system/mk-piclock-api.service.d/weather-source.conf
 
 systemd-tmpfiles --create /etc/tmpfiles.d/mk-piclock-weather.conf
-systemctl daemon-reload
 
 if [ "$DEFER_START" -eq 0 ]; then
+    systemctl daemon-reload
     systemctl try-restart mk-piclock-api.service
     systemctl enable --now mk-piclock-weather.path mk-piclock-weather.timer
     systemctl start mk-piclock-weather.service || true

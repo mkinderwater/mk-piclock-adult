@@ -1,0 +1,19 @@
+# Build and runtime dependencies for mk-clock-adult.
+# One package per line. install.sh and Makefile both consume this file.
+gcc
+make
+libc6-dev
+pkg-config
+ca-certificates
+tzdata
+fonts-dejavu-mono
+libgpiod-dev
+libfreetype-dev
+libasound2-dev
+libmpg123-dev
+libmicrohttpd-dev
+libmp3lame-dev
+libcurl4-openssl-dev
+libjson-c-dev
+polkitd
+systemd-timesyncd

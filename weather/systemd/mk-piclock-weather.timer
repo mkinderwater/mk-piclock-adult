@@ -1,11 +1,16 @@
 [Unit]
-Description=Refresh mk-clock-adult weather every 15 minutes
+Description=Refresh mk-clock-adult weather on boot, each quarter hour, and at 12:01
 
 [Timer]
-OnBootSec=45s
-OnUnitInactiveSec=15min
-AccuracySec=15s
-RandomizedDelaySec=20s
+OnBootSec=5s
+# Fixed wall-clock cadence. Noon :00 is intentionally replaced by 12:01 so
+# the rollover fetch cannot collide with a still-running 12:00 oneshot.
+OnCalendar=*-*-* 00..11,13..23:00,15,30,45:00
+OnCalendar=*-*-* 12:15,30,45:00
+# Explicit daily rollover refresh. Calendar timers use the system local timezone.
+OnCalendar=*-*-* 12:01:00
+AccuracySec=1s
+RandomizedDelaySec=0
 Persistent=true
 Unit=mk-piclock-weather.service
 
